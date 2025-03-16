@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::Once;
 use tower::util::ServiceExt;
 use tracing::{debug, info};
-use tracing_subscriber;
 use zumblezay::AppState;
 
 // Initialize logging once for all tests

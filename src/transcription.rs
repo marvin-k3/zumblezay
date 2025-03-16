@@ -241,7 +241,7 @@ async fn get_runpod_whisper_transcript(
 
     // Initial job submission
     let response = client
-        .post(&format!("https://api.runpod.ai/v2/{}/run", target))
+        .post(format!("https://api.runpod.ai/v2/{}/run", target))
         .header("Content-Type", "application/json")
         .header("Authorization", runpod_api_key)
         .json(&request)
