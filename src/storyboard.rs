@@ -172,8 +172,8 @@ async fn get_video_info(
     // Calculate duration and replace path prefix
     let duration = event_end - event_start;
     let modified_path = video_path.replace(
-        &state.video_path_original_prefix, 
-        &state.video_path_replacement_prefix
+        &state.video_path_original_prefix,
+        &state.video_path_replacement_prefix,
     );
 
     Ok((modified_path, duration))
@@ -260,7 +260,7 @@ async fn wait_for_storyboard(
     } else {
         // This should only happen if the generator encountered an error
         return Err(anyhow::anyhow!(
-            "Storyboard generation for event {} was signaled as complete but not found in cache", 
+            "Storyboard generation for event {} was signaled as complete but not found in cache",
             event_id
         ));
     }
@@ -389,14 +389,16 @@ mod storyboard_tests {
         INIT.call_once(|| {
             // Initialize the tracing subscriber only once
             let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env(),
+                )
                 .with_test_writer()
                 .finish();
-            
+
             // Set as global default
             tracing::subscriber::set_global_default(subscriber)
                 .expect("Failed to set tracing subscriber");
-            
+
             debug!("Test logging initialized");
         });
     }
@@ -466,19 +468,22 @@ mod storyboard_tests {
         info!("Setting up test environment...");
 
         // Create counters to track generation attempts and completions
-        let generation_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let generation_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        
+        let generation_attempts =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let generation_completions =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
         // Create a barrier to ensure all requests are in-flight before any completes
         let num_concurrent_requests = 5;
-        let barrier = Arc::new(tokio::sync::Barrier::new(num_concurrent_requests + 1)); // +1 for the test itself
-        
+        let barrier =
+            Arc::new(tokio::sync::Barrier::new(num_concurrent_requests + 1)); // +1 for the test itself
+
         info!("Inserting test record in database...");
         // Insert a test record in the database
         {
             let conn = state.zumblezay_db.get().unwrap();
             conn.execute(
-                "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) 
+                "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![
                     test_event_id,
@@ -492,7 +497,10 @@ mod storyboard_tests {
             ).unwrap();
         }
 
-        info!("Launching {} concurrent requests...", num_concurrent_requests);
+        info!(
+            "Launching {} concurrent requests...",
+            num_concurrent_requests
+        );
         // TEST: Launch multiple concurrent requests for the same storyboard
         let handles: Vec<_> = (0..num_concurrent_requests)
             .map(|i| {
@@ -501,10 +509,10 @@ mod storyboard_tests {
                 let attempts = generation_attempts.clone();
                 let completions = generation_completions.clone();
                 let barrier_clone = barrier.clone();
-                
+
                 tokio::spawn(async move {
                     debug!("[Request {}] Starting", i);
-                    
+
                     // Custom implementation of get_or_create_storyboard that tracks generation
                     let result = async {
                         // Check cache first
@@ -512,16 +520,16 @@ mod storyboard_tests {
                             debug!("[Request {}] Found in cache", i);
                             return Ok(data);
                         }
-                        
+
                         debug!("[Request {}] Not in cache, checking if in progress", i);
                         // Get coordination objects
                         let (notify, is_first) = check_or_register_in_progress(&state, &event_id).await;
-                        
+
                         debug!("[Request {}] Waiting at barrier (is_first={})", i, is_first);
                         // Wait at the barrier to ensure all requests are in-flight
                         barrier_clone.wait().await;
                         debug!("[Request {}] Passed barrier", i);
-                        
+
                         if !is_first {
                             debug!("[Request {}] Waiting for first request to complete", i);
                             // Wait for the first request to complete
@@ -529,7 +537,7 @@ mod storyboard_tests {
                             debug!("[Request {}] First request completed, got result", i);
                             return result;
                         }
-                        
+
                         debug!("[Request {}] I am the first request, doing extra safety check", i);
                         // Extra safety check
                         if let Some(data) = get_storyboard_data_from_cache(&state, &event_id).await? {
@@ -537,39 +545,39 @@ mod storyboard_tests {
                             cleanup_and_notify(&state, &event_id, &notify).await;
                             return Ok(data);
                         }
-                        
+
                         debug!("[Request {}] Generating storyboard...", i);
                         // Generate and cache
                         let result = async {
                             // Track generation attempt
                             let prev = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             debug!("[Request {}] Generation attempt #{}", i, prev + 1);
-                            
+
                             // Add a delay to simulate work and ensure other requests have time to wait
                             debug!("[Request {}] Sleeping to simulate work...", i);
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                            
+
                             // Generate the storyboard
                             debug!("[Request {}] Calling generate_storyboard_for_event...", i);
                             let (data, duration) = generate_storyboard_for_event(&state, &event_id).await?;
-                            
+
                             // Track generation completion
                             let prev = completions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             debug!("[Request {}] Generation completion #{}", i, prev + 1);
-                            
+
                             // Save to cache
                             debug!("[Request {}] Saving to cache...", i);
                             save_to_cache(&state, &event_id, &data, duration.as_millis()).await?;
-                            
+
                             Ok(data)
                         }.await;
-                        
+
                         // Clean up
                         debug!("[Request {}] Cleaning up and notifying waiters", i);
                         cleanup_and_notify(&state, &event_id, &notify).await;
                         result
                     }.await;
-                    
+
                     debug!("[Request {}] Completed", i);
                     assert!(
                         result.is_ok(),
@@ -584,7 +592,7 @@ mod storyboard_tests {
         // Wait at the barrier to ensure all requests are in-flight
         barrier.wait().await;
         info!("Main thread passed barrier, all requests are in-flight");
-        
+
         // Wait for all requests to complete
         info!("Waiting for all requests to complete...");
         let mut results = Vec::new();
@@ -598,11 +606,8 @@ mod storyboard_tests {
         // VERIFY: Check that all requests returned the same data
         let first_result = &results[0];
         for (i, result) in results.iter().enumerate().skip(1) {
-            assert!(
-                result.is_ok(),
-                "Request {} should have succeeded", i
-            );
-            
+            assert!(result.is_ok(), "Request {} should have succeeded", i);
+
             // Compare image data size (should be identical)
             assert_eq!(
                 result.as_ref().unwrap().image.len(),
@@ -612,7 +617,8 @@ mod storyboard_tests {
         }
 
         // VERIFY: Check that the storyboard was created and cached
-        let cache_result = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let cache_result =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(
             cache_result.is_ok(),
             "Should be able to retrieve from cache"
@@ -635,24 +641,29 @@ mod storyboard_tests {
 
             // If coalescing works, there should be exactly one entry
             assert_eq!(
-                count, 1, 
+                count, 1,
                 "There should be exactly one cache entry despite {} concurrent requests",
                 num_concurrent_requests
             );
         }
-        
+
         // VERIFY: Check that generation was only attempted once
-        let attempts = generation_attempts.load(std::sync::atomic::Ordering::SeqCst);
-        let completions = generation_completions.load(std::sync::atomic::Ordering::SeqCst);
-        
-        info!("Generation attempts: {}, completions: {}", attempts, completions);
-        
+        let attempts =
+            generation_attempts.load(std::sync::atomic::Ordering::SeqCst);
+        let completions =
+            generation_completions.load(std::sync::atomic::Ordering::SeqCst);
+
+        info!(
+            "Generation attempts: {}, completions: {}",
+            attempts, completions
+        );
+
         assert_eq!(
             attempts, 1,
             "Storyboard generation should only be attempted once, but was attempted {} times",
             attempts
         );
-        
+
         assert_eq!(
             completions, 1,
             "Storyboard generation should only complete once, but completed {} times",
@@ -663,13 +674,21 @@ mod storyboard_tests {
         // CLEANUP: Remove test data
         {
             let conn = state.zumblezay_db.get().unwrap();
-            conn.execute("DELETE FROM events WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM events WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
-        
+
         info!("Test completed successfully!");
     }
 
@@ -691,7 +710,7 @@ mod storyboard_tests {
         {
             let conn = state.zumblezay_db.get().unwrap();
             conn.execute(
-                "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) 
+                "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![
                     test_event_id,
@@ -707,42 +726,56 @@ mod storyboard_tests {
 
         // SCENARIO 1: First request (cache miss)
         info!("SCENARIO 1: Testing first request (cache miss)...");
-        
+
         // Verify the storyboard is not in cache
-        let cache_check = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let cache_check =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(cache_check.is_ok(), "Cache check should succeed");
-        assert!(cache_check.unwrap().is_none(), "Cache should be empty before first request");
-        
+        assert!(
+            cache_check.unwrap().is_none(),
+            "Cache should be empty before first request"
+        );
+
         // First request should generate the storyboard
         let start_time = std::time::Instant::now();
         let result1 = get_or_create_storyboard(&state, test_event_id).await;
         let first_request_duration = start_time.elapsed();
-        
+
         info!("First request took {:?}", first_request_duration);
         assert!(result1.is_ok(), "First request should succeed");
         let storyboard1 = result1.unwrap();
-        
+
         // Verify the storyboard data
-        assert!(!storyboard1.image.is_empty(), "Storyboard image should not be empty");
-        assert!(storyboard1.vtt.starts_with("WEBVTT\n\n"), "VTT should start with WEBVTT header");
-        
+        assert!(
+            !storyboard1.image.is_empty(),
+            "Storyboard image should not be empty"
+        );
+        assert!(
+            storyboard1.vtt.starts_with("WEBVTT\n\n"),
+            "VTT should start with WEBVTT header"
+        );
+
         // Verify it was saved to cache
-        let cache_check = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let cache_check =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(cache_check.is_ok(), "Cache check should succeed");
-        assert!(cache_check.unwrap().is_some(), "Cache should contain the storyboard after first request");
-        
+        assert!(
+            cache_check.unwrap().is_some(),
+            "Cache should contain the storyboard after first request"
+        );
+
         // SCENARIO 2: Second request (cache hit)
         info!("SCENARIO 2: Testing second request (cache hit)...");
-        
+
         // Second request should retrieve from cache (much faster)
         let start_time = std::time::Instant::now();
         let result2 = get_or_create_storyboard(&state, test_event_id).await;
         let second_request_duration = start_time.elapsed();
-        
+
         info!("Second request took {:?}", second_request_duration);
         assert!(result2.is_ok(), "Second request should succeed");
         let storyboard2 = result2.unwrap();
-        
+
         // Verify the data is the same
         assert_eq!(
             storyboard1.image.len(),
@@ -750,11 +783,10 @@ mod storyboard_tests {
             "Both requests should return the same image data size"
         );
         assert_eq!(
-            storyboard1.vtt,
-            storyboard2.vtt,
+            storyboard1.vtt, storyboard2.vtt,
             "Both requests should return the same VTT content"
         );
-        
+
         // Verify the second request was faster (cache hit vs generation)
         assert!(
             second_request_duration < first_request_duration / 2,
@@ -762,52 +794,58 @@ mod storyboard_tests {
             first_request_duration,
             second_request_duration
         );
-        
+
         // SCENARIO 3: Concurrent requests
         info!("SCENARIO 3: Testing concurrent requests...");
-        
+
         // Clear the cache to force regeneration
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
-            
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
+
             // Verify cache is empty
-            let cache_check = get_storyboard_data_from_cache(&state, test_event_id).await;
-            assert!(cache_check.unwrap().is_none(), "Cache should be empty after clearing");
+            let cache_check =
+                get_storyboard_data_from_cache(&state, test_event_id).await;
+            assert!(
+                cache_check.unwrap().is_none(),
+                "Cache should be empty after clearing"
+            );
         }
-        
+
         // Launch multiple concurrent requests
         let num_concurrent = 3;
         info!("Launching {} concurrent requests...", num_concurrent);
-        
+
         let handles: Vec<_> = (0..num_concurrent)
             .map(|i| {
                 let state = state.clone();
                 let event_id = test_event_id.to_string();
-                
+
                 tokio::spawn(async move {
                     debug!("[Request {}] Starting", i);
-                    let result = get_or_create_storyboard(&state, &event_id).await;
+                    let result =
+                        get_or_create_storyboard(&state, &event_id).await;
                     debug!("[Request {}] Completed", i);
                     result
                 })
             })
             .collect();
-        
+
         // Wait for all requests to complete
         let mut results = Vec::new();
         for handle in handles {
             results.push(handle.await.unwrap());
         }
-        
+
         // Verify all requests succeeded
         for (i, result) in results.iter().enumerate() {
-            assert!(
-                result.is_ok(),
-                "Concurrent request {} should succeed", i
-            );
+            assert!(result.is_ok(), "Concurrent request {} should succeed", i);
         }
-        
+
         // Verify only one cache entry was created
         {
             let conn = state.cache_db.get().unwrap();
@@ -818,25 +856,33 @@ mod storyboard_tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            
+
             assert_eq!(
                 count, 1,
                 "There should be exactly one cache entry despite {} concurrent requests",
                 num_concurrent
             );
         }
-        
+
         info!("Cleaning up test data...");
         // CLEANUP: Remove test data
         {
             let conn = state.zumblezay_db.get().unwrap();
-            conn.execute("DELETE FROM events WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM events WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
-        
+
         info!("End-to-end test completed successfully!");
     }
 
@@ -849,23 +895,26 @@ mod storyboard_tests {
         let app_state = crate::AppState::new_for_testing();
         let state = Arc::new(app_state);
         let test_event_id = "test_cache_retrieval";
-        
+
         info!("=== TEST: Storyboard Cache Retrieval ===");
         info!("Setting up test environment...");
 
         // SCENARIO 1: Empty cache should return None
         info!("SCENARIO 1: Testing empty cache...");
-        let result = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let result =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(result.is_ok(), "Cache check should succeed even when empty");
         assert!(result.unwrap().is_none(), "Empty cache should return None");
 
         // SCENARIO 2: Populated cache should return data
         info!("SCENARIO 2: Testing populated cache...");
-        
+
         // Create test data
         let test_image = vec![1, 2, 3, 4, 5]; // Simple test image data
-        let test_vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nTest VTT content".to_string();
-        
+        let test_vtt =
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nTest VTT content"
+                .to_string();
+
         // Insert directly into the cache database
         {
             let conn = state.cache_db.get().unwrap();
@@ -881,28 +930,38 @@ mod storyboard_tests {
                 ],
             ).unwrap();
         }
-        
+
         // Retrieve from cache
-        let result = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let result =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(result.is_ok(), "Cache retrieval should succeed");
-        
+
         let storyboard_data = result.unwrap();
-        assert!(storyboard_data.is_some(), "Cache should return data after insertion");
-        
+        assert!(
+            storyboard_data.is_some(),
+            "Cache should return data after insertion"
+        );
+
         let data = storyboard_data.unwrap();
-        assert_eq!(data.image, test_image, "Retrieved image should match inserted image");
-        assert_eq!(data.vtt, test_vtt, "Retrieved VTT should match inserted VTT");
-        
+        assert_eq!(
+            data.image, test_image,
+            "Retrieved image should match inserted image"
+        );
+        assert_eq!(
+            data.vtt, test_vtt,
+            "Retrieved VTT should match inserted VTT"
+        );
+
         // SCENARIO 3: Multiple entries should return the most recent
         info!("SCENARIO 3: Testing multiple entries (should return most recent)...");
-        
+
         // Insert a newer entry with different data
         let newer_test_image = vec![6, 7, 8, 9, 10]; // Different test image
         let newer_test_vtt = "WEBVTT\n\nNewer VTT content".to_string();
-        
+
         // Sleep briefly to ensure timestamp is different
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
+
         {
             let conn = state.cache_db.get().unwrap();
             conn.execute(
@@ -917,18 +976,22 @@ mod storyboard_tests {
                 ],
             ).unwrap();
         }
-        
+
         // Retrieve from cache again
-        let result = get_storyboard_data_from_cache(&state, test_event_id).await;
+        let result =
+            get_storyboard_data_from_cache(&state, test_event_id).await;
         assert!(result.is_ok(), "Cache retrieval should succeed");
-        
+
         let storyboard_data = result.unwrap();
         assert!(storyboard_data.is_some(), "Cache should return data");
-        
+
         let data = storyboard_data.unwrap();
-        assert_eq!(data.image, newer_test_image, "Should retrieve the newer image");
+        assert_eq!(
+            data.image, newer_test_image,
+            "Should retrieve the newer image"
+        );
         assert_eq!(data.vtt, newer_test_vtt, "Should retrieve the newer VTT");
-        
+
         // Verify we have two entries in the database
         {
             let conn = state.cache_db.get().unwrap();
@@ -939,17 +1002,21 @@ mod storyboard_tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            
+
             assert_eq!(count, 2, "There should be two cache entries");
         }
-        
+
         // CLEANUP: Remove test data
         info!("Cleaning up test data...");
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
-        
+
         info!("Cache retrieval test completed successfully!");
     }
 
@@ -962,31 +1029,34 @@ mod storyboard_tests {
         let app_state = crate::AppState::new_for_testing();
         let state = Arc::new(app_state);
         let test_event_id = "test_cache_save";
-        
+
         info!("=== TEST: Storyboard Cache Save ===");
         info!("Setting up test environment...");
 
         // Create test data
         let test_image = vec![10, 20, 30, 40, 50]; // Simple test image data
-        let test_vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nTest save to cache".to_string();
+        let test_vtt =
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nTest save to cache"
+                .to_string();
         let test_storyboard = StoryboardData {
             image: test_image.clone(),
             vtt: test_vtt.clone(),
         };
-        
+
         // SCENARIO 1: Save new entry
         info!("SCENARIO 1: Testing saving new entry...");
-        
+
         // Save to cache
         let result = save_to_cache(
             &state,
             test_event_id,
             &test_storyboard,
-            150 // Test duration in ms
-        ).await;
-        
+            150, // Test duration in ms
+        )
+        .await;
+
         assert!(result.is_ok(), "Saving to cache should succeed");
-        
+
         // Verify it was saved correctly
         {
             let conn = state.cache_db.get().unwrap();
@@ -1003,21 +1073,21 @@ mod storyboard_tests {
                     ))
                 }
             ).unwrap();
-            
+
             assert_eq!(row.0, test_event_id, "Event ID should match");
             assert_eq!(row.1, "v1", "Version should be v1");
             assert_eq!(row.2, 150, "Duration should match");
             assert_eq!(row.3, test_vtt, "VTT should match");
             assert_eq!(row.4, test_image, "Image data should match");
         }
-        
+
         // SCENARIO 2: Save another entry for the same event with a different version
         info!("SCENARIO 2: Testing saving another entry with different version...");
-        
+
         // Create different test data
         let test_image2 = vec![60, 70, 80, 90, 100]; // Different test image
         let test_vtt2 = "WEBVTT\n\nSecond entry test".to_string();
-        
+
         // Modify the save_to_cache function to use a different version
         let conn = state.cache_db.get().unwrap();
         let result = conn.execute(
@@ -1031,9 +1101,12 @@ mod storyboard_tests {
                 test_image2.clone()
             ],
         );
-        
-        assert!(result.is_ok(), "Saving second entry with different version should succeed");
-        
+
+        assert!(
+            result.is_ok(),
+            "Saving second entry with different version should succeed"
+        );
+
         // Verify we now have two entries
         {
             let conn = state.cache_db.get().unwrap();
@@ -1044,9 +1117,12 @@ mod storyboard_tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            
-            assert_eq!(count, 2, "There should be two cache entries after second save");
-            
+
+            assert_eq!(
+                count, 2,
+                "There should be two cache entries after second save"
+            );
+
             // Verify the entry with version v2 has the correct data
             let row = conn.query_row(
                 "SELECT image, vtt, generation_duration_ms FROM storyboard_cache WHERE event_id = ? AND version = 'v2'",
@@ -1059,19 +1135,32 @@ mod storyboard_tests {
                     ))
                 }
             ).unwrap();
-            
-            assert_eq!(row.0, test_image2, "Version v2 image should match second image");
-            assert_eq!(row.1, test_vtt2, "Version v2 VTT should match second VTT");
-            assert_eq!(row.2, 75, "Version v2 duration should match second duration");
+
+            assert_eq!(
+                row.0, test_image2,
+                "Version v2 image should match second image"
+            );
+            assert_eq!(
+                row.1, test_vtt2,
+                "Version v2 VTT should match second VTT"
+            );
+            assert_eq!(
+                row.2, 75,
+                "Version v2 duration should match second duration"
+            );
         }
-        
+
         // CLEANUP: Remove test data
         info!("Cleaning up test data...");
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
-        
+
         info!("Cache save test completed successfully!");
     }
 
@@ -1084,60 +1173,82 @@ mod storyboard_tests {
         let app_state = crate::AppState::new_for_testing();
         let state = Arc::new(app_state);
         let test_event_id = "test_in_progress";
-        
+
         info!("=== TEST: Check or Register In Progress ===");
-        
+
         // SCENARIO 1: First request should register as in progress
         info!("SCENARIO 1: Testing first request registration...");
-        
-        let (notify1, is_first1) = check_or_register_in_progress(&state, test_event_id).await;
-        
+
+        let (notify1, is_first1) =
+            check_or_register_in_progress(&state, test_event_id).await;
+
         assert!(is_first1, "First request should be identified as first");
-        
+
         // Verify entry exists in the map
         {
             let in_progress = state.in_progress_storyboards.lock().await;
-            assert!(in_progress.contains_key(test_event_id), "Event should be registered as in progress");
+            assert!(
+                in_progress.contains_key(test_event_id),
+                "Event should be registered as in progress"
+            );
         }
-        
+
         // SCENARIO 2: Second request should detect in progress
         info!("SCENARIO 2: Testing second request detection...");
-        
-        let (_notify2, is_first2) = check_or_register_in_progress(&state, test_event_id).await;
-        
-        assert!(!is_first2, "Second request should not be identified as first");
-        
+
+        let (_notify2, is_first2) =
+            check_or_register_in_progress(&state, test_event_id).await;
+
+        assert!(
+            !is_first2,
+            "Second request should not be identified as first"
+        );
+
         // SCENARIO 3: Different event ID should be treated as first
         info!("SCENARIO 3: Testing different event ID...");
-        
+
         let different_event_id = "different_test_id";
-        let (notify3, is_first3) = check_or_register_in_progress(&state, different_event_id).await;
-        
-        assert!(is_first3, "Request for different event should be identified as first");
-        
+        let (notify3, is_first3) =
+            check_or_register_in_progress(&state, different_event_id).await;
+
+        assert!(
+            is_first3,
+            "Request for different event should be identified as first"
+        );
+
         // SCENARIO 4: After cleanup, new request should be first again
         info!("SCENARIO 4: Testing after cleanup...");
-        
+
         // Clean up the first event
         cleanup_and_notify(&state, test_event_id, &notify1).await;
-        
+
         // Check the map
         {
             let in_progress = state.in_progress_storyboards.lock().await;
-            assert!(!in_progress.contains_key(test_event_id), "First event should be removed after cleanup");
-            assert!(in_progress.contains_key(different_event_id), "Different event should still be registered");
+            assert!(
+                !in_progress.contains_key(test_event_id),
+                "First event should be removed after cleanup"
+            );
+            assert!(
+                in_progress.contains_key(different_event_id),
+                "Different event should still be registered"
+            );
         }
-        
+
         // Try registering the first event again
-        let (notify4, is_first4) = check_or_register_in_progress(&state, test_event_id).await;
-        
-        assert!(is_first4, "After cleanup, new request should be identified as first");
-        
+        let (notify4, is_first4) =
+            check_or_register_in_progress(&state, test_event_id).await;
+
+        assert!(
+            is_first4,
+            "After cleanup, new request should be identified as first"
+        );
+
         // Clean up all test data
         info!("Cleaning up test data...");
         cleanup_and_notify(&state, test_event_id, &notify4).await;
         cleanup_and_notify(&state, different_event_id, &notify3).await;
-        
+
         info!("In-progress registration test completed successfully!");
     }
 
@@ -1150,40 +1261,41 @@ mod storyboard_tests {
         let app_state = crate::AppState::new_for_testing();
         let state = Arc::new(app_state);
         let test_event_id = "test_wait_notify";
-        
+
         info!("=== TEST: Wait and Notify Mechanism ===");
         info!("Setting up test environment...");
-        
+
         // Create a notify object
         let notify = Arc::new(tokio::sync::Notify::new());
-        
+
         // Register the event as in progress
         {
             let mut in_progress = state.in_progress_storyboards.lock().await;
             in_progress.insert(test_event_id.to_string(), notify.clone());
         }
-        
+
         // SCENARIO 1: wait_for_storyboard should wait until notified and then check cache
         info!("SCENARIO 1: Testing wait mechanism...");
-        
+
         // Create test data for the cache
         let test_image = vec![1, 2, 3, 4, 5];
         let test_vtt = "WEBVTT\n\nTest wait mechanism".to_string();
-        
+
         // Spawn a task that will wait for the storyboard
         let state_clone = state.clone();
         let event_id_clone = test_event_id.to_string();
         let notify_clone = notify.clone();
-        
+
         let wait_handle = tokio::spawn(async move {
             // This should block until notified
-            
-            wait_for_storyboard(&state_clone, &event_id_clone, &notify_clone).await
+
+            wait_for_storyboard(&state_clone, &event_id_clone, &notify_clone)
+                .await
         });
-        
+
         // Wait a bit to ensure the task is waiting
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        
+
         // Now insert data into the cache
         {
             let conn = state.cache_db.get().unwrap();
@@ -1199,60 +1311,71 @@ mod storyboard_tests {
                 ],
             ).unwrap();
         }
-        
+
         // Notify waiters
         info!("Notifying waiters...");
         cleanup_and_notify(&state, test_event_id, &notify).await;
-        
+
         // Wait for the task to complete
         let wait_result = wait_handle.await.unwrap();
-        
+
         // Verify the result
-        assert!(wait_result.is_ok(), "wait_for_storyboard should succeed after notification");
+        assert!(
+            wait_result.is_ok(),
+            "wait_for_storyboard should succeed after notification"
+        );
         let storyboard_data = wait_result.unwrap();
-        assert_eq!(storyboard_data.image, test_image, "Retrieved image should match");
+        assert_eq!(
+            storyboard_data.image, test_image,
+            "Retrieved image should match"
+        );
         assert_eq!(storyboard_data.vtt, test_vtt, "Retrieved VTT should match");
-        
+
         // SCENARIO 2: wait_for_storyboard should fail if cache is empty after notification
         info!("SCENARIO 2: Testing wait with empty cache...");
-        
+
         // Register the event as in progress again
         let notify2 = Arc::new(tokio::sync::Notify::new());
         {
             let mut in_progress = state.in_progress_storyboards.lock().await;
             in_progress.insert(test_event_id.to_string(), notify2.clone());
         }
-        
+
         // Clear the cache
         {
             let conn = state.cache_db.get().unwrap();
-            conn.execute("DELETE FROM storyboard_cache WHERE event_id = ?", params![test_event_id]).unwrap();
+            conn.execute(
+                "DELETE FROM storyboard_cache WHERE event_id = ?",
+                params![test_event_id],
+            )
+            .unwrap();
         }
-        
+
         // Spawn a task that will wait for the storyboard
         let state_clone = state.clone();
         let event_id_clone = test_event_id.to_string();
         let notify_clone = notify2.clone();
-        
+
         let wait_handle = tokio::spawn(async move {
             // This should block until notified
-            
-            wait_for_storyboard(&state_clone, &event_id_clone, &notify_clone).await
+
+            wait_for_storyboard(&state_clone, &event_id_clone, &notify_clone)
+                .await
         });
-        
+
         // Wait a bit to ensure the task is waiting
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        
+
         // Notify waiters without adding to cache
         info!("Notifying waiters without adding to cache...");
         cleanup_and_notify(&state, test_event_id, &notify2).await;
-        
+
         // Wait for the task to complete
         let wait_result = wait_handle.await.unwrap();
-        
+
         // Verify the result is an error
         assert!(wait_result.is_err(), "wait_for_storyboard should fail if cache is empty after notification");
-        
+
         info!("Wait and notify test completed successfully!");
     }
 }
