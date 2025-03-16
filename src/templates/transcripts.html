@@ -1,0 +1,681 @@
+{% extends "base.html" %}
+
+{% block title %}Transcripts - Happy Baby{% endblock %}
+
+{% block page_title %}Transcripts{% endblock %}
+
+{% block extra_head %}
+<style>
+    .date-picker {
+        max-width: 200px;
+    }
+    .summary-container {
+        margin-top: 20px;
+        padding: 20px;
+        border: 1px solid #eee;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+    }
+    .summary-actions {
+        margin-bottom: 15px;
+    }
+    .summary-content {
+        margin-top: 15px;
+    }
+    .model-selector {
+        max-width: 250px;
+    }
+    .summary-type-tabs {
+        margin-bottom: 15px;
+    }
+    .summary-metadata {
+        font-size: 0.8rem;
+        color: #666;
+        margin-bottom: 10px;
+    }
+    .loading {
+        display: none;
+        margin: 20px 0;
+    }
+    .summary-list {
+        margin-top: 20px;
+    }
+    .summary-list-item {
+        cursor: pointer;
+        padding: 8px;
+        border: 1px solid #ddd;
+        margin-bottom: 5px;
+        border-radius: 4px;
+    }
+    .summary-list-item:hover {
+        background-color: #f0f0f0;
+    }
+    .csv-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+    }
+    .csv-table th, .csv-table td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+    }
+    .csv-table th {
+        background-color: #f2f2f2;
+        position: sticky;
+        top: 0;
+    }
+    .csv-table tr:nth-child(even) {
+        background-color: #f9f9f9;
+    }
+    .csv-table tr:hover {
+        background-color: #f0f0f0;
+    }
+    .csv-container {
+        max-height: 500px;
+        overflow-y: auto;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5>Select Date</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="date-picker" class="form-label">Date</label>
+                    <input type="date" class="form-control date-picker" id="date-picker">
+                </div>
+                <button id="load-transcripts" class="btn btn-primary">Load Transcripts</button>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5>Summary Options</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="model-selector" class="form-label">Model</label>
+                    <select class="form-select model-selector" id="model-selector">
+                        <option value="" disabled selected>Loading models...</option>
+                    </select>
+                </div>
+                <button id="generate-summary" class="btn btn-success">Generate New Summary</button>
+            </div>
+        </div>
+
+        <div class="card mt-3 summary-list" style="display: none;">
+            <div class="card-header">
+                <h5>Available Summaries</h5>
+            </div>
+            <div class="card-body" id="summaries-list-container">
+                <!-- Summary list items will be added here dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <ul class="nav nav-tabs card-header-tabs summary-type-tabs">
+                    <li class="nav-item">
+                        <a class="nav-link active" id="summary-tab" data-bs-toggle="tab" href="#summary-content">Summary</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="json-tab" data-bs-toggle="tab" href="#json-content">JSON</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="csv-tab" data-bs-toggle="tab" href="#csv-content">CSV</a>
+                    </li>
+                </ul>
+            </div>
+            <div class="card-body">
+                <div class="summary-metadata" id="summary-metadata"></div>
+                
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="summary-content">
+                        <div id="markdown-summary" class="summary-content"></div>
+                    </div>
+                    <div class="tab-pane fade" id="json-content">
+                        <pre id="json-summary" class="summary-content"></pre>
+                    </div>
+                    <div class="tab-pane fade" id="csv-content">
+                        <div class="csv-container">
+                            <table id="csv-table" class="csv-table">
+                                <!-- CSV data will be displayed as a table here -->
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="loading" id="loading">
+                    <div class="d-flex justify-content-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                    <p class="text-center mt-2">Generating summary, this may take a minute...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Define urlParams in the global scope so it can be accessed by all functions
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Get the timezone from the server - use safe rendering to prevent HTML encoding
+    const appTimezone = "{{timezone | safe}}";
+    console.log("Using timezone:", appTimezone);
+    
+    // Validate the timezone to ensure it's in the correct format
+    function isValidTimezone(tz) {
+        try {
+            Intl.DateTimeFormat(undefined, {timeZone: tz});
+            return true;
+        } catch (e) {
+            console.error(`Invalid timezone: ${tz}`, e);
+            return false;
+        }
+    }
+    
+    // Use a fallback timezone if the server-provided one is invalid
+    const validTimezone = isValidTimezone(appTimezone) ? appTimezone : "Australia/Adelaide";
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        // Fetch available models
+        fetchModels();
+        
+        // Set up tab click handlers to update URL
+        document.querySelectorAll('.nav-link').forEach(tab => {
+            tab.addEventListener('click', function() {
+                updateUrlParams('tab', this.id.replace('-tab', ''));
+            });
+        });
+        
+        // Set default date to today in server timezone or from URL parameter
+        const dateParam = urlParams.get('date');
+        const dateInput = document.getElementById('date-picker');
+        
+        if (dateParam) {
+            // Use date from URL
+            dateInput.value = dateParam;
+        } else {
+            // Use today's date in server timezone
+            const today = new Date();
+            const localizedDate = convertToServerTimezone(today);
+            dateInput.value = formatDateForInput(localizedDate);
+        }
+        
+        // Update URL when date changes
+        dateInput.addEventListener('change', function() {
+            updateUrlParams('date', this.value);
+        });
+        
+        // Update URL when model changes
+        const modelSelector = document.getElementById('model-selector');
+        modelSelector.addEventListener('change', function() {
+            updateUrlParams('model', this.value);
+        });
+        
+        // Load transcripts button click handler
+        document.getElementById('load-transcripts').addEventListener('click', function() {
+            loadTranscripts();
+        });
+        
+        // Generate summary button click handler
+        document.getElementById('generate-summary').addEventListener('click', function() {
+            generateSummary();
+        });
+        
+        // Set active tab from URL parameter
+        const tabParam = urlParams.get('tab');
+        if (tabParam) {
+            const tabId = tabParam + '-tab';
+            const tab = document.getElementById(tabId);
+            if (tab) {
+                tab.click();
+            }
+        }
+        
+        // Initial load
+        loadTranscripts();
+    });
+    
+    // Function to fetch available models from the API
+    function fetchModels() {
+        fetch('/api/models')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to load models');
+                }
+                return response.json();
+            })
+            .then(data => {
+                const modelSelector = document.getElementById('model-selector');
+                
+                // Clear loading option
+                modelSelector.innerHTML = '';
+                
+                // Group models by provider
+                const modelsByProvider = {};
+                data.models.forEach(model => {
+                    if (!modelsByProvider[model.provider]) {
+                        modelsByProvider[model.provider] = [];
+                    }
+                    modelsByProvider[model.provider].push(model);
+                });
+                
+                // Add models to selector grouped by provider
+                Object.keys(modelsByProvider).forEach(provider => {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = provider.charAt(0).toUpperCase() + provider.slice(1);
+                    
+                    modelsByProvider[provider].forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.id;
+                        option.textContent = model.name;
+                        optgroup.appendChild(option);
+                    });
+                    
+                    modelSelector.appendChild(optgroup);
+                });
+                
+                // Set model from URL parameter or use default
+                const modelParam = urlParams.get('model');
+                if (modelParam) {
+                    // Find the option with the matching value
+                    const option = Array.from(modelSelector.options).find(opt => opt.value === modelParam);
+                    if (option) {
+                        modelSelector.value = modelParam;
+                    }
+                } else if (modelSelector.options.length > 0) {
+                    // Select first option as default
+                    modelSelector.selectedIndex = 0;
+                }
+            })
+            .catch(error => {
+                console.error('Error loading models:', error);
+                const modelSelector = document.getElementById('model-selector');
+                modelSelector.innerHTML = '';
+                
+                // Add fallback models in case API fails
+                const fallbackModels = [
+                    { id: 'anthropic-claude-haiku', name: 'Claude Haiku' },
+                    { id: 'anthropic-claude-3-sonnet', name: 'Claude 3 Sonnet' },
+                    { id: 'gpt-4o', name: 'GPT-4o' },
+                    { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' }
+                ];
+                
+                fallbackModels.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.id;
+                    option.textContent = model.name;
+                    modelSelector.appendChild(option);
+                });
+                
+                // Set model from URL parameter or use default
+                const modelParam = urlParams.get('model');
+                if (modelParam) {
+                    const option = Array.from(modelSelector.options).find(opt => opt.value === modelParam);
+                    if (option) {
+                        modelSelector.value = modelParam;
+                    }
+                }
+            });
+    }
+    
+    // Function to update URL parameters without reloading the page
+    function updateUrlParams(key, value) {
+        const url = new URL(window.location);
+        url.searchParams.set(key, value);
+        window.history.pushState({}, '', url);
+    }
+    
+    // Function to convert a date to server timezone
+    function convertToServerTimezone(date) {
+        try {
+            return new Date(date.toLocaleString('en-US', { timeZone: validTimezone }));
+        } catch (error) {
+            console.error(`Error converting to timezone ${validTimezone}: ${error.message}`);
+            console.log("Falling back to local timezone");
+            return new Date(date);
+        }
+    }
+    
+    // Function to format a date for the date input (YYYY-MM-DD)
+    function formatDateForInput(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+    
+    function loadTranscripts() {
+        const date = document.getElementById('date-picker').value;
+        if (!date) {
+            alert('Please select a date');
+            return;
+        }
+        
+        // Update URL with current date
+        updateUrlParams('date', date);
+        
+        // Show loading indicator
+        document.getElementById('loading').style.display = 'block';
+        
+        // Clear previous content
+        document.getElementById('markdown-summary').innerHTML = '';
+        document.getElementById('json-summary').innerHTML = '';
+        document.getElementById('csv-table').innerHTML = '';
+        document.getElementById('summary-metadata').innerHTML = '';
+        
+        // Load available summaries
+        fetch(`/api/transcripts/summary/${date}/list`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to load summaries list');
+                }
+                return response.json();
+            })
+            .then(data => {
+                displaySummariesList(data.summaries);
+            })
+            .catch(error => {
+                console.error('Error loading summaries list:', error);
+            });
+        
+        // Load markdown summary
+        fetch(`/api/transcripts/summary/${date}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('No summary available');
+                }
+                return response.text();
+            })
+            .then(data => {
+                document.getElementById('markdown-summary').innerHTML = data;
+                document.getElementById('loading').style.display = 'none';
+                updateSummaryMetadata(date, 'markdown');
+            })
+            .catch(error => {
+                console.error('Error loading summary:', error);
+                document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info">No summary available for this date. Click "Generate New Summary" to create one.</div>';
+                document.getElementById('loading').style.display = 'none';
+            });
+        
+        // Load JSON summary
+        fetch(`/api/transcripts/summary/${date}/json`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('No JSON summary available');
+                }
+                return response.json();
+            })
+            .then(data => {
+                document.getElementById('json-summary').textContent = JSON.stringify(data, null, 2);
+            })
+            .catch(error => {
+                console.error('Error loading JSON summary:', error);
+                document.getElementById('json-summary').textContent = 'No JSON summary available for this date.';
+            });
+        
+        // Load CSV data and format as table
+        fetch(`/api/transcripts/csv/${date}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('No CSV data available');
+                }
+                return response.text();
+            })
+            .then(data => {
+                displayCSVAsTable(data);
+            })
+            .catch(error => {
+                console.error('Error loading CSV data:', error);
+                document.getElementById('csv-table').innerHTML = '<tr><td>No transcript data available for this date.</td></tr>';
+            });
+    }
+    
+    function generateSummary() {
+        const date = document.getElementById('date-picker').value;
+        const model = document.getElementById('model-selector').value;
+        
+        if (!date) {
+            alert('Please select a date');
+            return;
+        }
+        
+        // Update URL with current date and model
+        updateUrlParams('date', date);
+        updateUrlParams('model', model);
+        
+        // Show loading indicator
+        document.getElementById('loading').style.display = 'block';
+        
+        // Generate markdown summary
+        fetch(`/api/transcripts/summary/${date}?model=${model}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to generate summary');
+                }
+                return response.text();
+            })
+            .then(data => {
+                document.getElementById('markdown-summary').innerHTML = data;
+                updateSummaryMetadata(date, 'markdown', model);
+                
+                // After markdown is generated, generate JSON summary
+                return fetch(`/api/transcripts/summary/${date}/json?model=${model}`);
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to generate JSON summary');
+                }
+                return response.json();
+            })
+            .then(data => {
+                document.getElementById('json-summary').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('loading').style.display = 'none';
+                
+                // Refresh summaries list
+                return fetch(`/api/transcripts/summary/${date}/list`);
+            })
+            .then(response => response.json())
+            .then(data => {
+                displaySummariesList(data.summaries);
+            })
+            .catch(error => {
+                console.error('Error generating summary:', error);
+                document.getElementById('loading').style.display = 'none';
+                alert('Error generating summary: ' + error.message);
+            });
+    }
+    
+    function updateSummaryMetadata(date, type, model = null) {
+        const modelText = model ? `Model: ${model}` : '';
+        
+        // Parse the date and format it in server timezone
+        const [year, month, day] = date.split('-').map(Number);
+        const dateObj = new Date(Date.UTC(year, month - 1, day));
+        const localizedDate = convertToServerTimezone(dateObj);
+        
+        const formattedDate = localizedDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric',
+            timeZone: validTimezone
+        });
+        
+        document.getElementById('summary-metadata').innerHTML = 
+            `<strong>${formattedDate}</strong> ${modelText ? ' | ' + modelText : ''} <span class="text-muted">(${validTimezone})</span>`;
+    }
+    
+    function displaySummariesList(summaries) {
+        const container = document.getElementById('summaries-list-container');
+        container.innerHTML = '';
+        
+        if (summaries && summaries.length > 0) {
+            document.querySelector('.summary-list').style.display = 'block';
+            
+            summaries.forEach(summary => {
+                // Convert timestamp to server timezone
+                const utcDate = new Date(summary.created_at * 1000);
+                const localizedDate = convertToServerTimezone(utcDate);
+                const formattedDate = localizedDate.toLocaleString('en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    timeZone: validTimezone
+                });
+                
+                const item = document.createElement('div');
+                item.className = 'summary-list-item';
+                item.innerHTML = `
+                    <div><strong>${summary.summary_type}</strong> | ${summary.model}</div>
+                    <div class="text-muted small">Created: ${formattedDate} PT</div>
+                `;
+                
+                item.addEventListener('click', function() {
+                    loadSpecificSummary(summary.date, summary.summary_type, summary.model, summary.prompt_name);
+                });
+                
+                container.appendChild(item);
+            });
+        } else {
+            document.querySelector('.summary-list').style.display = 'none';
+        }
+    }
+    
+    function loadSpecificSummary(date, type, model, prompt) {
+        // Update URL with current parameters
+        updateUrlParams('date', date);
+        updateUrlParams('model', model);
+        updateUrlParams('type', type);
+        updateUrlParams('prompt', prompt);
+        
+        // Show loading indicator
+        document.getElementById('loading').style.display = 'block';
+        
+        fetch(`/api/transcripts/summary/${date}/type/${type}/model/${model}/prompt/${prompt}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to load summary');
+                }
+                
+                if (type === 'json') {
+                    return response.json().then(data => {
+                        return { text: JSON.stringify(data, null, 2), isJson: true };
+                    });
+                } else {
+                    return response.text().then(text => {
+                        return { text, isJson: false };
+                    });
+                }
+            })
+            .then(data => {
+                if (type === 'json') {
+                    document.getElementById('json-tab').click();
+                    document.getElementById('json-summary').textContent = data.text;
+                } else if (type === 'markdown') {
+                    document.getElementById('summary-tab').click();
+                    document.getElementById('markdown-summary').innerHTML = data.text;
+                }
+                
+                updateSummaryMetadata(date, type, model);
+                document.getElementById('loading').style.display = 'none';
+            })
+            .catch(error => {
+                console.error('Error loading specific summary:', error);
+                document.getElementById('loading').style.display = 'none';
+                alert('Error loading summary: ' + error.message);
+            });
+    }
+    
+    function displayCSVAsTable(csvData) {
+        const table = document.getElementById('csv-table');
+        table.innerHTML = '';
+        
+        // Parse CSV data
+        const rows = csvData.trim().split('\n');
+        if (rows.length === 0) {
+            table.innerHTML = '<tr><td>No data available</td></tr>';
+            return;
+        }
+        
+        // Create table header
+        const headerRow = document.createElement('tr');
+        
+        // Parse the header row (assuming CSV format with quotes)
+        const headerCells = parseCSVRow(rows[0]);
+        
+        headerCells.forEach(cell => {
+            const th = document.createElement('th');
+            th.textContent = cell;
+            headerRow.appendChild(th);
+        });
+        
+        table.appendChild(headerRow);
+        
+        // Create table body
+        for (let i = 1; i < rows.length; i++) {
+            if (rows[i].trim() === '') continue;
+            
+            const dataRow = document.createElement('tr');
+            const dataCells = parseCSVRow(rows[i]);
+            
+            dataCells.forEach(cell => {
+                const td = document.createElement('td');
+                td.textContent = cell;
+                dataRow.appendChild(td);
+            });
+            
+            table.appendChild(dataRow);
+        }
+    }
+    
+    function parseCSVRow(row) {
+        const result = [];
+        let insideQuotes = false;
+        let currentValue = '';
+        
+        for (let i = 0; i < row.length; i++) {
+            const char = row[i];
+            
+            if (char === '"') {
+                if (i < row.length - 1 && row[i + 1] === '"') {
+                    // Handle escaped quotes
+                    currentValue += '"';
+                    i++;
+                } else {
+                    // Toggle inside quotes flag
+                    insideQuotes = !insideQuotes;
+                }
+            } else if (char === ',' && !insideQuotes) {
+                // End of cell
+                result.push(currentValue);
+                currentValue = '';
+            } else {
+                // Add character to current value
+                currentValue += char;
+            }
+        }
+        
+        // Add the last value
+        result.push(currentValue);
+        
+        return result;
+    }
+</script>
+{% endblock %} 

@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}Zumblezay Status{% endblock %}
+
+{% block page_title %}Zumblezay Status{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Processing Statistics</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush">
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        Processed Events
+                        <span id="processed-count" class="badge bg-primary rounded-pill">-</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        Errors
+                        <span id="error-count" class="badge bg-danger rounded-pill">-</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        Average Processing Time
+                        <span id="avg-time" class="badge bg-info rounded-pill">-</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        Total Processing Time
+                        <span id="total-time" class="badge bg-secondary rounded-pill">-</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Active Tasks</h5>
+            </div>
+            <div id="active-tasks" class="card-body">
+                <p class="text-muted">No active tasks</p>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Last Processed Time</h5>
+            </div>
+            <div class="card-body">
+                <p id="last-processed" class="card-text">Never</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function updateStatus() {
+        fetch('/status', {
+            headers: {
+                'Accept': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('processed-count').textContent = data.stats.processed_count;
+            document.getElementById('error-count').textContent = data.stats.error_count;
+            document.getElementById('avg-time').textContent = data.stats.average_processing_time_ms.toFixed(1) + 'ms';
+            document.getElementById('total-time').textContent = data.stats.total_processing_time_ms + 'ms';
+            
+            const tasksDiv = document.getElementById('active-tasks');
+            if (Object.keys(data.active_tasks).length === 0) {
+                tasksDiv.innerHTML = '<p class="text-muted">No active tasks</p>';
+            } else {
+                tasksDiv.innerHTML = Object.entries(data.active_tasks)
+                    .map(([id, status]) => `
+                        <div class="alert alert-info">
+                            <strong>Event ${id}:</strong> ${status}
+                        </div>
+                    `).join('');
+            }
+            
+            const timestamp = new Date(data.last_processed_time * 1000).toISOString();
+            document.getElementById('last-processed').textContent = timestamp;
+        })
+        .catch(error => console.error('Error fetching status:', error));
+    }
+
+    // Update immediately and then every second
+    updateStatus();
+    setInterval(updateStatus, 1000);
+</script>
+{% endblock %} 

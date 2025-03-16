@@ -1,0 +1,18 @@
+/target/
+
+# Data directory
+/data/
+/data2/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+events.db
+transcripts.db*

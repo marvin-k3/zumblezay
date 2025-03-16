@@ -1,0 +1,575 @@
+{% extends "base.html" %}
+
+{% block title %}Events{% endblock %}
+
+{% block extra_head %}
+<script type="module" src="https://cdn.jsdelivr.net/npm/media-chrome@1/+esm"></script>
+<style>
+    .video-container {
+        position: relative;
+        width: 100%;
+    }
+    .event-list {
+        max-height: 600px;
+        overflow-y: auto;
+    }
+    .event-item {
+        cursor: pointer;
+    }
+    .event-item:hover {
+        background-color: #f8f9fa;
+    }
+    media-controller {
+        width: 100%;
+        height: 400px;
+        --media-background-color: rgb(0 0 0);
+    }
+    .storyboard {
+        position: relative;
+        width: 100%;
+        height: 90px;
+        background: #000;
+        overflow: hidden;
+    }
+    
+    .storyboard img {
+        position: absolute;
+        max-width: none;
+    }
+    
+    .storyboard-container {
+        margin-top: 10px;
+    }
+    .event-preview {
+        position: absolute;
+        width: 160px;
+        height: 90px;
+        background: #000;
+        display: none;
+        z-index: 1000;
+        overflow: hidden;
+        border: 2px solid #fff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        margin-top: 8px;
+    }
+    
+    .event-preview img {
+        position: absolute;
+        max-width: none;
+    }
+    
+    .event-preview::after {
+        content: '';
+        position: absolute;
+        top: -8px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-left: 8px solid transparent;
+        border-right: 8px solid transparent;
+        border-bottom: 8px solid #fff;
+    }
+    
+    .event-item {
+        position: relative;
+    }
+    
+    .filter-bar {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border-radius: 0.25rem;
+    }
+    
+    .time-range-inputs {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+    }
+    
+    .time-range-inputs input {
+        width: 100px;
+    }
+</style>
+{% endblock %}
+
+{% block page_title %}Events{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <div class="filter-bar">
+            <form id="filter-form" class="row g-3">
+                <div class="col-md-3">
+                    <label for="date-filter" class="form-label">Date</label>
+                    <input type="date" class="form-control" id="date-filter">
+                </div>
+                <div class="col-md-3">
+                    <label for="camera-filter" class="form-label">Camera</label>
+                    <select class="form-select" id="camera-filter">
+                        <option value="">All Cameras</option>
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">Time Range</label>
+                    <div class="time-range-inputs">
+                        <input type="time" class="form-control" id="time-start">
+                        <span>to</span>
+                        <input type="time" class="form-control" id="time-end">
+                    </div>
+                </div>
+                <div class="col-md-12">
+                    <button type="button" class="btn btn-secondary" id="reset-filters">Reset Filters</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Recent Events</h5>
+            </div>
+            <div id="event-list" class="card-body event-list">
+                <p class="text-muted">Loading events...</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 id="video-title" class="card-title mb-0">Select an event</h5>
+            </div>
+            <div class="card-body">
+                <div class="video-container">
+                    <media-controller>
+                        <video 
+                            id="video-player"
+                            slot="media"
+                            preload="auto"
+                            playsinline
+                            muted
+                            >
+                            <track kind="captions" src="" label="English" default>
+                        </video>
+                        <media-control-bar>
+                            <media-play-button></media-play-button>
+                            <media-seek-backward-button seekoffset="1"></media-seek-backward-button>
+                            <media-seek-forward-button seekoffset="1"></media-seek-forward-button>
+                            <media-time-range></media-time-range>
+                            <media-time-display></media-time-display>
+                            <media-playback-rate-button></media-playback-rate-button>
+                            <media-mute-button></media-mute-button>
+                            <media-volume-range></media-volume-range>
+                            <media-captions-button></media-captions-button>
+                            <media-fullscreen-button></media-fullscreen-button>
+                        </media-control-bar>
+                    </media-controller>
+                </div>
+                <div class="storyboard-container">
+                    <div id="storyboard" class="storyboard">
+                        <img id="storyboard-img">
+                    </div>
+                </div> 
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentEvent = null;
+    const videoPlayer = document.getElementById('video-player');
+
+    let currentFilters = {
+        date: null,
+        camera_id: '',
+        timeStart: '',
+        timeEnd: ''
+    };
+
+    function initializeFilters() {
+        // Set default date to today
+        const today = new Date();
+        document.getElementById('date-filter').value = today.toLocaleDateString('en-CA'); // 'en-CA' gives YYYY-MM-DD format
+        currentFilters.date = today.toLocaleDateString('en-CA');
+
+        // Add event listeners
+        document.getElementById('date-filter').addEventListener('change', updateFilters);
+        document.getElementById('camera-filter').addEventListener('change', updateFilters);
+        document.getElementById('time-start').addEventListener('change', updateFilters);
+        document.getElementById('time-end').addEventListener('change', updateFilters);
+
+        // Load camera list
+        loadCameras();
+
+        // Initial update
+        updateFilters();
+    }
+
+    function updateFilters() {
+        currentFilters = {
+            date: document.getElementById('date-filter').value,
+            camera_id: document.getElementById('camera-filter').value,
+            timeStart: document.getElementById('time-start').value,
+            timeEnd: document.getElementById('time-end').value
+        };
+        updateEvents();
+    }
+
+    function formatTimestamp(timestamp) {
+        return new Date(timestamp * 1000).toLocaleString();
+    }
+
+    function updateEvents() {
+        // Build query parameters
+        const params = new URLSearchParams();
+        if (currentFilters.date) {
+            params.append('date', currentFilters.date);
+        }
+        if (currentFilters.camera_id) {
+            params.append('camera_id', currentFilters.camera_id);
+        }
+        if (currentFilters.timeStart) {
+            params.append('time_start', currentFilters.timeStart);
+        }
+        if (currentFilters.timeEnd) {
+            params.append('time_end', currentFilters.timeEnd);
+        }
+
+        // Make API call with filters
+        fetch(`/api/events?${params.toString()}`, {
+            headers: { 'Accept': 'application/json' }
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!Array.isArray(data)) {
+                console.warn('Expected array of events, got:', typeof data);
+                data = [];
+            }
+            
+            const listDiv = document.getElementById('event-list');
+            if (data.length === 0) {
+                listDiv.innerHTML = '<p class="text-muted">No events available</p>';
+                return;
+            }
+
+            listDiv.innerHTML = data.map(t => `
+                <div class="event-item p-2 border-bottom" 
+                     onclick="loadVideo('${t.event_id}')"
+                     onmouseenter="startPreview('${t.event_id}', this, ${t.event_end - t.event_start})"
+                     onmouseleave="stopPreview(this)">
+                    <div class="fw-bold">${t.camera_name || t.camera_id}</div>
+                    <div class="small text-muted">${formatTimestamp(t.event_start)} - ${Math.max(Math.round(t.event_end - t.event_start), 1)} seconds</div>
+                    <div class="event-preview">
+                        <img>
+                    </div>
+                </div>
+            `).join('');
+        })
+        .catch(error => {
+            console.error('Error fetching events:', error);
+            const listDiv = document.getElementById('event-list');
+            listDiv.innerHTML = '<p class="text-danger">Error loading events. Please try refreshing the page.</p>';
+        });
+    }
+
+    function loadCameras() {
+        fetch('/api/cameras', {
+            headers: { 'Accept': 'application/json' }
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!data || !data.cameras || !Array.isArray(data.cameras)) {
+                console.warn('Expected array of cameras, got:', data);
+                return;
+            }
+            
+            updateCameraDropdown(data.cameras);
+        })
+        .catch(error => {
+            console.error('Error fetching cameras:', error);
+        });
+    }
+
+    function updateCameraDropdown(cameras) {
+        const select = document.getElementById('camera-filter');
+        const currentValue = select.value;
+        
+        // Clear existing options except "All Cameras"
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+
+        // Add new options
+        cameras
+            .sort((a, b) => a.name.localeCompare(b.name)) // Sort by display name
+            .forEach(camera => {
+                const option = new Option(camera.name, camera.id);
+                select.add(option);
+            });
+
+        // Restore previous selection if it still exists
+        if (currentValue) {
+            const cameraExists = cameras.some(camera => camera.id === currentValue);
+            if (cameraExists) {
+                select.value = currentValue;
+            }
+        }
+    }
+
+    function loadVideo(eventId) {
+        // Validate eventId format - only allow alphanumeric characters and hyphens
+        if (!eventId || typeof eventId !== 'string' || !/^[a-zA-Z0-9-]+$/.test(eventId)) {
+            console.error('Invalid event ID format');
+            return;
+        }
+
+        // Update URL without reloading the page
+        const newUrl = new URL(window.location);
+        newUrl.searchParams.set('video', eventId);
+        window.history.pushState({}, '', newUrl);
+
+        fetch(`/api/event/${encodeURIComponent(eventId)}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid event data received');
+            }
+
+            currentEvent = data;
+            const title = document.getElementById('video-title');
+            
+            // First remove all tracks and reset video
+            videoPlayer.pause();
+            
+            // Remove all tracks first
+            const tracks = videoPlayer.getElementsByTagName('track');
+            while (tracks.length > 0) {
+                tracks[0].parentNode.removeChild(tracks[0]);
+            }
+            
+            // Clear video source and force reload
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+            
+            // Wait for video reset before adding new content
+            setTimeout(() => {
+                // Set new video source
+                videoPlayer.src = `/video/${encodeURIComponent(eventId)}`;
+                
+                // Add caption track if transcription exists
+                if (data.has_transcript) {
+                    const captionTrack = document.createElement('track');
+                    captionTrack.kind = 'captions';
+                    captionTrack.label = 'English';
+                    captionTrack.src = `/api/captions/${encodeURIComponent(eventId)}`;
+                    captionTrack.default = true;
+                    videoPlayer.appendChild(captionTrack);
+                }
+
+                // Add storyboard track
+                const storyboardTrack = document.createElement('track');
+                storyboardTrack.kind = 'metadata';
+                storyboardTrack.label = 'thumbnails';
+                storyboardTrack.src = `/api/storyboard/vtt/${encodeURIComponent(eventId)}`;
+                storyboardTrack.default = true;
+                videoPlayer.appendChild(storyboardTrack);
+                
+                let titleText = `${data.camera_name || data.camera_id} - ${formatTimestamp(data.event_start)}`;
+                if (!data.has_transcript) {
+                    titleText += ' (Transcription pending)';
+                }
+                title.textContent = titleText;
+            }, 100);
+        })
+        .catch(error => {
+            console.error('Error loading event:', error);
+            document.getElementById('video-title').textContent = 'Error loading video';
+            // Remove video parameter from URL on error
+            const newUrl = new URL(window.location);
+            newUrl.searchParams.delete('video');
+            window.history.pushState({}, '', newUrl);
+        });
+    }
+
+    function updateStoryboardPreview() {
+        const video = videoPlayer;
+        const storyboardImg = document.getElementById('storyboard-img');
+        
+        // Add null checks and verify textTracks exists
+        if (!video || !video.textTracks || video.textTracks.length < 2) {
+            return;
+        }
+        
+        const track = video.textTracks[1]; // metadata track
+        if (!track || !track.cues || track.cues.length === 0) {
+            return;
+        }
+        
+        const currentTime = video.currentTime;
+        for (let i = 0; i < track.cues.length; i++) {
+            const cue = track.cues[i];
+            if (currentTime >= cue.startTime && currentTime <= cue.endTime) {
+                try {
+                    const data = JSON.parse(cue.text);
+                    const [x, y, width, height] = data.xywh;
+                    storyboardImg.style.left = `-${x}px`;
+                    storyboardImg.style.top = `-${y}px`;
+                } catch (error) {
+                    console.error('Error parsing storyboard cue:', error);
+                }
+                break;
+            }
+        }
+    }
+
+    // Handle browser back/forward buttons
+    window.addEventListener('popstate', function() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const videoId = urlParams.get('video');
+        if (videoId) {
+            loadVideo(videoId);
+        } else {
+            // Clear video if no video parameter
+            videoPlayer.src = '';
+            document.getElementById('video-title').textContent = 'Select an event';
+            currentEvent = null;
+        }
+    });
+
+    // Update immediately and then every 5 seconds
+    updateEvents();
+    setInterval(updateEvents, 5000);
+
+    // Add these new functions for preview handling
+    let currentPreviewInterval = null;
+    let previewVttData = {};
+
+    async function startPreview(eventId, element, duration) {
+        const preview = element.querySelector('.event-preview');
+        const previewImg = preview.querySelector('img');
+        
+        // Show preview and set initial image immediately
+        preview.style.display = 'block';
+        previewImg.src = `/api/storyboard/image/${eventId}`;
+        
+        // Clear any existing interval
+        if (currentPreviewInterval) {
+            clearInterval(currentPreviewInterval);
+        }
+
+        // Start loading VTT data if not already cached
+        if (!previewVttData[eventId]) {
+            try {
+                const response = await fetch(`/api/storyboard/vtt/${eventId}`);
+                const vttText = await response.text();
+                previewVttData[eventId] = parseVTT(vttText);
+            } catch (error) {
+                console.error('Error loading preview VTT:', error);
+                return;
+            }
+        }
+
+        let currentTime = 0;
+        const fps = 4;
+
+        // Start animation loop immediately after VTT data is available
+        currentPreviewInterval = setInterval(() => {
+            currentTime = (currentTime + 1) % Math.ceil(duration);
+            const frame = previewVttData[eventId].find(f => 
+                currentTime >= f.startTime && currentTime <= f.endTime
+            );
+            
+            if (frame) {
+                const [x, y, width, height] = frame.position;
+                previewImg.style.left = `-${x}px`;
+                previewImg.style.top = `-${y}px`;
+            }
+        }, 1000 / fps);
+    }
+
+    function stopPreview(element) {
+        const preview = element.querySelector('.event-preview');
+        preview.style.display = 'none';
+        
+        if (currentPreviewInterval) {
+            clearInterval(currentPreviewInterval);
+            currentPreviewInterval = null;
+        }
+    }
+
+    function parseVTT(vttText) {
+        const frames = [];
+        const lines = vttText.split('\n');
+        let currentFrame = null;
+
+        for (const line of lines) {
+            if (line.includes('-->')) {
+                const [start, end] = line.split('-->').map(timeStr => {
+                    const [h, m, s] = timeStr.trim().split(':').map(Number);
+                    return h * 3600 + m * 60 + s;
+                });
+                currentFrame = { startTime: start, endTime: end };
+            } else if (line.includes('#xywh=') && currentFrame) {
+                const xywh = line.split('#xywh=')[1].split(',').map(Number);
+                currentFrame.position = xywh;
+                frames.push(currentFrame);
+                currentFrame = null;
+            }
+        }
+
+        return frames;
+    }
+
+    function resetFilters() {
+        // Reset filter values to default
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('date-filter').value = today;
+        document.getElementById('camera-filter').value = '';
+        document.getElementById('time-start').value = '';
+        document.getElementById('time-end').value = '';
+        currentFilters = {
+            date: today,
+            camera_id: '',
+            timeStart: '',
+            timeEnd: ''
+        };
+        updateEvents(); // Refresh events with reset filters
+    }
+
+    document.getElementById('reset-filters').addEventListener('click', resetFilters);
+
+    // Initialize filters when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        initializeFilters();
+        // Check if there's a video ID in the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const videoId = urlParams.get('video');
+        if (videoId) {
+            loadVideo(videoId);
+        }
+    });
+</script>
+{% endblock %} 
