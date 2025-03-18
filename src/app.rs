@@ -319,6 +319,39 @@ pub async fn health_check() -> &'static str {
     "OK"
 }
 
+#[instrument(level = "debug")]
+fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
+    let file_path = std::path::Path::new(path);
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            return Err(anyhow::anyhow!(
+                "Directory for {} at '{}' does not exist. Please create it manually.",
+                file_type,
+                parent.display()
+            ));
+        }
+    }
+    let file_exists = file_path.exists();
+    let file = if file_exists {
+        std::fs::OpenOptions::new().write(true).open(file_path)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(file_path)
+    };
+    if let Err(e) = file {
+        return Err(anyhow::anyhow!(
+            "Cannot write to {} at '{}': {}. Please check file permissions.",
+            file_type,
+            path,
+            e
+        ));
+    }
+
+    Ok(())
+}
+
 // Add this new helper function
 fn get_build_info() -> String {
     let mut info = format!(
@@ -1528,6 +1561,10 @@ pub async fn serve() -> Result<()> {
         return Err(anyhow::anyhow!("events_db path cannot be empty. Please provide a valid path using --events-db"));
     }
 
+    // Check if zumblezay_db file exists and is writable
+    info!("Checking if zumblezay database is writable");
+    check_file_is_writable(&args.zumblezay_db, "zumblezay database")?;
+
     let events_manager = SqliteConnectionManager::file(&args.events_db)
         .with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY);
     let events_pool = Pool::new(events_manager)?;
@@ -1545,6 +1582,10 @@ pub async fn serve() -> Result<()> {
         let mut conn = zumblezay_pool.get()?;
         crate::init_zumblezay_db(&mut conn)?;
     }
+
+    // Check if cache_db file exists and is writable
+    info!("Checking if cache database is writable");
+    check_file_is_writable(&args.cache_db, "cache database")?;
 
     let cache_manager = SqliteConnectionManager::file(&args.cache_db);
     let cache_pool = Pool::new(cache_manager)?;
