@@ -481,41 +481,37 @@ async fn get_completed_events(
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-    // Add date filter if present
     if let Some(date) = filters.date {
         // Convert date to timestamp range in UTC
         let (start_ts, end_ts) =
-            time_util::parse_local_date_to_utc_range(&date, state.timezone)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                &date,
+                &filters.time_start,
+                &filters.time_end,
+                state.timezone,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
         query.push_str(" AND event_start >= ? AND event_start < ?");
         params.push(Box::new(start_ts));
         params.push(Box::new(end_ts));
+    } else if filters.time_start.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Time start is not supported without a date".to_string(),
+        ));
+    } else if filters.time_end.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Time end is not supported without a date".to_string(),
+        ));
     }
 
-    // Add camera filter if present
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));
     }
 
-    // Add time filter if present
-    if let Some(time_start) = filters.time_start {
-        // Convert UTC timestamp to local time for comparison
-        query.push_str(
-            " AND strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) >= ?",
-        );
-        params.push(Box::new(time_start));
-    }
-    if let Some(time_end) = filters.time_end {
-        // Convert UTC timestamp to local time for comparison
-        query.push_str(
-            " AND strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) <= ?",
-        );
-        params.push(Box::new(time_end));
-    }
-
-    // Add order and limit
     query.push_str(" ORDER BY event_start DESC LIMIT 100");
 
     let mut stmt = conn

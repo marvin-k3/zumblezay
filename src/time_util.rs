@@ -24,31 +24,6 @@ pub fn get_local_timezone(configured_timezone: Option<&str>) -> Tz {
     }
 }
 
-pub fn parse_local_date_to_utc_range(
-    date: &str,
-    timezone: Tz,
-) -> Result<(f64, f64), anyhow::Error> {
-    // Parse the date string in the specified timezone (expected format: YYYY-MM-DD)
-    let naive_date = NaiveDateTime::parse_from_str(
-        &format!("{} 00:00:00", date),
-        "%Y-%m-%d %H:%M:%S",
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse date: {}", e))?;
-
-    // Convert local midnight to UTC for database query
-    let local_date = timezone
-        .from_local_datetime(&naive_date)
-        .single()
-        .ok_or_else(|| {
-            anyhow::anyhow!("Failed to convert local date to UTC")
-        })?;
-    let utc_start = local_date.with_timezone(&Utc);
-    let utc_end = utc_start + chrono::Duration::days(1);
-
-    // Convert to Unix timestamp for the database query
-    Ok((utc_start.timestamp() as f64, utc_end.timestamp() as f64))
-}
-
 pub fn parse_local_date_to_utc_range_with_time(
     date: &str,
     start_time: &Option<String>,
@@ -169,16 +144,5 @@ mod tests {
         // Test with explicit Adelaide timezone
         let tz4 = get_local_timezone(Some("Australia/Adelaide"));
         assert_eq!(tz4, chrono_tz::Australia::Adelaide);
-    }
-
-    #[tokio::test]
-    async fn test_parse_local_date_to_utc_range() {
-        // Test with Adelaide timezone
-        let la_tz = chrono_tz::Australia::Adelaide;
-        let result = parse_local_date_to_utc_range("2022-07-08", la_tz);
-        assert!(result.is_ok());
-        let (start, end) = result.unwrap();
-        assert_eq!(start, 1657204200.0); // Expected Unix timestamp for start
-        assert_eq!(end, 1657290600.0); // Expected Unix timestamp for end
     }
 }
