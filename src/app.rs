@@ -337,7 +337,8 @@ fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
     } else {
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
+            .create(false)
+            .truncate(false)
             .open(file_path)
     };
     if let Err(e) = file {
@@ -1598,21 +1599,21 @@ pub async fn serve() -> Result<()> {
 
     info!("Using Whisper API URL: {}", args.whisper_url);
 
-    let state = crate::create_app_state(
+    let state = crate::create_app_state(crate::AppConfig {
         events_pool,
         zumblezay_pool,
         cache_pool,
-        args.whisper_url,
-        args.max_concurrent_tasks,
-        args.openai_api_key,
-        args.openai_api_base,
-        args.runpod_api_key,
-        args.transcription_service,
-        args.default_summary_model,
-        args.video_path_original_prefix,
-        args.video_path_replacement_prefix,
-        args.timezone,
-    );
+        whisper_url: args.whisper_url,
+        max_concurrent_tasks: args.max_concurrent_tasks,
+        openai_api_key: args.openai_api_key,
+        openai_api_base: args.openai_api_base,
+        runpod_api_key: args.runpod_api_key,
+        transcription_service: args.transcription_service,
+        default_summary_model: args.default_summary_model,
+        video_path_original_prefix: args.video_path_original_prefix,
+        video_path_replacement_prefix: args.video_path_replacement_prefix,
+        timezone_str: args.timezone,
+    });
 
     // Create a channel for shutdown coordination
     let (shutdown_tx, mut shutdown_rx) =

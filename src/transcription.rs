@@ -221,16 +221,33 @@ async fn get_runpod_whisper_transcript(
     let start_time = std::time::Instant::now();
     let client = reqwest::Client::new();
 
-    let mut input = RunpodFasterWhisperInput::default();
-    input.audio = Some(format!(
-        // TODO: Make this configurable, this should point back to this server.
-        "https://user:pass@example.com/audio/{}/wav?key=$AUTH_TOKEN",
-        event.id
-    ));
-    input.model = Some("large-v2".to_string());
-    input.enable_vad = Some(true);
-    input.language = Some("en".to_string());
-    input.word_timestamps = Some(true);
+    let input = RunpodFasterWhisperInput {
+        audio: Some(format!(
+            // TODO: Make this configurable, this should point back to this server.
+            "https://user:pass@example.com/audio/{}/wav?key=$AUTH_TOKEN",
+            event.id
+        )),
+        model: Some("large-v2".to_string()),
+        enable_vad: Some(true),
+        language: Some("en".to_string()),
+        word_timestamps: Some(true),
+        audio_base64: None,
+        transcription: None,
+        translate: None,
+        translation: None,
+        temperature: None,
+        best_of: None,
+        beam_size: None,
+        patience: None,
+        length_penalty: None,
+        suppress_tokens: None,
+        initial_prompt: None,
+        condition_on_previous_text: None,
+        temperature_increment_on_fallback: None,
+        compression_ratio_threshold: None,
+        logprob_threshold: None,
+        no_speech_threshold: None,
+    };
 
     let request = RunPodFasterWhisperRequest { input };
     let request_json = serde_json::to_string(&request).unwrap();

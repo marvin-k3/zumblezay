@@ -206,45 +206,51 @@ pub fn init_events_db_for_testing(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+// Create a config struct to hold AppState configuration
+pub struct AppConfig {
+    pub events_pool: Pool<SqliteConnectionManager>,
+    pub zumblezay_pool: Pool<SqliteConnectionManager>,
+    pub cache_pool: Pool<SqliteConnectionManager>,
+    pub whisper_url: String,
+    pub max_concurrent_tasks: usize,
+    pub openai_api_key: Option<String>,
+    pub openai_api_base: Option<String>,
+    pub runpod_api_key: Option<String>,
+    pub transcription_service: String,
+    pub default_summary_model: String,
+    pub video_path_original_prefix: String,
+    pub video_path_replacement_prefix: String,
+    pub timezone_str: Option<String>,
+}
+
 // Function to create AppState from parameters
-pub fn create_app_state(
-    events_pool: Pool<SqliteConnectionManager>,
-    zumblezay_pool: Pool<SqliteConnectionManager>,
-    cache_pool: Pool<SqliteConnectionManager>,
-    whisper_url: String,
-    max_concurrent_tasks: usize,
-    openai_api_key: Option<String>,
-    openai_api_base: Option<String>,
-    runpod_api_key: Option<String>,
-    transcription_service: String,
-    default_summary_model: String,
-    video_path_original_prefix: String,
-    video_path_replacement_prefix: String,
-    timezone_str: Option<String>,
-) -> Arc<AppState> {
+pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
     // Determine the timezone to use
-    let timezone = time_util::get_local_timezone(timezone_str.as_deref());
+    let timezone =
+        time_util::get_local_timezone(config.timezone_str.as_deref());
 
     Arc::new(AppState {
-        events_db: events_pool,
-        zumblezay_db: zumblezay_pool,
-        cache_db: cache_pool,
-        whisper_url,
+        events_db: config.events_pool,
+        zumblezay_db: config.zumblezay_pool,
+        cache_db: config.cache_pool,
+        whisper_url: config.whisper_url,
         last_processed_time: Arc::new(Mutex::new(0.0)),
         stats: ServiceStats::new(),
         active_tasks: Arc::new(Mutex::new(HashMap::new())),
-        semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_tasks)),
-        openai_api_key,
-        openai_api_base,
-        runpod_api_key,
-        transcription_service,
+        semaphore: Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_tasks,
+        )),
+        openai_api_key: config.openai_api_key,
+        openai_api_base: config.openai_api_base,
+        runpod_api_key: config.runpod_api_key,
+        transcription_service: config.transcription_service,
         camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
         storyboard_cache: Arc::new(RwLock::new(LruCache::new(
             NonZeroUsize::new(100).unwrap(),
         ))),
-        default_summary_model,
-        video_path_original_prefix,
-        video_path_replacement_prefix,
+        default_summary_model: config.default_summary_model,
+        video_path_original_prefix: config.video_path_original_prefix,
+        video_path_replacement_prefix: config.video_path_replacement_prefix,
         timezone,
         in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
         temp_events_path: None,
