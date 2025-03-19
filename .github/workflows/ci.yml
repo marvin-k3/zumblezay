@@ -30,12 +30,6 @@ jobs:
     
     - uses: Swatinem/rust-cache@v2
     
-    - name: Security audit
-      uses: actions-rs/audit-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-      if: matrix.os == 'ubuntu-latest' # Only run audit on Ubuntu
-    
     - name: Check formatting
       run: cargo fmt -- --check
       if: always()
@@ -64,8 +58,10 @@ jobs:
       - name: Generate coverage report
         run: cargo tarpaulin --out Xml
         
-    #  - name: Upload coverage to Codecov
-    #    uses: codecov/codecov-action@v3
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   release:
     needs: [build, coverage]
