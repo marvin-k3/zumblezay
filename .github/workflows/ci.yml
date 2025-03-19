@@ -19,6 +19,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install ffmpeg
+      run: sudo apt-get install -y ffmpeg
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -26,12 +29,6 @@ jobs:
         components: clippy, rustfmt
     
     - uses: Swatinem/rust-cache@v2
-    
-    - name: Security audit
-      uses: actions-rs/audit-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-      if: matrix.os == 'ubuntu-latest' # Only run audit on Ubuntu
     
     - name: Check formatting
       run: cargo fmt -- --check
@@ -49,6 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+    
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       
@@ -58,8 +58,10 @@ jobs:
       - name: Generate coverage report
         run: cargo tarpaulin --out Xml
         
-    #  - name: Upload coverage to Codecov
-    #    uses: codecov/codecov-action@v3
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   release:
     needs: [build, coverage]

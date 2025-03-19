@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# Docker files
+.dockerignore
+
+# Temporary files
+**/*.tmp
+**/*.temp
+
+# Logs
+*.log
+
+# Backup files
+**/*~
+**/*.bak

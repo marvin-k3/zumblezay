@@ -1,4 +1,4 @@
-use crate::time_util::parse_local_date_to_utc_range;
+use crate::time_util;
 use crate::AppState;
 use crate::Event;
 use anyhow::Result;
@@ -61,7 +61,12 @@ pub async fn get_formatted_transcripts_for_date(
     let camera_names: HashMap<String, String> =
         state.camera_name_cache.lock().await.clone();
     let (start_timestamp, end_timestamp) =
-        parse_local_date_to_utc_range(date, state.timezone)?;
+        time_util::parse_local_date_to_utc_range_with_time(
+            date,
+            &None,
+            &None,
+            state.timezone,
+        )?;
 
     let conn = state
         .zumblezay_db
@@ -154,7 +159,12 @@ mod tests {
         // Get the correct timestamp range for 2023-01-01
         let conn = state.zumblezay_db.get()?;
         let (start_ts, end_ts) =
-            parse_local_date_to_utc_range("2023-01-01", state.timezone)?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                "2023-01-01",
+                &None,
+                &None,
+                state.timezone,
+            )?;
         println!(
             "Setting up test data with timestamps in range: {} to {}",
             start_ts, end_ts
@@ -339,7 +349,12 @@ mod tests {
 
         // Debug the date range conversion
         let (start_ts, end_ts) =
-            parse_local_date_to_utc_range("2023-01-01", state.timezone)?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                "2023-01-01",
+                &None,
+                &None,
+                state.timezone,
+            )?;
         println!("Date range for 2023-01-01: {} to {}", start_ts, end_ts);
 
         // Check if our events fall within this range
@@ -525,7 +540,12 @@ mod tests {
 
         // Debug the date range conversion
         let (start_ts, end_ts) =
-            parse_local_date_to_utc_range("2023-01-01", state.timezone)?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                "2023-01-01",
+                &None,
+                &None,
+                state.timezone,
+            )?;
         println!("Date range for 2023-01-01: {} to {}", start_ts, end_ts);
 
         Ok(())
@@ -572,7 +592,12 @@ mod tests {
 
         // Debug the date range conversion
         let (start_ts, end_ts) =
-            parse_local_date_to_utc_range("2023-01-01", state.timezone)?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                "2023-01-01",
+                &None,
+                &None,
+                state.timezone,
+            )?;
         println!("Date range for 2023-01-01: {} to {}", start_ts, end_ts);
 
         // Check if our events fall within this range

@@ -319,6 +319,40 @@ pub async fn health_check() -> &'static str {
     "OK"
 }
 
+#[instrument(level = "debug")]
+fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
+    let file_path = std::path::Path::new(path);
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            return Err(anyhow::anyhow!(
+                "Directory for {} at '{}' does not exist. Please create it manually.",
+                file_type,
+                parent.display()
+            ));
+        }
+    }
+    let file_exists = file_path.exists();
+    let file = if file_exists {
+        std::fs::OpenOptions::new().write(true).open(file_path)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(false)
+            .truncate(false)
+            .open(file_path)
+    };
+    if let Err(e) = file {
+        return Err(anyhow::anyhow!(
+            "Cannot write to {} at '{}': {}. Please check file permissions.",
+            file_type,
+            path,
+            e
+        ));
+    }
+
+    Ok(())
+}
+
 // Add this new helper function
 fn get_build_info() -> String {
     let mut info = format!(
@@ -447,41 +481,37 @@ async fn get_completed_events(
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-    // Add date filter if present
     if let Some(date) = filters.date {
         // Convert date to timestamp range in UTC
         let (start_ts, end_ts) =
-            time_util::parse_local_date_to_utc_range(&date, state.timezone)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            time_util::parse_local_date_to_utc_range_with_time(
+                &date,
+                &filters.time_start,
+                &filters.time_end,
+                state.timezone,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
         query.push_str(" AND event_start >= ? AND event_start < ?");
         params.push(Box::new(start_ts));
         params.push(Box::new(end_ts));
+    } else if filters.time_start.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Time start is not supported without a date".to_string(),
+        ));
+    } else if filters.time_end.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Time end is not supported without a date".to_string(),
+        ));
     }
 
-    // Add camera filter if present
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));
     }
 
-    // Add time filter if present
-    if let Some(time_start) = filters.time_start {
-        // Convert UTC timestamp to local time for comparison
-        query.push_str(
-            " AND strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) >= ?",
-        );
-        params.push(Box::new(time_start));
-    }
-    if let Some(time_end) = filters.time_end {
-        // Convert UTC timestamp to local time for comparison
-        query.push_str(
-            " AND strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) <= ?",
-        );
-        params.push(Box::new(time_end));
-    }
-
-    // Add order and limit
     query.push_str(" ORDER BY event_start DESC LIMIT 100");
 
     let mut stmt = conn
@@ -1528,6 +1558,10 @@ pub async fn serve() -> Result<()> {
         return Err(anyhow::anyhow!("events_db path cannot be empty. Please provide a valid path using --events-db"));
     }
 
+    // Check if zumblezay_db file exists and is writable
+    info!("Checking if zumblezay database is writable");
+    check_file_is_writable(&args.zumblezay_db, "zumblezay database")?;
+
     let events_manager = SqliteConnectionManager::file(&args.events_db)
         .with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY);
     let events_pool = Pool::new(events_manager)?;
@@ -1546,6 +1580,10 @@ pub async fn serve() -> Result<()> {
         crate::init_zumblezay_db(&mut conn)?;
     }
 
+    // Check if cache_db file exists and is writable
+    info!("Checking if cache database is writable");
+    check_file_is_writable(&args.cache_db, "cache database")?;
+
     let cache_manager = SqliteConnectionManager::file(&args.cache_db);
     let cache_pool = Pool::new(cache_manager)?;
 
@@ -1557,21 +1595,21 @@ pub async fn serve() -> Result<()> {
 
     info!("Using Whisper API URL: {}", args.whisper_url);
 
-    let state = crate::create_app_state(
+    let state = crate::create_app_state(crate::AppConfig {
         events_pool,
         zumblezay_pool,
         cache_pool,
-        args.whisper_url,
-        args.max_concurrent_tasks,
-        args.openai_api_key,
-        args.openai_api_base,
-        args.runpod_api_key,
-        args.transcription_service,
-        args.default_summary_model,
-        args.video_path_original_prefix,
-        args.video_path_replacement_prefix,
-        args.timezone,
-    );
+        whisper_url: args.whisper_url,
+        max_concurrent_tasks: args.max_concurrent_tasks,
+        openai_api_key: args.openai_api_key,
+        openai_api_base: args.openai_api_base,
+        runpod_api_key: args.runpod_api_key,
+        transcription_service: args.transcription_service,
+        default_summary_model: args.default_summary_model,
+        video_path_original_prefix: args.video_path_original_prefix,
+        video_path_replacement_prefix: args.video_path_replacement_prefix,
+        timezone_str: args.timezone,
+    });
 
     // Create a channel for shutdown coordination
     let (shutdown_tx, mut shutdown_rx) =

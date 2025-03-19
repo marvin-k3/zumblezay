@@ -9,7 +9,7 @@ use rusqlite::params;
 use std::sync::Arc;
 use std::sync::Once;
 use tower::util::ServiceExt;
-use tracing::{debug, info};
+use tracing::debug;
 use zumblezay::AppState;
 
 // Initialize logging once for all tests
@@ -22,7 +22,7 @@ fn init_test_logging() {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "info,tower_http=debug".into()),
+                    .unwrap_or_else(|_| "debug".into()),
             )
             .with_test_writer()
             .finish();
@@ -121,10 +121,67 @@ async fn test_with_real_server() {
     assert_eq!(body, "OK");
 }
 
+/// Helper function to make API requests and extract the response body
+async fn make_api_request(router: Router, uri: &str) -> (StatusCode, Vec<u8>) {
+    let response = router
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+
+    debug!("Response status: {:?}", status);
+    debug!("Response body: {}", String::from_utf8_lossy(&body));
+
+    (status, body)
+}
+
+/// Helper function to validate API response and extract events
+fn validate_and_parse_events(
+    status: StatusCode,
+    body: &[u8],
+) -> Vec<serde_json::Value> {
+    let body_str = String::from_utf8_lossy(body).to_string();
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Response status was: {:?}, body: {:?}",
+        status,
+        body_str
+    );
+
+    let events: Vec<serde_json::Value> = serde_json::from_slice(body).unwrap();
+
+    debug!("Number of events returned: {}", events.len());
+    for (i, event) in events.iter().enumerate() {
+        debug!("Event {}: {:?}", i, event);
+    }
+
+    events
+}
+
+/// Helper function to extract event IDs from events
+fn extract_event_ids(events: &[serde_json::Value]) -> Vec<&str> {
+    events
+        .iter()
+        .map(|e| e["event_id"].as_str().unwrap())
+        .collect()
+}
+
 #[tokio::test]
 async fn test_events_api() {
     init_test_logging();
     let (app_state, app_router) = app();
+    assert_eq!(app_state.timezone, chrono_tz::Australia::Adelaide);
     let conn = app_state.zumblezay_db.get().unwrap();
 
     /*
@@ -139,7 +196,7 @@ async fn test_events_api() {
         );
      */
     // Define and insert test events in a more compact way
-    // Note: These timestamps are now adjusted for Australia/Adelaide timezone (GMT+1030)
+    // Note: These timestamps are for Australia/Adelaide timezone (GMT+1030)
     // 2022-12-31 in Adelaide starts at 1672407000.0 and ends at 1672493400.0 (UTC)
     let test_events = [
         (
@@ -159,7 +216,7 @@ async fn test_events_api() {
             1672450800.0, // 12:00 noon
             1672450820.0, // 20 seconds later
             "person",
-            "camera1",
+            "camera2",
             "/data/videos/test2.mp4",
         ),
         (
@@ -169,7 +226,7 @@ async fn test_events_api() {
             1672493100.0, // 23:55 (5 minutes before midnight)
             1672493120.0, // 20 seconds later
             "motion",
-            "camera2",
+            "camera1",
             "/data/videos/test3.mp4",
         ),
     ];
@@ -201,345 +258,91 @@ async fn test_events_api() {
     }
 
     // Test basic events retrieval
-    let response = app_router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/events")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let status = response.status();
-
-    // Extract the body outside the conditional block to avoid consuming response twice
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Response status was: {:?}, body: {:?}",
-        status,
-        String::from_utf8_lossy(&body)
-    );
-
-    // Use the already extracted body instead of consuming response again
-    let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let (status, body) =
+        make_api_request(app_router.clone(), "/api/events").await;
+    let events = validate_and_parse_events(status, &body);
 
     // Verify we got our test events
     assert_eq!(events.len(), 3);
+    let event_ids = extract_event_ids(&events);
+
+    assert!(event_ids.contains(&"test-event-1"));
+    assert!(event_ids.contains(&"test-event-2"));
+    assert!(event_ids.contains(&"test-event-3"));
 
     // Test with date filter - using fixed date "2022-12-31"
     let fixed_date = "2022-12-31";
-    let response = app_router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/events?date={}", fixed_date))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let (status, body) = make_api_request(
+        app_router.clone(),
+        &format!("/api/events?date={}", fixed_date),
+    )
+    .await;
+    let events = validate_and_parse_events(status, &body);
 
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Response status was: {:?}, body: {:?}",
-        status,
-        String::from_utf8_lossy(&body)
-    );
-    let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
     assert_eq!(events.len(), 3, "Expected 3 events for date {}", fixed_date);
+    let event_ids = extract_event_ids(&events);
+
+    assert!(event_ids.contains(&"test-event-1"));
+    assert!(event_ids.contains(&"test-event-2"));
+    assert!(event_ids.contains(&"test-event-3"));
 
     // Test with camera filter
-    let response = app_router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/events?camera_id=camera1")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Response status was: {:?}, body: {:?}",
-        status,
-        String::from_utf8_lossy(&body)
-    );
-    let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let (status, body) =
+        make_api_request(app_router.clone(), "/api/events?camera_id=camera1")
+            .await;
+    let events = validate_and_parse_events(status, &body);
 
     // Verify camera-filtered events
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| e["camera_id"] == "camera1"));
     assert_eq!(events.len(), 2);
+    let event_ids = extract_event_ids(&events);
 
-    // Test with start and end time filters
-    // Debug: Print all events with their local times
-    info!("DEBUG: All events in database:");
-    let mut stmt = conn.prepare("SELECT event_id, event_start, event_end, 
-                             strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) as local_start_time,
-                             strftime('%H:%M:%S', datetime(event_end, 'unixepoch', 'localtime')) as local_end_time,
-                             strftime('%Y-%m-%d', datetime(event_start, 'unixepoch', 'localtime')) as local_date
-                             FROM events ORDER BY event_start")
-        .unwrap();
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0).unwrap(),
-                row.get::<_, f64>(1).unwrap(),
-                row.get::<_, f64>(2).unwrap(),
-                row.get::<_, String>(3).unwrap(),
-                row.get::<_, String>(4).unwrap(),
-                row.get::<_, String>(5).unwrap(),
-            ))
-        })
-        .unwrap();
+    assert!(event_ids.contains(&"test-event-1"));
+    assert!(event_ids.contains(&"test-event-3"));
 
-    let mut event_data = Vec::new();
-    for row in rows {
-        let (id, start_ts, end_ts, local_start, local_end, local_date) =
-            row.unwrap();
-        info!("Event {}: start_ts={}, end_ts={}, local_start_time={}, local_end_time={}, local_date={}", 
-                 id, start_ts, end_ts, local_start, local_end, local_date);
-        event_data.push((id, local_start, local_date));
-    }
-
-    // Debug: Print system timezone information
-    info!("DEBUG: System timezone info:");
-    info!(
-        "TZ env var: {:?}",
-        std::env::var("TZ").unwrap_or_else(|_| "Not set".to_string())
-    );
-
-    // Use the actual local date and times from the database instead of hardcoded values
-    // This makes the test timezone-independent
-    assert!(event_data.len() >= 2, "Need at least 2 events for the test");
-
-    let _test_date = &event_data[0].2; // Use date from first event (unused now)
-    let time_start = &event_data[0].1; // Use start time from first event
-
-    // For time_end, use the time from the second event to ensure we get both events
-    let time_end = &event_data[1].1;
-
-    // Instead of using date filter which is problematic with timezone differences,
-    // we'll use camera_id filter with time filters
+    // Test with time range filter
     let time_query_url = format!(
-        "/api/events?camera_id=camera1&time_start={}&time_end={}",
-        time_start, time_end
+        "/api/events?date={}&time_start={}&time_end={}",
+        fixed_date, "00:04:59", "23:00:00"
     );
-    info!("DEBUG: Making request to: {}", time_query_url);
+    debug!("Making request to: {}", time_query_url);
 
-    let response = app_router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(&time_query_url)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let (status, body) =
+        make_api_request(app_router.clone(), &time_query_url).await;
+    let events = validate_and_parse_events(status, &body);
+    let event_ids = extract_event_ids(&events);
 
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body_str = String::from_utf8_lossy(&body).to_string();
-
-    info!("DEBUG: Response status: {:?}", status);
-    info!("DEBUG: Response body: {}", body_str);
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Response status was: {:?}, body: {:?}",
-        status,
-        body_str
-    );
-
-    let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    info!("DEBUG: Number of events returned: {}", events.len());
-    for (i, event) in events.iter().enumerate() {
-        info!("DEBUG: Event {}: {:?}", i, event);
-    }
+    assert!(event_ids.contains(&"test-event-1"));
+    assert!(event_ids.contains(&"test-event-2"));
 
     assert_eq!(
         events.len(),
         2,
-        "Expected 2 events in time range {} to {}, got {}",
-        time_start,
-        time_end,
+        "Expected 2 events in time range 00:04:59 to 23:00:00, got {}",
         events.len()
     );
-}
 
-#[tokio::test]
-async fn test_events_api_timezone_robust() {
-    init_test_logging();
-    let (app_state, app_router) = app();
-    let conn = app_state.zumblezay_db.get().unwrap();
-
-    // Insert the same test events as in test_events_api
-    let test_events = [
-        (
-            "test-tz-event-1",
-            1672531200,
-            1672531500.0, // First event start time
-            1672531510.0,
-            "motion",
-            "camera1",
-            "/data/videos/test1.mp4",
-        ),
-        (
-            "test-tz-event-2",
-            1672531300,
-            1672531600.0, // Second event start time
-            1672531620.0,
-            "person",
-            "camera1",
-            "/data/videos/test2.mp4",
-        ),
-        (
-            "test-tz-event-3",
-            1672531400,
-            1672531700.0, // Third event start time
-            1672531720.0,
-            "motion",
-            "camera2",
-            "/data/videos/test3.mp4",
-        ),
-    ];
-
-    for (
-        event_id,
-        created_at,
-        event_start,
-        event_end,
-        event_type,
-        camera_id,
-        video_path,
-    ) in test_events
-    {
-        conn.execute(
-            "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) VALUES 
-             (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                event_id,
-                created_at,
-                event_start,
-                event_end,
-                event_type,
-                camera_id,
-                video_path,
-            ],
-        )
-        .unwrap();
-    }
-
-    // Get the local time representation of our events directly from the database
-    let mut stmt = conn.prepare("
-        SELECT 
-            event_id,
-            strftime('%Y-%m-%d', datetime(event_start, 'unixepoch', 'localtime')) as local_date,
-            strftime('%H:%M:%S', datetime(event_start, 'unixepoch', 'localtime')) as local_time
-        FROM events
-        WHERE event_id LIKE 'test-tz-event-%'
-        ORDER BY event_start
-    ").unwrap();
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0).unwrap(),
-                row.get::<_, String>(1).unwrap(), // local_date
-                row.get::<_, String>(2).unwrap(), // local_time
-            ))
-        })
-        .unwrap();
-
-    let mut event_times = Vec::new();
-    for row in rows {
-        let (id, date, time) = row.unwrap();
-        info!("Event {}: local_date={}, local_time={}", id, date, time);
-        event_times.push((id, date, time));
-    }
-
-    // Ensure we have at least 2 events to test with
-    assert!(
-        event_times.len() >= 2,
-        "Need at least 2 events for the test"
+    // Test with combined filters (camera and time range)
+    let time_query_url = format!(
+        "/api/events?camera_id=camera1&date={}&time_start={}&time_end={}",
+        fixed_date, "10:00:00", "23:59:00"
     );
+    debug!("Making request to: {}", time_query_url);
 
-    // Use the actual local date from the first event
-    let _test_date = &event_times[0].1; // Unused now
-    info!("Using test date: {}", _test_date);
+    let (status, body) =
+        make_api_request(app_router.clone(), &time_query_url).await;
+    let events = validate_and_parse_events(status, &body);
 
-    // Use the actual local times from the first and second events
-    let time_start = &event_times[0].2;
-    // Add 1 second to the second event's time to ensure we include it
-    let time_end = &event_times[1].2;
-
-    info!("Using time range: {} to {}", time_start, time_end);
-
-    // Construct the URL with the actual local times from the database
-    // Use camera_id filter instead of date filter to avoid timezone issues
-    let url = format!(
-        "/api/events?camera_id=camera1&time_start={}&time_end={}",
-        time_start, time_end
-    );
-    info!("Request URL: {}", url);
-
-    // Make the request with the timezone-aware parameters
-    let response = app_router
-        .clone()
-        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body_str = String::from_utf8_lossy(&body).to_string();
-
-    info!("Response status: {:?}", status);
-    info!("Response body: {}", body_str);
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Response status was: {:?}, body: {:?}",
-        status,
-        body_str
-    );
-
-    let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    info!("Number of events returned: {}", events.len());
-
-    // We should get exactly 2 events - the first and second ones
     assert_eq!(
         events.len(),
-        2,
-        "Expected 2 events in time range {} to {}, got {}",
-        time_start,
-        time_end,
+        1,
+        "Expected 1 event in time range 10:00:00 to 23:59:00, got {}",
         events.len()
     );
+    let event_ids = extract_event_ids(&events);
 
-    // Verify the event IDs match what we expect
-    let event_ids: Vec<&str> = events
-        .iter()
-        .map(|e| e["event_id"].as_str().unwrap())
-        .collect();
-
-    assert!(event_ids.contains(&"test-tz-event-1"));
-    assert!(event_ids.contains(&"test-tz-event-2"));
+    assert!(event_ids.contains(&"test-event-3"));
 }
 
 #[tokio::test]
