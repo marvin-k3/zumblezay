@@ -1,3 +1,5 @@
+use crate::openai::real::RealOpenAIClient;
+use crate::openai::OpenAIClientTrait;
 use crate::prompts::SUMMARY_SYSTEM_PROMPT;
 use crate::transcripts;
 use crate::AppState;
@@ -6,12 +8,13 @@ use async_openai::{
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+        ChatCompletionRequestUserMessageArgs,
     },
     Client,
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, instrument};
 
 pub async fn generate_summary(
@@ -20,6 +23,25 @@ pub async fn generate_summary(
     model: &str,
     summary_type: &str,
     user_prompt: &str,
+) -> Result<String, anyhow::Error> {
+    generate_summary_with_client(
+        state,
+        date,
+        model,
+        summary_type,
+        user_prompt,
+        None,
+    )
+    .await
+}
+
+pub async fn generate_summary_with_client(
+    state: &AppState,
+    date: &str,
+    model: &str,
+    summary_type: &str,
+    user_prompt: &str,
+    client: Option<Arc<dyn OpenAIClientTrait>>,
 ) -> Result<String, anyhow::Error> {
     // Get the CSV content
     let csv_content =
@@ -33,59 +55,62 @@ pub async fn generate_summary(
     let start_time = std::time::Instant::now();
 
     // Get the OpenAI client
-    let client = get_openai_client_from_state(state).await?;
+    let client = match client {
+        Some(c) => c,
+        None => Arc::new(get_openai_client_from_state(state).await?),
+    };
 
     info!("Building system message for {} summary", summary_type);
-    let system_message = ChatCompletionRequestMessage::System(
-        ChatCompletionRequestSystemMessageArgs::default()
-            .content(SUMMARY_SYSTEM_PROMPT)
-            .build()
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to build system message: {}", e)
-            })?,
-    );
+    let system_message = ChatCompletionRequestSystemMessageArgs::default()
+        .content(SUMMARY_SYSTEM_PROMPT)
+        .build()?;
 
     info!("Building user message for {} summary", summary_type);
-    let user_message = ChatCompletionRequestMessage::User(
-        ChatCompletionRequestUserMessageArgs::default()
-            .content(
-                user_prompt
-                    .replace("{date}", date)
-                    .replace("{transcript}", &csv_content),
-            )
-            .build()
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to build user message: {}", e)
-            })?,
-    );
+    let user_content = user_prompt
+        .replace("{date}", date)
+        .replace("{transcript}", &csv_content);
+    let user_message = ChatCompletionRequestUserMessageArgs::default()
+        .content(user_content)
+        .build()?;
 
-    info!("Building request message");
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages([system_message, user_message])
-        .build()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to build request message: {}", e)
-        })?;
+    info!("Sending request for {} summary", summary_type);
+    let response = client
+        .chat_completion(
+            model.to_string(),
+            vec![
+                ChatCompletionRequestMessage::System(system_message),
+                ChatCompletionRequestMessage::User(user_message),
+            ],
+        )
+        .await?;
 
-    let response = client.chat().create(request).await.map_err(|e| {
-        anyhow::anyhow!("Failed to create chat completion: {}", e)
-    })?;
+    info!("{} summary received", summary_type);
 
-    let summary = response
+    // Extract the content from the response
+    let maybe_summary = response
         .choices
         .first()
         .and_then(|choice| choice.message.content.as_ref())
-        .map(String::from)
-        .unwrap_or_else(|| {
-            if summary_type == "json" {
-                "[]".to_string()
-            } else {
-                "No summary generated".to_string()
-            }
-        });
+        .map(String::from);
 
-    info!("{} summary received", summary_type);
+    // Handle the case where no content was generated
+    let summary = match maybe_summary {
+        Some(content) if !content.trim().is_empty() => content,
+        Some(content) if summary_type == "json" && content.trim() == "[]" => {
+            // Empty JSON array is valid for JSON summary type
+            content
+        }
+        _ => {
+            // Log the issue
+            error!(
+                "No meaningful summary content was generated for {}",
+                summary_type
+            );
+            return Err(anyhow::anyhow!(
+                "No meaningful summary content was generated"
+            ));
+        }
+    };
 
     // Calculate duration
     let duration_ms = start_time.elapsed().as_millis() as i64;
@@ -124,7 +149,7 @@ pub async fn generate_summary(
 
 async fn get_openai_client_from_state(
     state: &AppState,
-) -> Result<Client<OpenAIConfig>, anyhow::Error> {
+) -> Result<RealOpenAIClient, anyhow::Error> {
     let api_key = state
         .openai_api_key
         .as_ref()
@@ -138,7 +163,7 @@ async fn get_openai_client_from_state(
     let config = OpenAIConfig::new()
         .with_api_base(api_base)
         .with_api_key(api_key);
-    Ok(Client::with_config(config))
+    Ok(RealOpenAIClient::new(Client::with_config(config)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -187,25 +212,29 @@ pub async fn get_daily_summary(
 
     query.push_str(" ORDER BY created_at DESC LIMIT 1");
 
-    let mut stmt = conn.prepare(&query)?;
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let summary = conn.query_row(
+        &query,
+        params
+            .iter()
+            .map(|p| p.as_ref())
+            .collect::<Vec<_>>()
+            .as_slice(),
+        |row| {
+            Ok(DailySummary {
+                id: row.get(0)?,
+                date: row.get(1)?,
+                created_at: row.get(2)?,
+                model: row.get(3)?,
+                prompt_name: row.get(4)?,
+                summary_type: row.get(5)?,
+                content: row.get(6)?,
+                duration_ms: row.get(7)?,
+            })
+        },
+    );
 
-    let result = stmt.query_row(param_refs.as_slice(), |row| {
-        Ok(DailySummary {
-            id: Some(row.get(0)?),
-            date: row.get(1)?,
-            created_at: row.get(2)?,
-            model: row.get(3)?,
-            prompt_name: row.get(4)?,
-            summary_type: row.get(5)?,
-            content: row.get(6)?,
-            duration_ms: row.get(7)?,
-        })
-    });
-
-    match result {
-        Ok(summary) => Ok(Some(summary)),
+    match summary {
+        Ok(s) => Ok(Some(s)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("Database error: {}", e)),
     }
@@ -213,7 +242,7 @@ pub async fn get_daily_summary(
 
 // Function to save a daily summary to the database
 #[instrument(skip(state, content))]
-async fn save_daily_summary(
+pub async fn save_daily_summary(
     state: &AppState,
     date: &str,
     model: &str,
@@ -222,59 +251,80 @@ async fn save_daily_summary(
     content: &str,
     duration_ms: i64,
 ) -> Result<i64> {
-    info!("Saving {} summary for date {}", summary_type, date);
     let conn = state.zumblezay_db.get()?;
+    let created_at = chrono::Utc::now().timestamp();
 
-    // Insert the summary
-    let id = conn.query_row(
-        "INSERT INTO daily_summaries (
-            date, created_at, model, prompt_name, 
-            summary_type, content, duration_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(date, model, prompt_name, summary_type) 
-        DO UPDATE SET 
-            content = excluded.content,
-            created_at = excluded.created_at,
-            duration_ms = excluded.duration_ms
-        RETURNING id",
-        params![
-            date,
-            chrono::Utc::now().timestamp(),
-            model,
-            prompt_name,
-            summary_type,
-            content,
-            duration_ms,
-        ],
-        |row| row.get(0),
-    )?;
+    // First, try to find an existing summary with the same date, model, prompt_name, and summary_type
+    let existing = conn.query_row(
+        "SELECT id FROM daily_summaries 
+         WHERE date = ? AND model = ? AND prompt_name = ? AND summary_type = ?",
+        params![date, model, prompt_name, summary_type],
+        |row| row.get::<_, i64>(0),
+    );
 
-    Ok(id)
+    match existing {
+        Ok(id) => {
+            // Update existing summary
+            conn.execute(
+                "UPDATE daily_summaries 
+                 SET content = ?, created_at = ?, duration_ms = ? 
+                 WHERE id = ?",
+                params![content, created_at, duration_ms, id],
+            )?;
+            Ok(id)
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // Insert new summary
+            conn.execute(
+                "INSERT INTO daily_summaries 
+                 (date, created_at, model, prompt_name, summary_type, content, duration_ms) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    date,
+                    created_at,
+                    model,
+                    prompt_name,
+                    summary_type,
+                    content,
+                    duration_ms
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+        Err(e) => Err(anyhow::anyhow!("Database error: {}", e)),
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub provider: String,
 }
 
-#[instrument(skip(state), err)]
+// For the get_available_models function, add a version with client injection
 pub async fn get_available_models(
     state: &AppState,
+) -> Result<Vec<ModelInfo>, anyhow::Error> {
+    get_available_models_with_client(state, None).await
+}
+
+pub async fn get_available_models_with_client(
+    state: &AppState,
+    client: Option<Arc<dyn OpenAIClientTrait>>,
 ) -> Result<Vec<ModelInfo>, anyhow::Error> {
     let mut models = Vec::new();
 
     // Get the OpenAI client
-    let openai_client = get_openai_client_from_state(state).await?;
+    let client = match client {
+        Some(c) => c,
+        None => Arc::new(get_openai_client_from_state(state).await?),
+    };
 
     info!("Fetching OpenAI models");
-    let response =
-        openai_client.models().list().await.map_err(|e| {
-            anyhow::anyhow!("Failed to fetch OpenAI models: {}", e)
-        })?;
+    let openai_models = client.list_models().await?;
 
-    for model in response.data {
+    for model in openai_models {
         models.push(ModelInfo {
             id: model.id.clone(),
             name: model.id.clone(),
@@ -282,12 +332,13 @@ pub async fn get_available_models(
         });
     }
 
-    // Sort models by provider and name
+    // Sort models by provider and id
     models.sort_by(|a, b| {
-        if a.provider == b.provider {
-            a.name.cmp(&b.name)
+        let provider_cmp = a.provider.cmp(&b.provider);
+        if provider_cmp == std::cmp::Ordering::Equal {
+            a.id.cmp(&b.id)
         } else {
-            a.provider.cmp(&b.provider)
+            provider_cmp
         }
     });
 
