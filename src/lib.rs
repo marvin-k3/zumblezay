@@ -14,9 +14,12 @@ use tracing::info;
 use tracing::instrument;
 
 pub mod app;
+pub mod openai;
 pub mod prompts;
 pub mod storyboard;
 pub mod summary;
+#[cfg(test)]
+pub mod summary_test;
 pub mod time_util;
 pub mod transcription;
 pub mod transcripts;
