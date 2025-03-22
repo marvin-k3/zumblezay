@@ -1,3 +1,4 @@
+use crate::openai::{real::maybe_create_openai_client, OpenAIClientTrait};
 use anyhow::Result;
 use lru::LruCache;
 use r2d2::Pool;
@@ -12,6 +13,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use tracing::info;
 use tracing::instrument;
+use tracing::warn;
 
 pub mod app;
 pub mod openai;
@@ -71,8 +73,7 @@ pub struct AppState {
     pub stats: ServiceStats,
     pub active_tasks: Arc<Mutex<HashMap<String, String>>>,
     pub semaphore: Arc<tokio::sync::Semaphore>,
-    pub openai_api_key: Option<String>,
-    pub openai_api_base: Option<String>,
+    pub openai_client: Option<Arc<dyn OpenAIClientTrait>>,
     pub runpod_api_key: Option<String>,
     pub transcription_service: String,
     pub camera_name_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -157,8 +158,7 @@ impl AppState {
             stats: ServiceStats::new(),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
-            openai_api_key: None,
-            openai_api_base: Some("https://localhost:1234/v1".to_string()),
+            openai_client: None,
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),
             camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -232,6 +232,17 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
     let timezone =
         time_util::get_local_timezone(config.timezone_str.as_deref());
 
+    let openai_client = match maybe_create_openai_client(
+        config.openai_api_key,
+        config.openai_api_base,
+    ) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            warn!("Failed to create OpenAI client: {}", e);
+            None
+        }
+    };
+
     Arc::new(AppState {
         events_db: config.events_pool,
         zumblezay_db: config.zumblezay_pool,
@@ -243,8 +254,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         semaphore: Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_tasks,
         )),
-        openai_api_key: config.openai_api_key,
-        openai_api_base: config.openai_api_base,
+        openai_client,
         runpod_api_key: config.runpod_api_key,
         transcription_service: config.transcription_service,
         camera_name_cache: Arc::new(Mutex::new(HashMap::new())),

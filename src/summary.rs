@@ -1,16 +1,11 @@
-use crate::openai::real::RealOpenAIClient;
 use crate::openai::OpenAIClientTrait;
 use crate::prompts::SUMMARY_SYSTEM_PROMPT;
 use crate::transcripts;
 use crate::AppState;
 use anyhow::Result;
-use async_openai::{
-    config::OpenAIConfig,
-    types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestUserMessageArgs,
-    },
-    Client,
+use async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestUserMessageArgs,
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -57,7 +52,7 @@ pub async fn generate_summary_with_client(
     // Get the OpenAI client
     let client = match client {
         Some(c) => c,
-        None => Arc::new(get_openai_client_from_state(state).await?),
+        None => state.openai_client.as_ref().unwrap().clone(),
     };
 
     info!("Building system message for {} summary", summary_type);
@@ -145,25 +140,6 @@ pub async fn generate_summary_with_client(
     info!("{} summary saved to database", summary_type);
 
     Ok(summary)
-}
-
-async fn get_openai_client_from_state(
-    state: &AppState,
-) -> Result<RealOpenAIClient, anyhow::Error> {
-    let api_key = state
-        .openai_api_key
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
-
-    let api_base = state
-        .openai_api_base
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI API base not configured"))?;
-
-    let config = OpenAIConfig::new()
-        .with_api_base(api_base)
-        .with_api_key(api_key);
-    Ok(RealOpenAIClient::new(Client::with_config(config)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -318,7 +294,7 @@ pub async fn get_available_models_with_client(
     // Get the OpenAI client
     let client = match client {
         Some(c) => c,
-        None => Arc::new(get_openai_client_from_state(state).await?),
+        None => state.openai_client.as_ref().unwrap().clone(),
     };
 
     info!("Fetching OpenAI models");

@@ -6,7 +6,7 @@ use async_openai::types::{
 };
 use async_openai::Client;
 use async_trait::async_trait;
-
+use std::sync::Arc;
 // A real implementation of the OpenAI client
 pub struct RealOpenAIClient {
     client: Client<OpenAIConfig>,
@@ -42,4 +42,20 @@ impl OpenAIClientTrait for RealOpenAIClient {
         let response = self.client.models().list().await?;
         Ok(response.data)
     }
+}
+
+/// Create a new OpenAI client from a config
+pub fn maybe_create_openai_client(
+    api_key: Option<String>,
+    api_base: Option<String>,
+) -> Result<Arc<dyn OpenAIClientTrait>, anyhow::Error> {
+    let api_key = api_key
+        .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
+    let api_base = api_base
+        .ok_or_else(|| anyhow::anyhow!("OpenAI API base not configured"))?;
+
+    let config = async_openai::config::OpenAIConfig::new()
+        .with_api_base(api_base)
+        .with_api_key(api_key);
+    Ok(Arc::new(RealOpenAIClient::new(Client::with_config(config))))
 }
