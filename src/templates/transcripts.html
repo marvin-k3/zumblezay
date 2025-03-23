@@ -472,6 +472,8 @@
                 document.getElementById('loading').style.display = 'none';
             });
         
+        // Temporarily disabled JSON summary loading
+        /* 
         // Load JSON summary
         fetch(`/api/transcripts/summary/${date}/json`)
             .then(response => {
@@ -487,6 +489,10 @@
                 console.error('Error loading JSON summary:', error);
                 document.getElementById('json-summary').textContent = 'No JSON summary available for this date.';
             });
+        */
+        
+        // Add a placeholder message in the JSON tab
+        document.getElementById('json-summary').textContent = 'JSON summary loading temporarily disabled.';
         
         // Load CSV data and format as table
         fetch(`/api/transcripts/csv/${date}`)
@@ -537,6 +543,8 @@
                 document.getElementById('markdown-summary').innerHTML = data;
                 updateSummaryMetadata(date, 'markdown', model);
                 
+                // After markdown is generated, JSON summary generation is temporarily disabled
+                /*
                 // After markdown is generated, generate JSON summary
                 return fetch(`/api/transcripts/summary/${date}/json?model=${model}`);
             })
@@ -548,6 +556,9 @@
             })
             .then(data => {
                 document.getElementById('json-summary').textContent = JSON.stringify(data, null, 2);
+                */
+                
+                document.getElementById('json-summary').textContent = 'JSON summary generation temporarily disabled.';
                 document.getElementById('loading').style.display = 'none';
                 
                 // Refresh summaries list
@@ -660,6 +671,15 @@
         
         // Show loading indicator
         document.getElementById('loading').style.display = 'block';
+        
+        // Temporarily handle JSON type differently
+        if (type === 'json') {
+            document.getElementById('json-tab').click();
+            document.getElementById('json-summary').textContent = 'JSON summary loading temporarily disabled.';
+            document.getElementById('loading').style.display = 'none';
+            updateSummaryMetadata(date, type, model);
+            return;
+        }
         
         fetch(`/api/transcripts/summary/${date}/type/${type}/model/${model}/prompt/${prompt}`)
             .then(response => {
