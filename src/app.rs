@@ -895,7 +895,7 @@ async fn get_transcripts_csv(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let csv_content =
+    let (csv_content, _event_ids) =
         transcripts::get_formatted_transcripts_for_date(&state, &date)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

@@ -38,13 +38,18 @@ pub async fn generate_summary_with_client(
     user_prompt: &str,
     client: Option<Arc<dyn OpenAIClientTrait>>,
 ) -> Result<String, anyhow::Error> {
-    // Get the CSV content
-    let csv_content =
+    // Get the CSV content and event IDs
+    let (csv_content, event_ids) =
         transcripts::get_formatted_transcripts_for_date(state, date)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("Failed to get formatted transcripts: {}", e)
             })?;
+
+    // Check if we have any events
+    if event_ids.is_empty() {
+        return Err(anyhow::anyhow!("No events found for the date"));
+    }
 
     // Start timing the summary generation
     let start_time = std::time::Instant::now();

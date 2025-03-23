@@ -57,7 +57,7 @@ pub async fn save_transcript(
 pub async fn get_formatted_transcripts_for_date(
     state: &AppState,
     date: &str,
-) -> Result<String, anyhow::Error> {
+) -> Result<(String, Vec<String>), anyhow::Error> {
     let camera_names: HashMap<String, String> =
         state.camera_name_cache.lock().await.clone();
     let (start_timestamp, end_timestamp) =
@@ -77,7 +77,8 @@ pub async fn get_formatted_transcripts_for_date(
             "SELECT 
             e.event_start,
             t.raw_response,
-            e.camera_id
+            e.camera_id,
+            e.event_id
          FROM events e
          JOIN transcriptions t ON e.event_id = t.event_id
          WHERE 
@@ -98,8 +99,12 @@ pub async fn get_formatted_transcripts_for_date(
 
     // Start building CSV content with headers
     let mut csv_content = String::from("time,camera,transcription\n");
+    let mut event_ids = Vec::new();
+
+    let mut has_events = false;
 
     while let Ok(Some(row)) = rows.next() {
+        has_events = true;
         let timestamp: f64 = row
             .get(0)
             .map_err(|e| anyhow::anyhow!("Failed to get timestamp: {}", e))?;
@@ -109,6 +114,9 @@ pub async fn get_formatted_transcripts_for_date(
         let camera_id: String = row
             .get(2)
             .map_err(|e| anyhow::anyhow!("Failed to get camera id: {}", e))?;
+        let event_id: String = row
+            .get(3)
+            .map_err(|e| anyhow::anyhow!("Failed to get event id: {}", e))?;
 
         // Parse the JSON response
         let json: Value = serde_json::from_str(&raw_response).map_err(|e| {
@@ -122,6 +130,9 @@ pub async fn get_formatted_transcripts_for_date(
         if text.is_empty() {
             continue;
         }
+
+        // Add this event_id to our list of used events
+        event_ids.push(event_id);
 
         // Convert UTC timestamp to local time for display
         let utc_datetime = Utc
@@ -146,7 +157,12 @@ pub async fn get_formatted_transcripts_for_date(
         ));
     }
 
-    Ok(csv_content)
+    // Return an error if no events were found for the date
+    if !has_events {
+        return Err(anyhow::anyhow!("No events found for the date"));
+    }
+
+    Ok((csv_content, event_ids))
 }
 
 #[cfg(test)]
@@ -366,7 +382,7 @@ mod tests {
         println!("Events in date range: {}", events_in_range);
 
         // Get formatted transcripts for 2023-01-01
-        let csv_content =
+        let (csv_content, _event_ids) =
             get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
 
         // Print the CSV content for debugging
@@ -442,7 +458,7 @@ mod tests {
         )?;
 
         // Get formatted transcripts
-        let csv_content =
+        let (csv_content, _) =
             get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
 
         println!("CSV Content with Adelaide timezone: {}", csv_content);
@@ -458,7 +474,7 @@ mod tests {
         state.timezone = chrono_tz::Australia::Sydney;
 
         // Use the same database connection
-        let csv_content2 =
+        let (csv_content2, _) =
             get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
 
         println!("CSV Content with Sydney timezone: {}", csv_content2);
@@ -485,13 +501,17 @@ mod tests {
         setup_test_db(&state).await?;
 
         // Get formatted transcripts for a date with no transcriptions
-        let csv_content =
-            get_formatted_transcripts_for_date(&state, "2023-01-02").await?;
+        // This should now return an error since we've changed the function
+        let result =
+            get_formatted_transcripts_for_date(&state, "2023-01-02").await;
 
-        // Verify the CSV content (should only have the header)
-        assert_eq!(
-            csv_content, "time,camera,transcription\n",
-            "CSV should only have the header for empty results"
+        // Verify that we get an error for dates with no events
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("No events found for the date"),
+            "Expected 'No events found for the date' error, got: {}",
+            err
         );
 
         Ok(())
@@ -529,7 +549,7 @@ mod tests {
         )?;
 
         // Get formatted transcripts
-        let csv_content =
+        let (csv_content, _) =
             get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
 
         // Verify the CSV content (should only have the header since empty transcriptions are skipped)
@@ -609,7 +629,7 @@ mod tests {
         println!("Events in date range: {}", events_in_range);
 
         // Get formatted transcripts
-        let csv_content =
+        let (csv_content, _) =
             get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
 
         // Print the CSV content for debugging
@@ -630,6 +650,90 @@ mod tests {
             line_count, 2,
             "CSV should have 2 lines (header + 1 transcript)"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_no_events_for_date() -> Result<(), anyhow::Error> {
+        // Create a test AppState
+        let state = AppState::new_for_testing();
+
+        // No setup for test database - we want to test the empty case
+
+        // Try to get formatted transcripts for a date with no events
+        let result =
+            get_formatted_transcripts_for_date(&state, "2023-01-01").await;
+
+        // Verify that we get an error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("No events found for the date"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_event_ids_are_returned() -> Result<(), anyhow::Error> {
+        // Create a test AppState
+        let state = AppState::new_for_testing();
+
+        // Set up test database
+        setup_test_db(&state).await?;
+
+        // Get event IDs
+        let conn = state.zumblezay_db.get()?;
+        let event1_id: String = conn.query_row(
+            "SELECT event_id FROM events WHERE camera_id = 'camera1'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let event2_id: String = conn.query_row(
+            "SELECT event_id FROM events WHERE camera_id = 'camera2'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // Insert test transcriptions
+        conn.execute(
+            "INSERT INTO transcriptions (
+                event_id, created_at, transcription_type, url,
+                duration_ms, raw_response
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                event1_id,
+                chrono::Utc::now().timestamp(),
+                state.transcription_service.as_str(),
+                state.whisper_url,
+                500,
+                r#"{"text": "This is a test transcript from the living room"}"#,
+            ],
+        )?;
+
+        conn.execute(
+            "INSERT INTO transcriptions (
+                event_id, created_at, transcription_type, url,
+                duration_ms, raw_response
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                event2_id,
+                chrono::Utc::now().timestamp(),
+                state.transcription_service.as_str(),
+                state.whisper_url,
+                600,
+                r#"{"text": "Someone is at the front door"}"#,
+            ],
+        )?;
+
+        // Get formatted transcripts for 2023-01-01
+        let (_csv_content, returned_event_ids) =
+            get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
+
+        // Verify that both event IDs are returned
+        assert_eq!(returned_event_ids.len(), 2);
+        assert!(returned_event_ids.contains(&event1_id));
+        assert!(returned_event_ids.contains(&event2_id));
 
         Ok(())
     }
