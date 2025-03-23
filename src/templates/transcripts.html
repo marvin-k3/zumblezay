@@ -59,6 +59,13 @@
     .summary-list-item.active {
         border-color: #0d6efd;
         box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        background-color: rgba(13, 110, 253, 0.1);
+    }
+    .summary-list-item.active .text-muted {
+        color: #495057 !important;
+    }
+    .summary-list-item.active .badge.bg-secondary {
+        background-color: #0d6efd !important;
     }
     .csv-table {
         width: 100%;
@@ -236,14 +243,14 @@
             dateInput.value = formatDateForInput(localizedDate);
         }
         
-        // Check for existing summaries for the initial date
-        checkExistingSummaries(dateInput.value);
+        // Initial load - this calls checkExistingSummaries internally
+        loadTranscripts();
         
         // Update URL when date changes
         dateInput.addEventListener('change', function() {
             updateUrlParams('date', this.value);
-            // Check for existing summaries when date changes
-            checkExistingSummaries(this.value);
+            // Load transcripts for the new date
+            loadTranscripts();
         });
         
         // Update URL when model changes
@@ -251,11 +258,6 @@
         modelSelector.addEventListener('change', function() {
             updateUrlParams('model', this.value);
         });
-        
-        // Load transcripts button click handler
-        // document.getElementById('load-transcripts').addEventListener('click', function() {
-        //     loadTranscripts();
-        // });
         
         // Generate summary button click handler
         document.getElementById('generate-summary').addEventListener('click', function() {
@@ -271,18 +273,31 @@
                 tab.click();
             }
         }
-        
-        // Initial load
-        loadTranscripts();
     });
+    
+    // Add a helper function to show summary notifications
+    function showSummaryNotification(count) {
+        // First remove any existing notification
+        const existingAlert = document.getElementById('summaries-alert');
+        if (existingAlert) {
+            existingAlert.remove();
+        }
+        
+        // If we have summaries, show the notification
+        if (count > 0) {
+            const generateBtn = document.getElementById('generate-summary');
+            generateBtn.insertAdjacentHTML('afterend', 
+                `<div class="alert alert-info mt-3" id="summaries-alert">
+                    <i class="bi bi-info-circle"></i> 
+                    <strong>${count} existing ${count === 1 ? 'summary' : 'summaries'}</strong> found.
+                    Click on a summary in the list below to view it.
+                </div>`);
+        }
+    }
     
     // Function to check for existing summaries before generating new ones
     function checkExistingSummaries(date) {
         if (!date) return;
-        
-        // Remove any existing summaries alert
-        const existingAlert = document.getElementById('summaries-alert');
-        if (existingAlert) existingAlert.remove();
         
         // Show a subtle loading indicator
         const summariesContainer = document.getElementById('summaries-list-container');
@@ -301,24 +316,24 @@
                     // Display existing summaries
                     displaySummariesList(data.summaries);
                     
-                    // Show a notification that summaries exist
-                    const generateBtn = document.getElementById('generate-summary');
-                    generateBtn.insertAdjacentHTML('afterend', 
-                        `<div class="alert alert-info mt-3" id="summaries-alert">
-                            <i class="bi bi-info-circle"></i> 
-                            <strong>${data.summaries.length} existing ${data.summaries.length === 1 ? 'summary' : 'summaries'}</strong> found.
-                            Click on a summary in the list below to view it.
-                        </div>`);
+                    // Show notification about existing summaries
+                    showSummaryNotification(data.summaries.length);
                 } else {
                     // No summaries exist
                     summariesContainer.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date. Click "Generate New Summary" to create one.</div>';
                     document.querySelector('.summary-list').style.display = 'block';
+                    
+                    // Clear any existing notification since we have no summaries
+                    showSummaryNotification(0);
                 }
             })
             .catch(error => {
                 console.error('Error checking for summaries:', error);
                 summariesContainer.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> Error checking for summaries.</div>';
                 document.querySelector('.summary-list').style.display = 'block';
+                
+                // Clear any existing notification on error
+                showSummaryNotification(0);
             });
     }
     
@@ -450,7 +465,7 @@
         document.getElementById('csv-table').innerHTML = '';
         document.getElementById('summary-metadata').innerHTML = '';
         
-        // First check for existing summaries
+        // Check for existing summaries - this will also show notifications
         checkExistingSummaries(date);
         
         // Load markdown summary
@@ -519,10 +534,6 @@
             alert('Please select a date');
             return;
         }
-        
-        // Remove any existing summaries alert
-        const existingAlert = document.getElementById('summaries-alert');
-        if (existingAlert) existingAlert.remove();
         
         // Update URL with current date and model
         updateUrlParams('date', date);
@@ -646,11 +657,11 @@
                 item.addEventListener('click', function() {
                     // Remove active class from all items
                     document.querySelectorAll('.summary-list-item').forEach(el => {
-                        el.classList.remove('active', 'bg-primary', 'text-white');
+                        el.classList.remove('active', 'border-primary');
                     });
                     
-                    // Add active class to this item
-                    this.classList.add('active', 'bg-primary', 'text-white');
+                    // Add active class to this item (using a more subtle highlight)
+                    this.classList.add('active', 'border-primary');
                     
                     loadSpecificSummary(summary.date, summary.summary_type, summary.model, summary.prompt_name);
                 });
