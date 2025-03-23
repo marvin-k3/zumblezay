@@ -316,11 +316,36 @@
                     // Display existing summaries
                     displaySummariesList(data.summaries);
                     
-                    // Update the summary content area with a helpful message
-                    document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-arrow-left-circle"></i> Please select one of the summaries from the list on the left to view it.</div>';
-                    
                     // Show notification about existing summaries
                     showSummaryNotification(data.summaries.length);
+                    
+                    // Sort summaries by creation time (newest first)
+                    const sortedSummaries = [...data.summaries].sort((a, b) => b.created_at - a.created_at);
+                    
+                    // Automatically load the first (newest) summary
+                    if (sortedSummaries.length > 0) {
+                        const firstSummary = sortedSummaries[0];
+                        
+                        // Auto-select the first summary in the list
+                        setTimeout(() => {
+                            const firstSummaryItem = document.querySelector('.summary-list-item');
+                            if (firstSummaryItem) {
+                                // Add active class to this item
+                                firstSummaryItem.classList.add('active', 'border-primary');
+                            }
+                        }, 100);
+                        
+                        // Load the summary content
+                        loadSpecificSummary(
+                            firstSummary.date,
+                            firstSummary.summary_type,
+                            firstSummary.model,
+                            firstSummary.prompt_name
+                        );
+                    } else {
+                        // Fallback message if something goes wrong with accessing the first summary
+                        document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-arrow-left-circle"></i> Please select one of the summaries from the list on the left to view it.</div>';
+                    }
                 } else {
                     // No summaries exist
                     summariesContainer.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date. Click "Generate New Summary" to create one.</div>';
@@ -477,10 +502,10 @@
         document.getElementById('summary-metadata').innerHTML = '';
         
         // Check for existing summaries - this will also show notifications
+        // and automatically load the first summary if available
         checkExistingSummaries(date);
         
-        // Don't automatically load a summary, just add a message prompting to select one
-        document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> Select a summary from the list or generate a new one.</div>';
+        // Don't add a message prompting to select a summary since we now auto-load
         document.getElementById('loading').style.display = 'none';
         
         // Temporarily disabled JSON summary loading
