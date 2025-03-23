@@ -5,6 +5,7 @@
 {% block page_title %}Transcripts{% endblock %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
 <style>
     .date-picker {
         max-width: 200px;
@@ -42,13 +43,22 @@
     }
     .summary-list-item {
         cursor: pointer;
-        padding: 8px;
+        padding: 10px;
         border: 1px solid #ddd;
-        margin-bottom: 5px;
-        border-radius: 4px;
+        margin-bottom: 8px;
+        border-radius: 5px;
+        transition: all 0.2s ease;
+        background-color: #f8f9fa;
     }
     .summary-list-item:hover {
-        background-color: #f0f0f0;
+        background-color: #e9ecef;
+        border-color: #adb5bd;
+        transform: translateY(-2px);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .summary-list-item.active {
+        border-color: #0d6efd;
+        box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
     }
     .csv-table {
         width: 100%;
@@ -83,20 +93,20 @@
     <div class="col-md-4">
         <div class="card">
             <div class="card-header">
-                <h5>Select Date</h5>
+                <h5><i class="bi bi-calendar-date"></i> Select Date</h5>
             </div>
             <div class="card-body">
                 <div class="mb-3">
                     <label for="date-picker" class="form-label">Date</label>
                     <input type="date" class="form-control date-picker" id="date-picker">
                 </div>
-                <button id="load-transcripts" class="btn btn-primary">Load Transcripts</button>
+                <button id="load-transcripts" class="btn btn-primary"><i class="bi bi-arrow-repeat"></i> Load Transcripts</button>
             </div>
         </div>
 
         <div class="card mt-3">
             <div class="card-header">
-                <h5>Summary Options</h5>
+                <h5><i class="bi bi-gear"></i> Summary Options</h5>
             </div>
             <div class="card-body">
                 <div class="mb-3">
@@ -105,16 +115,19 @@
                         <option value="" disabled selected>Loading models...</option>
                     </select>
                 </div>
-                <button id="generate-summary" class="btn btn-success">Generate New Summary</button>
+                <button id="generate-summary" class="btn btn-success"><i class="bi bi-plus-circle"></i> Generate New Summary</button>
             </div>
         </div>
 
         <div class="card mt-3 summary-list" style="display: none;">
-            <div class="card-header">
-                <h5>Available Summaries</h5>
+            <div class="card-header bg-info text-white">
+                <h5><i class="bi bi-list-ul"></i> Available Summaries</h5>
             </div>
             <div class="card-body" id="summaries-list-container">
                 <!-- Summary list items will be added here dynamically -->
+            </div>
+            <div class="card-footer text-muted">
+                <small>Click on a summary to load it</small>
             </div>
         </div>
     </div>
@@ -124,13 +137,19 @@
             <div class="card-header">
                 <ul class="nav nav-tabs card-header-tabs summary-type-tabs">
                     <li class="nav-item">
-                        <a class="nav-link active" id="summary-tab" data-bs-toggle="tab" href="#summary-content">Summary</a>
+                        <a class="nav-link active" id="summary-tab" data-bs-toggle="tab" href="#summary-content">
+                            <i class="bi bi-file-text"></i> Summary
+                        </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" id="json-tab" data-bs-toggle="tab" href="#json-content">JSON</a>
+                        <a class="nav-link" id="json-tab" data-bs-toggle="tab" href="#json-content">
+                            <i class="bi bi-braces"></i> JSON
+                        </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" id="csv-tab" data-bs-toggle="tab" href="#csv-content">CSV</a>
+                        <a class="nav-link" id="csv-tab" data-bs-toggle="tab" href="#csv-content">
+                            <i class="bi bi-table"></i> CSV
+                        </a>
                     </li>
                 </ul>
             </div>
@@ -155,11 +174,13 @@
                 
                 <div class="loading" id="loading">
                     <div class="d-flex justify-content-center">
-                        <div class="spinner-border" role="status">
+                        <div class="spinner-border text-primary" role="status">
                             <span class="visually-hidden">Loading...</span>
                         </div>
                     </div>
-                    <p class="text-center mt-2">Generating summary, this may take a minute...</p>
+                    <p class="text-center mt-2">
+                        <i class="bi bi-cpu"></i> Generating summary, this may take a minute...
+                    </p>
                 </div>
             </div>
         </div>
@@ -215,9 +236,14 @@
             dateInput.value = formatDateForInput(localizedDate);
         }
         
+        // Check for existing summaries for the initial date
+        checkExistingSummaries(dateInput.value);
+        
         // Update URL when date changes
         dateInput.addEventListener('change', function() {
             updateUrlParams('date', this.value);
+            // Check for existing summaries when date changes
+            checkExistingSummaries(this.value);
         });
         
         // Update URL when model changes
@@ -249,6 +275,52 @@
         // Initial load
         loadTranscripts();
     });
+    
+    // Function to check for existing summaries before generating new ones
+    function checkExistingSummaries(date) {
+        if (!date) return;
+        
+        // Remove any existing summaries alert
+        const existingAlert = document.getElementById('summaries-alert');
+        if (existingAlert) existingAlert.remove();
+        
+        // Show a subtle loading indicator
+        const summariesContainer = document.getElementById('summaries-list-container');
+        summariesContainer.innerHTML = '<div class="text-center"><small>Checking for existing summaries...</small></div>';
+        document.querySelector('.summary-list').style.display = 'block';
+        
+        fetch(`/api/transcripts/summary/${date}/list`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to load summaries list');
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.summaries && data.summaries.length > 0) {
+                    // Display existing summaries
+                    displaySummariesList(data.summaries);
+                    
+                    // Show a notification that summaries exist
+                    const generateBtn = document.getElementById('generate-summary');
+                    generateBtn.insertAdjacentHTML('afterend', 
+                        `<div class="alert alert-info mt-3" id="summaries-alert">
+                            <i class="bi bi-info-circle"></i> 
+                            <strong>${data.summaries.length} existing ${data.summaries.length === 1 ? 'summary' : 'summaries'}</strong> found.
+                            Click on a summary in the list below to view it.
+                        </div>`);
+                } else {
+                    // No summaries exist
+                    summariesContainer.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date. Click "Generate New Summary" to create one.</div>';
+                    document.querySelector('.summary-list').style.display = 'block';
+                }
+            })
+            .catch(error => {
+                console.error('Error checking for summaries:', error);
+                summariesContainer.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle"></i> Error checking for summaries.</div>';
+                document.querySelector('.summary-list').style.display = 'block';
+            });
+    }
     
     // Function to fetch available models from the API
     function fetchModels() {
@@ -378,20 +450,8 @@
         document.getElementById('csv-table').innerHTML = '';
         document.getElementById('summary-metadata').innerHTML = '';
         
-        // Load available summaries
-        fetch(`/api/transcripts/summary/${date}/list`)
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Failed to load summaries list');
-                }
-                return response.json();
-            })
-            .then(data => {
-                displaySummariesList(data.summaries);
-            })
-            .catch(error => {
-                console.error('Error loading summaries list:', error);
-            });
+        // First check for existing summaries
+        checkExistingSummaries(date);
         
         // Load markdown summary
         fetch(`/api/transcripts/summary/${date}`)
@@ -408,7 +468,7 @@
             })
             .catch(error => {
                 console.error('Error loading summary:', error);
-                document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info">No summary available for this date. Click "Generate New Summary" to create one.</div>';
+                document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> No summary available for this date. Click "Generate New Summary" to create one.</div>';
                 document.getElementById('loading').style.display = 'none';
             });
         
@@ -453,6 +513,10 @@
             alert('Please select a date');
             return;
         }
+        
+        // Remove any existing summaries alert
+        const existingAlert = document.getElementById('summaries-alert');
+        if (existingAlert) existingAlert.remove();
         
         // Update URL with current date and model
         updateUrlParams('date', date);
@@ -527,6 +591,9 @@
         if (summaries && summaries.length > 0) {
             document.querySelector('.summary-list').style.display = 'block';
             
+            // Sort summaries by creation time (newest first)
+            summaries.sort((a, b) => b.created_at - a.created_at);
+            
             summaries.forEach(summary => {
                 // Convert timestamp to server timezone
                 const utcDate = new Date(summary.created_at * 1000);
@@ -540,14 +607,40 @@
                     timeZone: validTimezone
                 });
                 
+                // Choose icon based on summary type
+                let typeIcon = 'bi-file-text';
+                if (summary.summary_type === 'json') {
+                    typeIcon = 'bi-braces';
+                }
+                
                 const item = document.createElement('div');
                 item.className = 'summary-list-item';
                 item.innerHTML = `
-                    <div><strong>${summary.summary_type}</strong> | ${summary.model}</div>
-                    <div class="text-muted small">Created: ${formattedDate} PT</div>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span>
+                            <i class="${typeIcon}"></i>
+                            <strong>${summary.summary_type.toUpperCase()}</strong>
+                        </span>
+                        <span class="badge bg-secondary">${summary.model}</span>
+                    </div>
+                    <div class="text-muted small mt-1">
+                        <i class="bi bi-clock"></i> Created: ${formattedDate}
+                        <span class="ms-2 text-success">
+                            <i class="bi bi-lightning"></i> ${summary.duration_ms}ms
+                        </span>
+                    </div>
                 `;
                 
+                // Add active state styling when clicking
                 item.addEventListener('click', function() {
+                    // Remove active class from all items
+                    document.querySelectorAll('.summary-list-item').forEach(el => {
+                        el.classList.remove('active', 'bg-primary', 'text-white');
+                    });
+                    
+                    // Add active class to this item
+                    this.classList.add('active', 'bg-primary', 'text-white');
+                    
                     loadSpecificSummary(summary.date, summary.summary_type, summary.model, summary.prompt_name);
                 });
                 
