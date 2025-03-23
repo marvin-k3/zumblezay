@@ -163,7 +163,7 @@ impl AppState {
             stats: ServiceStats::new(),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
-            openai_client: openai_client,
+            openai_client,
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),
             camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
