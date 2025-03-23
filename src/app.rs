@@ -397,8 +397,8 @@ fn init_templates() -> Tera {
     tera.add_raw_template("events.html", include_str!("templates/events.html"))
         .unwrap();
     tera.add_raw_template(
-        "transcripts.html",
-        include_str!("templates/transcripts.html"),
+        "summary.html",
+        include_str!("templates/summary.html"),
     )
     .unwrap();
     tera
@@ -1405,10 +1405,8 @@ async fn get_specific_summary(
     }
 }
 
-// Add a new function that takes AppState as a parameter
-async fn transcripts_page_with_state(
-    State(state): State<Arc<AppState>>,
-) -> Html<String> {
+#[axum::debug_handler]
+async fn summary_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut context = TeraContext::new();
     context.insert("build_info", &get_build_info());
     context.insert("request_path", &"/transcripts");
@@ -1419,7 +1417,7 @@ async fn transcripts_page_with_state(
     let rendered = TEMPLATES
         .get()
         .unwrap()
-        .render("transcripts.html", &context)
+        .render("summary.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
     Html(rendered)
@@ -1487,7 +1485,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/events", get(events_page))
         .route("/health", get(health_check))
         .route("/status", get(get_status))
-        .route("/transcripts", get(transcripts_page_with_state))
+        .route("/summary", get(summary_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route("/api/models", get(get_available_models))
