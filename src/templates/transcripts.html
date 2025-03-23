@@ -316,12 +316,23 @@
                     // Display existing summaries
                     displaySummariesList(data.summaries);
                     
+                    // Update the summary content area with a helpful message
+                    document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-arrow-left-circle"></i> Please select one of the summaries from the list on the left to view it.</div>';
+                    
                     // Show notification about existing summaries
                     showSummaryNotification(data.summaries.length);
                 } else {
                     // No summaries exist
                     summariesContainer.innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date. Click "Generate New Summary" to create one.</div>';
                     document.querySelector('.summary-list').style.display = 'block';
+                    
+                    // Update main content area to make it clear what to do
+                    document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date.<br><br><button id="generate-summary-alt" class="btn btn-success"><i class="bi bi-plus-circle"></i> Generate New Summary</button></div>';
+                    
+                    // Add click handler for the alternate generation button
+                    document.getElementById('generate-summary-alt').addEventListener('click', function() {
+                        generateSummary();
+                    });
                     
                     // Clear any existing notification since we have no summaries
                     showSummaryNotification(0);
@@ -468,24 +479,9 @@
         // Check for existing summaries - this will also show notifications
         checkExistingSummaries(date);
         
-        // Load markdown summary
-        fetch(`/api/transcripts/summary/${date}`)
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('No summary available');
-                }
-                return response.text();
-            })
-            .then(data => {
-                document.getElementById('markdown-summary').innerHTML = data;
-                document.getElementById('loading').style.display = 'none';
-                updateSummaryMetadata(date, 'markdown');
-            })
-            .catch(error => {
-                console.error('Error loading summary:', error);
-                document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> No summary available for this date. Click "Generate New Summary" to create one.</div>';
-                document.getElementById('loading').style.display = 'none';
-            });
+        // Don't automatically load a summary, just add a message prompting to select one
+        document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-info-circle"></i> Select a summary from the list or generate a new one.</div>';
+        document.getElementById('loading').style.display = 'none';
         
         // Temporarily disabled JSON summary loading
         /* 
@@ -723,7 +719,21 @@
             .catch(error => {
                 console.error('Error loading specific summary:', error);
                 document.getElementById('loading').style.display = 'none';
-                alert('Error loading summary: ' + error.message);
+                
+                // Display a better error message in the content area
+                if (type === 'markdown') {
+                    document.getElementById('summary-tab').click();
+                    document.getElementById('markdown-summary').innerHTML = `
+                        <div class="alert alert-danger">
+                            <i class="bi bi-x-circle"></i> Error loading summary: ${error.message}
+                            <hr>
+                            <button class="btn btn-outline-primary" onclick="loadTranscripts()">
+                                <i class="bi bi-arrow-repeat"></i> Retry
+                            </button>
+                        </div>`;
+                }
+                
+                // Don't show an alert as it's disruptive, use the UI instead
             });
     }
     
