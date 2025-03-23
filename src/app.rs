@@ -1425,9 +1425,9 @@ async fn transcripts_page_with_state(
     Html(rendered)
 }
 
-#[derive(Debug, Serialize)]
-struct ModelsResponse {
-    models: Vec<summary::ModelInfo>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelsResponse {
+    pub models: Vec<summary::ModelInfo>,
 }
 
 #[axum::debug_handler]
@@ -1441,15 +1441,15 @@ async fn get_available_models(
     Ok(Json(ModelsResponse { models }))
 }
 
-#[derive(Debug, Serialize)]
-struct Camera {
-    id: String,
-    name: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Camera {
+    pub id: String,
+    pub name: String,
 }
 
-#[derive(Debug, Serialize)]
-struct CamerasResponse {
-    cameras: Vec<Camera>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CamerasResponse {
+    pub cameras: Vec<Camera>,
 }
 
 async fn get_cameras(

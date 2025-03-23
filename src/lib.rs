@@ -95,8 +95,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    // Create a new AppState for testing with minimal configuration
     pub fn new_for_testing() -> Self {
+        Self::new_for_testing_with_openai_client(None)
+    }
+    // Create a new AppState for testing with minimal configuration
+    pub fn new_for_testing_with_openai_client(
+        openai_client: Option<Arc<dyn OpenAIClientTrait>>,
+    ) -> Self {
         // Create temporary files for SQLite databases
         let temp_events_file = tempfile::NamedTempFile::new()
             .expect("Failed to create temporary events database file");
@@ -158,7 +163,7 @@ impl AppState {
             stats: ServiceStats::new(),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
-            openai_client: None,
+            openai_client: openai_client,
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),
             camera_name_cache: Arc::new(Mutex::new(HashMap::new())),

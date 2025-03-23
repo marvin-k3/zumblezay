@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use tower::util::ServiceExt;
 use tracing::debug;
+use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
 use zumblezay::AppState;
 
 // Initialize logging once for all tests
@@ -39,6 +40,16 @@ fn init_test_logging() {
 fn app() -> (Arc<AppState>, Router) {
     // Create a minimal AppState for testing
     let app_state = Arc::new(AppState::new_for_testing());
+    let routes = zumblezay::app::routes(app_state.clone());
+    (app_state, routes)
+}
+
+fn app_with_openai_client(
+    openai_client: Arc<dyn OpenAIClientTrait>,
+) -> (Arc<AppState>, Router) {
+    let app_state = Arc::new(AppState::new_for_testing_with_openai_client(
+        Some(openai_client),
+    ));
     let routes = zumblezay::app::routes(app_state.clone());
     (app_state, routes)
 }
@@ -468,4 +479,76 @@ async fn test_cameras_api() {
         [],
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_models_api() {
+    init_test_logging();
+    use async_openai::types::Model;
+    use zumblezay::app::ModelsResponse;
+
+    // Test data
+    let test_models = vec![
+        Model {
+            id: "anthropic-claude-haiku".to_string(),
+            object: "model".to_string(),
+            created: 1716460800,
+            owned_by: "anthropic".to_string(),
+        },
+        Model {
+            id: "anthropic-claude-sonnet".to_string(),
+            object: "model".to_string(),
+            created: 1716450800,
+            owned_by: "anthropic".to_string(),
+        },
+    ];
+    let openai_client =
+        Arc::new(FakeOpenAIClient::new().with_models(test_models.clone()));
+    let (_, app_router) = app_with_openai_client(openai_client);
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .uri("/api/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Verify status and parse response
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let models_response: ModelsResponse =
+        serde_json::from_slice(&body).unwrap();
+
+    // Check response integrity
+    assert_eq!(
+        models_response.models.len(),
+        test_models.len(),
+        "Should return the correct number of models"
+    );
+
+    // Verify model data
+    let expected_ids = ["anthropic-claude-haiku", "anthropic-claude-sonnet"];
+    for expected_id in expected_ids {
+        let model = models_response
+            .models
+            .iter()
+            .find(|m| m.id == expected_id)
+            .unwrap_or_else(|| {
+                panic!("Missing expected model: {}", expected_id)
+            });
+
+        assert_eq!(
+            model.provider, "anthropic",
+            "Model {} should have provider 'anthropic'",
+            expected_id
+        );
+        assert!(
+            !model.name.is_empty(),
+            "Model {} should have a name",
+            expected_id
+        );
+    }
 }
