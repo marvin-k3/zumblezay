@@ -7,8 +7,10 @@
 {% block extra_head %}
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
 <style>
+    /* General improvements */
     .date-picker {
-        max-width: 200px;
+        max-width: 100%;
+        width: 100%;
     }
     .summary-container {
         margin-top: 20px;
@@ -22,12 +24,16 @@
     }
     .summary-content {
         margin-top: 15px;
+        overflow-wrap: break-word;
+        word-wrap: break-word;
     }
     .model-selector {
-        max-width: 250px;
+        max-width: 100%;
+        width: 100%;
     }
     .summary-type-tabs {
         margin-bottom: 15px;
+        flex-wrap: wrap;
     }
     .summary-metadata {
         font-size: 0.8rem;
@@ -67,6 +73,8 @@
     .summary-list-item.active .badge.bg-secondary {
         background-color: #0d6efd !important;
     }
+    
+    /* Improved table responsiveness */
     .csv-table {
         width: 100%;
         border-collapse: collapse;
@@ -90,72 +98,202 @@
     }
     .csv-container {
         max-height: 500px;
+        overflow-x: auto;
         overflow-y: auto;
+    }
+
+    /* Button improvements */
+    #generate-summary, #generate-summary-alt {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.85rem;
+    }
+    
+    .generate-btn-container {
+        display: flex;
+        justify-content: flex-start;
+    }
+
+    /* Responsive layout improvements */
+    @media (max-width: 767.98px) {
+        .controls-container {
+            margin-bottom: 20px;
+        }
+        
+        .controls-toggle {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #f8f9fa;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border: 1px solid #dee2e6;
+            cursor: pointer;
+        }
+        
+        .controls-content {
+            display: none;
+        }
+        
+        .controls-content.show {
+            display: block;
+        }
+        
+        .nav-tabs .nav-link {
+            padding: 0.5rem 0.75rem;
+            font-size: 0.9rem;
+        }
+        
+        .generate-btn-container {
+            display: flex;
+            justify-content: center;
+            margin-top: 15px;
+        }
+        
+        #generate-summary {
+            width: auto;
+            min-width: unset;
+            max-width: fit-content;
+        }
+        
+        #generate-summary-alt {
+            width: auto;
+            min-width: unset;
+            max-width: fit-content;
+        }
+        
+        .summary-list-item {
+            padding: 8px;
+        }
+        
+        .summary-list-item .badge {
+            font-size: 0.7rem;
+        }
+        
+        .csv-container {
+            overflow-x: auto;
+        }
+        
+        /* Make sure code blocks don't overflow on mobile */
+        pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-x: auto;
+        }
+        
+        /* Fix floating issues in tab navigation */
+        .card-header-tabs {
+            margin-right: 0;
+            margin-left: 0;
+        }
+    }
+
+    /* Improved tab navigation on mobile */
+    .tab-content {
+        overflow: hidden;
+    }
+    
+    /* Shared width for form controls */
+    .form-control, .form-select, .btn {
+        max-width: 100%;
+    }
+    
+    /* Helper for responsive images and content */
+    .img-fluid-custom {
+        max-width: 100%;
+        height: auto;
+    }
+
+    /* Style for collapsed controls on mobile */
+    .controls-toggle-icon {
+        transition: transform 0.3s ease;
+    }
+    
+    .controls-toggle.active .controls-toggle-icon {
+        transform: rotate(180deg);
+    }
+
+    /* Improve visibility of link to current tab */
+    .nav-link.active {
+        font-weight: 500;
     }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="row">
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-header">
-                <h5><i class="bi bi-calendar-date"></i> Select Date</h5>
-            </div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <label for="date-picker" class="form-label">Date</label>
-                    <input type="date" class="form-control date-picker" id="date-picker">
-                </div>
-                <!-- <button id="load-transcripts" class="btn btn-primary"><i class="bi bi-arrow-repeat"></i> Load Transcripts</button> -->
-            </div>
+    <!-- Mobile toggle for controls (only visible on small screens) -->
+    <div class="col-12 d-md-none mb-3">
+        <div class="controls-toggle" id="controls-toggle">
+            <span><i class="bi bi-gear me-2"></i>Summary Controls</span>
+            <i class="bi bi-chevron-down controls-toggle-icon"></i>
         </div>
+    </div>
 
-        <div class="card mt-3">
-            <div class="card-header">
-                <h5><i class="bi bi-gear"></i> Summary Options</h5>
-            </div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <label for="model-selector" class="form-label">Model</label>
-                    <select class="form-select model-selector" id="model-selector">
-                        <option value="" disabled selected>Loading models...</option>
-                    </select>
+    <!-- Controls column - will stack on mobile -->
+    <div class="col-md-4 controls-container">
+        <div class="controls-content d-md-block">
+            <div class="card">
+                <div class="card-header">
+                    <h5><i class="bi bi-calendar-date"></i> Select Date</h5>
                 </div>
-                <button id="generate-summary" class="btn btn-success"><i class="bi bi-plus-circle"></i> Generate New Summary</button>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="date-picker" class="form-label">Date</label>
+                        <input type="date" class="form-control date-picker" id="date-picker">
+                    </div>
+                </div>
             </div>
-        </div>
 
-        <div class="card mt-3 summary-list" style="display: none;">
-            <div class="card-header bg-info text-white">
-                <h5><i class="bi bi-list-ul"></i> Available Summaries</h5>
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5><i class="bi bi-gear"></i> Summary Options</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="model-selector" class="form-label">Model</label>
+                        <select class="form-select model-selector" id="model-selector">
+                            <option value="" disabled selected>Loading models...</option>
+                        </select>
+                    </div>
+                    <div class="generate-btn-container">
+                        <button id="generate-summary" class="btn btn-success btn-sm"><i class="bi bi-plus-circle"></i> Summarize</button>
+                    </div>
+                </div>
             </div>
-            <div class="card-body" id="summaries-list-container">
-                <!-- Summary list items will be added here dynamically -->
-            </div>
-            <div class="card-footer text-muted">
-                <small>Click on a summary to load it</small>
+
+            <div class="card mt-3 summary-list" style="display: none;">
+                <div class="card-header bg-info text-white">
+                    <h5><i class="bi bi-list-ul"></i> Available Summaries</h5>
+                </div>
+                <div class="card-body" id="summaries-list-container">
+                    <!-- Summary list items will be added here dynamically -->
+                </div>
+                <div class="card-footer text-muted">
+                    <small>Click on a summary to load it</small>
+                </div>
             </div>
         </div>
     </div>
 
+    <!-- Content column -->
     <div class="col-md-8">
         <div class="card">
             <div class="card-header">
                 <ul class="nav nav-tabs card-header-tabs summary-type-tabs">
                     <li class="nav-item">
                         <a class="nav-link active" id="summary-tab" data-bs-toggle="tab" href="#summary-content">
-                            <i class="bi bi-file-text"></i> Summary
+                            <i class="bi bi-file-text"></i> <span class="d-none d-sm-inline">Summary</span>
                         </a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" id="json-tab" data-bs-toggle="tab" href="#json-content">
-                            <i class="bi bi-braces"></i> JSON
+                            <i class="bi bi-braces"></i> <span class="d-none d-sm-inline">JSON</span>
                         </a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" id="csv-tab" data-bs-toggle="tab" href="#csv-content">
-                            <i class="bi bi-table"></i> CSV
+                            <i class="bi bi-table"></i> <span class="d-none d-sm-inline">CSV</span>
                         </a>
                     </li>
                 </ul>
@@ -219,6 +357,16 @@
     const validTimezone = isValidTimezone(appTimezone) ? appTimezone : "Australia/Adelaide";
     
     document.addEventListener('DOMContentLoaded', function() {
+        // Set up the controls toggle for mobile view
+        const controlsToggle = document.getElementById('controls-toggle');
+        if (controlsToggle) {
+            controlsToggle.addEventListener('click', function() {
+                const controlsContent = document.querySelector('.controls-content');
+                controlsContent.classList.toggle('show');
+                this.classList.toggle('active');
+            });
+        }
+        
         // Fetch available models
         fetchModels();
         
@@ -272,6 +420,20 @@
             if (tab) {
                 tab.click();
             }
+        }
+        
+        // On mobile, show controls initially if no summaries are available
+        if (window.innerWidth < 768) {
+            setTimeout(() => {
+                const summaryList = document.querySelector('.summary-list');
+                if (summaryList && summaryList.style.display === 'none') {
+                    const controlsContent = document.querySelector('.controls-content');
+                    controlsContent.classList.add('show');
+                    if (controlsToggle) {
+                        controlsToggle.classList.add('active');
+                    }
+                }
+            }, 500);
         }
     });
     
@@ -340,8 +502,21 @@
                             firstSummary.date,
                             firstSummary.summary_type,
                             firstSummary.model,
-                            firstSummary.prompt_name
+                            firstSummary.prompt_name,
+                            firstSummary.created_at
                         );
+                        
+                        // On mobile, collapse the controls after loading a summary
+                        if (window.innerWidth < 768) {
+                            const controlsContent = document.querySelector('.controls-content');
+                            if (controlsContent && controlsContent.classList.contains('show')) {
+                                controlsContent.classList.remove('show');
+                                const controlsToggle = document.getElementById('controls-toggle');
+                                if (controlsToggle) {
+                                    controlsToggle.classList.remove('active');
+                                }
+                            }
+                        }
                     } else {
                         // Fallback message if something goes wrong with accessing the first summary
                         document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-info"><i class="bi bi-arrow-left-circle"></i> Please select one of the summaries from the list on the left to view it.</div>';
@@ -352,7 +527,7 @@
                     document.querySelector('.summary-list').style.display = 'block';
                     
                     // Update main content area to make it clear what to do
-                    document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date.<br><br><button id="generate-summary-alt" class="btn btn-success"><i class="bi bi-plus-circle"></i> Generate New Summary</button></div>';
+                    document.getElementById('markdown-summary').innerHTML = '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> No summaries available for this date.<br><br><button id="generate-summary-alt" class="btn btn-success btn-sm"><i class="bi bi-plus-circle"></i> Generate Summary</button></div>';
                     
                     // Add click handler for the alternate generation button
                     document.getElementById('generate-summary-alt').addEventListener('click', function() {
@@ -361,6 +536,18 @@
                     
                     // Clear any existing notification since we have no summaries
                     showSummaryNotification(0);
+                    
+                    // On mobile, always show controls when no summaries exist
+                    if (window.innerWidth < 768) {
+                        const controlsContent = document.querySelector('.controls-content');
+                        if (controlsContent) {
+                            controlsContent.classList.add('show');
+                            const controlsToggle = document.getElementById('controls-toggle');
+                            if (controlsToggle) {
+                                controlsToggle.classList.add('active');
+                            }
+                        }
+                    }
                 }
             })
             .catch(error => {
@@ -607,7 +794,7 @@
             });
     }
     
-    function updateSummaryMetadata(date, type, model = null) {
+    function updateSummaryMetadata(date, type, model = null, timestamp = null) {
         const modelText = model ? `Model: ${model}` : '';
         
         // Parse the date and format it in server timezone
@@ -623,8 +810,17 @@
             timeZone: validTimezone
         });
         
+        let timeText = '';
+        if (timestamp) {
+            // Format the timestamp
+            const timestampDate = new Date(timestamp * 1000);
+            const timestampDateLocal = new Date(timestampDate.toLocaleString('en-US', {dateStyle: 'short', timeStyle: 'short', timeZone: validTimezone }));
+            const localizedTimestamp = convertToServerTimezone(timestampDateLocal);
+            timeText = ` | Generated at: ${timestampDateLocal}`;
+        }
+        
         document.getElementById('summary-metadata').innerHTML = 
-            `<strong>${formattedDate}</strong> ${modelText ? ' | ' + modelText : ''} <span class="text-muted">(${validTimezone})</span>`;
+            `<strong>${formattedDate}</strong>  <span class="text-muted">(${validTimezone})</span> ${modelText ? ' | ' + modelText : ''} ${timeText}`;
     }
     
     function displaySummariesList(summaries) {
@@ -684,7 +880,7 @@
                     // Add active class to this item (using a more subtle highlight)
                     this.classList.add('active', 'border-primary');
                     
-                    loadSpecificSummary(summary.date, summary.summary_type, summary.model, summary.prompt_name);
+                    loadSpecificSummary(summary.date, summary.summary_type, summary.model, summary.prompt_name, summary.created_at);
                 });
                 
                 container.appendChild(item);
@@ -694,7 +890,7 @@
         }
     }
     
-    function loadSpecificSummary(date, type, model, prompt) {
+    function loadSpecificSummary(date, type, model, prompt, timestamp = null) {
         // Update URL with current parameters
         updateUrlParams('date', date);
         updateUrlParams('model', model);
@@ -709,7 +905,7 @@
             document.getElementById('json-tab').click();
             document.getElementById('json-summary').textContent = 'JSON summary loading temporarily disabled.';
             document.getElementById('loading').style.display = 'none';
-            updateSummaryMetadata(date, type, model);
+            updateSummaryMetadata(date, type, model, timestamp);
             return;
         }
         
@@ -738,7 +934,7 @@
                     document.getElementById('markdown-summary').innerHTML = data.text;
                 }
                 
-                updateSummaryMetadata(date, type, model);
+                updateSummaryMetadata(date, type, model, timestamp);
                 document.getElementById('loading').style.display = 'none';
             })
             .catch(error => {
