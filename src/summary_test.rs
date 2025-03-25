@@ -25,7 +25,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            Some(fake_client.clone()),
+            fake_client.clone(),
         )
         .await;
 
@@ -74,7 +74,7 @@ mod tests {
             "json",
             "json",
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -100,7 +100,7 @@ mod tests {
             "json",
             "json",
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -116,8 +116,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_available_models() {
-        let state = AppState::new_for_testing();
-
         // Create test models
         let models = vec![
             FakeOpenAIClient::create_model("gpt-4", "openai"),
@@ -128,9 +126,7 @@ mod tests {
         let fake_client = Arc::new(FakeOpenAIClient::new().with_models(models));
 
         let result =
-            get_available_models_with_client(&state, Some(fake_client))
-                .await
-                .unwrap();
+            get_available_models_with_client(fake_client).await.unwrap();
 
         // We should get 3 models back
         assert_eq!(result.len(), 3);
@@ -225,7 +221,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -248,7 +244,7 @@ mod tests {
             "gpt-4",
             "json",
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -271,7 +267,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -298,7 +294,7 @@ mod tests {
             "gpt-4",
             "json", // Specifically testing JSON type
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -325,7 +321,7 @@ mod tests {
             "gpt-4",
             "text", // Specifically testing text type
             "Summarize {transcript} for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -353,7 +349,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -381,7 +377,7 @@ mod tests {
             "gpt-4",
             "json",
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -410,7 +406,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -435,7 +431,7 @@ mod tests {
             "gpt-4",
             "json",
             "Generate JSON for {date}",
-            Some(fake_client),
+            fake_client.clone(),
         )
         .await;
 
@@ -450,8 +446,7 @@ mod tests {
         // Create a test state
         let state = AppState::new_for_testing();
 
-        // We don't need to set up a fake client because the test should fail
-        // before the client is ever used
+        let fake_client = Arc::new(FakeOpenAIClient::new());
 
         // Attempt to generate a summary for a date with no events
         let result = generate_summary_with_client(
@@ -460,7 +455,7 @@ mod tests {
             "gpt-4",
             "text",
             "Summarize {transcript} for {date}",
-            None,
+            fake_client.clone(),
         )
         .await;
 

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, instrument};
 
+#[instrument(skip(state), err)]
 pub async fn generate_summary(
     state: &AppState,
     date: &str,
@@ -25,7 +26,11 @@ pub async fn generate_summary(
         model,
         summary_type,
         user_prompt,
-        None,
+        state
+            .openai_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?
+            .clone(),
     )
     .await
 }
@@ -36,7 +41,7 @@ pub async fn generate_summary_with_client(
     model: &str,
     summary_type: &str,
     user_prompt: &str,
-    client: Option<Arc<dyn OpenAIClientTrait>>,
+    client: Arc<dyn OpenAIClientTrait>,
 ) -> Result<String, anyhow::Error> {
     // Get the CSV content and event IDs
     let (csv_content, event_ids) =
@@ -53,12 +58,6 @@ pub async fn generate_summary_with_client(
 
     // Start timing the summary generation
     let start_time = std::time::Instant::now();
-
-    // Get the OpenAI client
-    let client = match client {
-        Some(c) => c,
-        None => state.openai_client.as_ref().unwrap().clone(),
-    };
 
     info!("Building system message for {} summary", summary_type);
     let system_message = ChatCompletionRequestSystemMessageArgs::default()
@@ -284,23 +283,22 @@ pub struct ModelInfo {
 }
 
 // For the get_available_models function, add a version with client injection
+#[instrument(skip(state), err)]
 pub async fn get_available_models(
     state: &AppState,
 ) -> Result<Vec<ModelInfo>, anyhow::Error> {
-    get_available_models_with_client(state, None).await
+    let client = state
+        .openai_client
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI client not configured"))?;
+    get_available_models_with_client(client.clone()).await
 }
 
+#[instrument(skip(client), err)]
 pub async fn get_available_models_with_client(
-    state: &AppState,
-    client: Option<Arc<dyn OpenAIClientTrait>>,
+    client: Arc<dyn OpenAIClientTrait>,
 ) -> Result<Vec<ModelInfo>, anyhow::Error> {
     let mut models = Vec::new();
-
-    // Get the OpenAI client
-    let client = match client {
-        Some(c) => c,
-        None => state.openai_client.as_ref().unwrap().clone(),
-    };
 
     info!("Fetching OpenAI models");
     let openai_models = client.list_models().await?;
