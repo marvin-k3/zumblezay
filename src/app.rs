@@ -512,7 +512,7 @@ async fn get_completed_events(
         params.push(Box::new(camera));
     }
 
-    query.push_str(" ORDER BY event_start DESC LIMIT 100");
+    query.push_str(" ORDER BY event_start DESC LIMIT 5000");
 
     let mut stmt = conn
         .prepare(&query)

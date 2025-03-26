@@ -4,6 +4,7 @@
 
 {% block extra_head %}
 <script type="module" src="https://cdn.jsdelivr.net/npm/media-chrome@1/+esm"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
 <style>
     .video-container {
         position: relative;
@@ -92,6 +93,90 @@
     .time-range-inputs input {
         width: 100px;
     }
+    
+    /* Transcript styles */
+    .transcript-container {
+        margin-top: 1.5rem;
+        max-height: 300px;
+        overflow-y: auto;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 0.25rem;
+        padding: 1rem;
+        background-color: var(--bs-body-bg);
+    }
+    
+    .transcript-segment {
+        margin-bottom: 0.5rem;
+        padding: 0.25rem 0;
+        transition: background-color 0.3s ease;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+    
+    .transcript-segment.active {
+        background-color: var(--bs-primary-bg-subtle);
+        border-radius: 0.25rem;
+        padding: 0.25rem 0.5rem;
+    }
+    
+    .transcript-timestamp {
+        color: var(--bs-primary);
+        font-weight: 500;
+        margin-right: 0.5rem;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+    }
+    
+    .transcript-timestamp:hover {
+        text-decoration: underline;
+    }
+    
+    .transcript-text {
+        display: inline;
+    }
+    
+    .transcript-placeholder {
+        color: var(--bs-secondary-color);
+        font-style: italic;
+        text-align: center;
+        padding: 2rem 0;
+    }
+    
+    .transcript-thumbnail {
+        width: 80px;
+        height: 45px;
+        min-width: 80px;
+        background-color: #000;
+        position: relative;
+        overflow: hidden;
+        border-radius: 0.25rem;
+        border: 1px solid var(--bs-border-color);
+        transition: all 0.3s ease;
+    }
+    
+    .transcript-thumbnail img {
+        position: absolute;
+        max-width: none;
+        transform: scale(0.5); /* Scale down the 160x90 image to fit in 80x45 container */
+        transform-origin: top left; /* Scale from the top-left corner */
+        transition: all 0.3s ease;
+    }
+    
+    .large-thumbnails .transcript-thumbnail {
+        width: 160px;
+        height: 90px;
+        min-width: 160px;
+    }
+    
+    .large-thumbnails .transcript-thumbnail img {
+        transform: scale(1); /* No scaling needed at original size */
+    }
+    
+    .transcript-content {
+        flex: 1;
+    }
 </style>
 {% endblock %}
 
@@ -176,6 +261,28 @@
                         <img id="storyboard-img">
                     </div>
                 </div> 
+                <!-- Add transcript container -->
+                <div class="card mt-3">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">Transcript</h5>
+                        <div class="d-flex gap-3 align-items-center">
+                            <button id="thumbnail-size-toggle" class="btn btn-sm btn-outline-secondary" title="Toggle thumbnail size">
+                                <i class="bi bi-arrows-angle-expand"></i>
+                            </button>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="auto-scroll-toggle" checked>
+                                <label class="form-check-label" for="auto-scroll-toggle">Auto-scroll</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="transcript-container" class="transcript-container">
+                            <div class="transcript-placeholder">
+                                Select a video to view its transcript
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -186,6 +293,10 @@
 <script>
     let currentEvent = null;
     const videoPlayer = document.getElementById('video-player');
+    let transcriptData = [];
+    let activeSegmentId = null;
+    let autoScroll = true;
+    let largeThumbnails = false;
 
     let currentFilters = {
         date: null,
@@ -346,6 +457,16 @@
         newUrl.searchParams.set('video', eventId);
         window.history.pushState({}, '', newUrl);
 
+        // Reset the transcript container
+        const transcriptContainer = document.getElementById('transcript-container');
+        transcriptContainer.innerHTML = '<div class="p-3 text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading transcript...</div>';
+        transcriptData = [];
+        activeSegmentId = null;
+
+        // Remove existing event listeners
+        videoPlayer.removeEventListener('timeupdate', updateActiveTranscriptSegment);
+        videoPlayer.removeEventListener('timeupdate', updateStoryboardPreview);
+
         fetch(`/api/event/${encodeURIComponent(eventId)}`)
         .then(response => {
             if (!response.ok) {
@@ -387,6 +508,12 @@
                     captionTrack.src = `/api/captions/${encodeURIComponent(eventId)}`;
                     captionTrack.default = true;
                     videoPlayer.appendChild(captionTrack);
+                    
+                    // Load the transcript
+                    loadTranscript(eventId);
+                } else {
+                    // No transcript available
+                    transcriptContainer.innerHTML = '<div class="transcript-placeholder">No transcript available for this video</div>';
                 }
 
                 // Add storyboard track
@@ -411,6 +538,9 @@
             const newUrl = new URL(window.location);
             newUrl.searchParams.delete('video');
             window.history.pushState({}, '', newUrl);
+            
+            // Clear transcript
+            transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
         });
     }
 
@@ -561,9 +691,268 @@
 
     document.getElementById('reset-filters').addEventListener('click', resetFilters);
 
-    // Initialize filters when page loads
+    function formatTimeDisplay(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
+        
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        } else {
+            return `${minutes}:${secs.toString().padStart(2, '0')}`;
+        }
+    }
+
+    function loadTranscript(eventId) {
+        fetch(`/api/captions/${encodeURIComponent(eventId)}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.text();
+        })
+        .then(vttContent => {
+            transcriptData = parseTranscriptVTT(vttContent);
+            renderTranscript();
+            
+            // Add timeupdate event listener to highlight current segment
+            videoPlayer.addEventListener('timeupdate', updateActiveTranscriptSegment);
+            
+            // Also listen for video timeupdate to update storyboard
+            videoPlayer.addEventListener('timeupdate', updateStoryboardPreview);
+        })
+        .catch(error => {
+            console.error('Error loading transcript:', error);
+            const transcriptContainer = document.getElementById('transcript-container');
+            transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
+        });
+    }
+
+    function parseTranscriptVTT(vttContent) {
+        const lines = vttContent.split('\n');
+        const segments = [];
+        let currentSegment = null;
+
+        // Skip WebVTT header
+        let i = 0;
+        while (i < lines.length && !lines[i].includes('-->')) {
+            i++;
+        }
+
+        // Parse cues
+        for (; i < lines.length; i++) {
+            const line = lines[i].trim();
+            
+            if (line.includes('-->')) {
+                // This is a timestamp line
+                const [start, end] = line.split('-->').map(t => {
+                    // Parse timestamp like "00:00:01.000"
+                    const parts = t.trim().split(':');
+                    const seconds = parseFloat(parts[parts.length-1]);
+                    const minutes = parseInt(parts[parts.length-2]);
+                    const hours = parts.length > 2 ? parseInt(parts[0]) : 0;
+                    return hours * 3600 + minutes * 60 + seconds;
+                });
+                
+                currentSegment = {
+                    id: `segment-${segments.length}`,
+                    start,
+                    end,
+                    text: ''
+                };
+            } else if (line !== '' && currentSegment) {
+                // This is a text line
+                currentSegment.text += (currentSegment.text ? ' ' : '') + line;
+            } else if (line === '' && currentSegment && currentSegment.text) {
+                // End of segment
+                segments.push(currentSegment);
+                currentSegment = null;
+            }
+        }
+
+        // Add the last segment if it exists
+        if (currentSegment && currentSegment.text) {
+            segments.push(currentSegment);
+        }
+
+        return segments;
+    }
+
+    function renderTranscript() {
+        const transcriptContainer = document.getElementById('transcript-container');
+        
+        if (transcriptData.length === 0) {
+            transcriptContainer.innerHTML = '<div class="transcript-placeholder">No transcript available</div>';
+            return;
+        }
+        
+        const html = transcriptData.map(segment => `
+            <div id="${segment.id}" class="transcript-segment">
+                <div class="transcript-thumbnail" onclick="seekToTime(${segment.start})">
+                    <img src="/api/storyboard/image/${currentEvent.event_id}" data-segment-time="${segment.start}" alt="Preview">
+                </div>
+                <div class="transcript-content">
+                    <span class="transcript-timestamp" onclick="seekToTime(${segment.start})">
+                        ${formatTimeDisplay(segment.start)}
+                    </span>
+                    <span class="transcript-text">${segment.text}</span>
+                </div>
+            </div>
+        `).join('');
+        
+        transcriptContainer.innerHTML = html;
+        
+        // Initialize thumbnails
+        updateThumbnailPositions();
+    }
+
+    function updateThumbnailPositions() {
+        if (!transcriptData.length || !currentEvent) return;
+        
+        // Load storyboard VTT data if not already loaded
+        if (!previewVttData[currentEvent.event_id]) {
+            fetch(`/api/storyboard/vtt/${currentEvent.event_id}`)
+            .then(response => response.text())
+            .then(vttText => {
+                previewVttData[currentEvent.event_id] = parseVTT(vttText);
+                positionThumbnailImages();
+            })
+            .catch(error => {
+                console.error('Error loading storyboard VTT data:', error);
+            });
+        } else {
+            positionThumbnailImages();
+        }
+    }
+
+    function positionThumbnailImages() {
+        if (!currentEvent || !previewVttData[currentEvent.event_id]) return;
+        
+        const vttData = previewVttData[currentEvent.event_id];
+        const thumbnailImages = document.querySelectorAll('.transcript-thumbnail img');
+        
+        thumbnailImages.forEach(img => {
+            const segmentTime = parseFloat(img.dataset.segmentTime);
+            const frame = findFrameForTime(vttData, segmentTime);
+            
+            if (frame) {
+                // The original storyboard image has thumbs of 160x90px
+                const [x, y, width, height] = frame.position;
+                
+                if (largeThumbnails) {
+                    // Use original size for large thumbnails
+                    img.style.left = `-${x}px`;
+                    img.style.top = `-${y}px`;
+                } else {
+                    // Scale down for small thumbnails
+                    img.style.left = `-${x / 2}px`;
+                    img.style.top = `-${y / 2}px`;
+                }
+            }
+        });
+    }
+
+    function findFrameForTime(vttData, time) {
+        return vttData.find(frame => time >= frame.startTime && time <= frame.endTime) || 
+               (time > vttData[vttData.length - 1]?.endTime ? vttData[vttData.length - 1] : vttData[0]);
+    }
+
+    function seekToTime(seconds) {
+        if (videoPlayer) {
+            videoPlayer.currentTime = seconds;
+            videoPlayer.play().catch(e => console.error('Error playing video:', e));
+        }
+    }
+
+    function updateActiveTranscriptSegment() {
+        if (!videoPlayer || transcriptData.length === 0) return;
+        
+        const currentTime = videoPlayer.currentTime;
+        let activeSegment = null;
+        
+        // Find the current segment
+        for (const segment of transcriptData) {
+            if (currentTime >= segment.start && currentTime <= segment.end) {
+                activeSegment = segment;
+                break;
+            }
+        }
+        
+        // If no segment found but we're after the last segment's end time,
+        // consider the last segment as active
+        if (!activeSegment && currentTime > transcriptData[transcriptData.length - 1].end) {
+            activeSegment = transcriptData[transcriptData.length - 1];
+        }
+        
+        // If no segment is active or it's the same as before, do nothing
+        if (!activeSegment || (activeSegmentId && activeSegment.id === activeSegmentId)) {
+            return;
+        }
+        
+        // Remove active class from previous segment
+        if (activeSegmentId) {
+            const prevElement = document.getElementById(activeSegmentId);
+            if (prevElement) {
+                prevElement.classList.remove('active');
+            }
+        }
+        
+        // Add active class to current segment
+        const currentElement = document.getElementById(activeSegment.id);
+        if (currentElement) {
+            currentElement.classList.add('active');
+            activeSegmentId = activeSegment.id;
+            
+            // Auto-scroll to active segment if enabled
+            if (autoScroll) {
+                const container = document.getElementById('transcript-container');
+                const elementTop = currentElement.offsetTop;
+                const containerHeight = container.clientHeight;
+                const scrollPosition = elementTop - (containerHeight / 2);
+                
+                container.scrollTo({
+                    top: scrollPosition,
+                    behavior: 'smooth'
+                });
+            }
+        }
+    }
+
+    // Toggle auto-scrolling and thumbnail size
     document.addEventListener('DOMContentLoaded', function() {
+        const autoScrollToggle = document.getElementById('auto-scroll-toggle');
+        autoScrollToggle.addEventListener('change', function() {
+            autoScroll = this.checked;
+        });
+        
+        // Add thumbnail size toggle functionality
+        const thumbnailSizeToggle = document.getElementById('thumbnail-size-toggle');
+        thumbnailSizeToggle.addEventListener('click', function() {
+            largeThumbnails = !largeThumbnails;
+            const container = document.getElementById('transcript-container');
+            
+            if (largeThumbnails) {
+                container.classList.add('large-thumbnails');
+                this.innerHTML = '<i class="bi bi-arrows-angle-contract"></i>';
+            } else {
+                container.classList.remove('large-thumbnails');
+                this.innerHTML = '<i class="bi bi-arrows-angle-expand"></i>';
+            }
+            
+            // Update positions of thumbnails based on new size
+            positionThumbnailImages();
+        });
+        
+        // Add loadedmetadata event listener to the video player
+        videoPlayer.addEventListener('loadedmetadata', function() {
+            if (currentEvent && transcriptData.length > 0) {
+                updateThumbnailPositions();
+            }
+        });
+        
+        // Initialize filters when page loads
         initializeFilters();
+        
         // Check if there's a video ID in the URL
         const urlParams = new URLSearchParams(window.location.search);
         const videoId = urlParams.get('video');
@@ -571,5 +960,8 @@
             loadVideo(videoId);
         }
     });
+
+    // This function needs to be global to be called from the HTML
+    window.seekToTime = seekToTime;
 </script>
 {% endblock %} 
