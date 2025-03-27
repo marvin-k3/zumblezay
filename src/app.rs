@@ -1,11 +1,10 @@
 use super::storyboard;
+use crate::process_events;
 use crate::prompts::{SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON};
 use crate::summary;
 use crate::time_util;
-use crate::transcription;
 use crate::transcripts;
 use crate::AppState;
-use crate::Event;
 use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
@@ -81,51 +80,6 @@ impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for DbAttacher {
     }
 }
 
-// Function to fetch new events
-#[instrument(skip(state), err)]
-async fn fetch_new_events(state: &AppState) -> Result<Vec<Event>> {
-    let transcription_type = state.transcription_service.as_str();
-    info!(
-        "Fetching events without transcriptions for {}",
-        transcription_type
-    );
-    let camera_names: HashMap<String, String> =
-        state.camera_name_cache.lock().await.clone();
-
-    let conn = state.zumblezay_db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT 
-            e.event_id, e.event_type, e.camera_id, 
-            e.event_start, e.event_end, e.video_path
-         FROM events e
-         LEFT JOIN transcriptions t ON 
-            e.event_id = t.event_id 
-            AND t.transcription_type = ?
-         WHERE 
-            t.event_id IS NULL
-         ORDER BY e.event_start DESC 
-         LIMIT 20",
-    )?;
-
-    let events = stmt.query_map(params![transcription_type], |row| {
-        Ok(Event {
-            id: row.get(0)?,
-            type_: row.get(1)?,
-            camera_id: row.get(2)?,
-            camera_name: camera_names.get(&row.get::<_, String>(2)?).cloned(),
-            start: row.get(3)?,
-            end: row.get(4)?,
-            path: row.get(5)?,
-        })
-    })?;
-
-    let events: Result<Vec<_>, _> = events.collect();
-    let events = events?;
-
-    info!("Found {} events needing transcription", events.len());
-    Ok(events)
-}
-
 #[instrument(skip(state), err)]
 pub async fn cache_camera_names(state: &AppState) -> Result<()> {
     let conn = state.zumblezay_db.get()?;
@@ -153,163 +107,6 @@ pub async fn cache_camera_names(state: &AppState) -> Result<()> {
     camera_name_cache.clear();
     camera_name_cache.extend(camera_names);
     Ok(())
-}
-
-// Main processing loop
-#[instrument(skip(state))]
-async fn process_events(state: Arc<AppState>) {
-    info!("Starting event processing loop");
-
-    // Create a channel for shutdown signal
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
-
-    // Clone the sender for the signal handler
-    let shutdown_tx_clone = shutdown_tx.clone();
-
-    // Set up ctrl-c handler
-    tokio::spawn(async move {
-        if let Ok(()) = tokio::signal::ctrl_c().await {
-            info!("Received shutdown signal");
-            let _ = shutdown_tx_clone.send(());
-        }
-    });
-
-    // Create a JoinSet to track running tasks
-    let mut tasks = tokio::task::JoinSet::new();
-
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!("Shutting down event processing loop - waiting for current tasks to complete");
-                break;
-            }
-            _ = async {
-                match fetch_new_events(&state).await {
-                    Ok(events) => {
-                        for event in events {
-                            let state = state.clone();
-                            let event = event.clone();
-
-                            // Acquire semaphore permit before spawning task
-                            let permit = state.semaphore.clone().acquire_owned().await.unwrap();
-
-                            tasks.spawn(async move {
-                                let _permit = permit; // Keep permit alive for duration of task
-                                if let Err(e) = process_single_event(&state, event).await {
-                                    error!("Error processing event: {}", e);
-                                }
-                            });
-                        }
-                    }
-                    Err(e) => error!("Error fetching events: {}", e),
-                }
-                time::sleep(Duration::from_secs(30)).await;
-            } => {}
-        }
-    }
-
-    // Wait for all tasks to complete with a timeout
-    let shutdown_timeout = Duration::from_secs(30);
-    let shutdown_deadline = tokio::time::Instant::now() + shutdown_timeout;
-
-    while let Some(result) =
-        tokio::time::timeout_at(shutdown_deadline, tasks.join_next())
-            .await
-            .unwrap_or(None)
-    {
-        if let Err(e) = result {
-            error!("Task failed during shutdown: {}", e);
-        }
-    }
-
-    info!("Event processing loop terminated");
-}
-
-// Helper function to process a single event
-#[instrument(skip(state), err)]
-async fn process_single_event(state: &AppState, event: Event) -> Result<()> {
-    // Check if event has already been transcribed
-    let conn = state.zumblezay_db.get()?;
-    let transcript_info: Option<(i64,)> = match conn.query_row(
-        "SELECT created_at FROM transcriptions WHERE event_id = ? AND transcription_type = ?",
-        params![event.id, state.transcription_service.as_str()],
-        |row| Ok((row.get(0)?,)),
-    ) {
-        Ok(row) => Some(row),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(anyhow::anyhow!("Database error checking transcript: {}", e)),
-    };
-
-    if let Some((created_at,)) = transcript_info {
-        let event_time = chrono::DateTime::<chrono::Utc>::from_timestamp(
-            event.start as i64,
-            0,
-        )
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| "invalid timestamp".to_string());
-
-        let transcript_time =
-            chrono::DateTime::<chrono::Utc>::from_timestamp(created_at, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| "invalid timestamp".to_string());
-
-        debug!(
-            "Skipping event {} - already transcribed (event time: {}, transcribed: {})",
-            event.id, event_time, transcript_time
-        );
-        return Ok(());
-    }
-
-    // Add event to active tasks
-    {
-        let mut active_tasks = state.active_tasks.lock().await;
-        active_tasks.insert(event.id.clone(), "Processing started".to_string());
-    }
-
-    // Process the event
-    let result = match transcription::get_transcript(&event, state).await {
-        Ok((raw_response, duration_ms)) => {
-            transcripts::save_transcript(
-                state,
-                &event,
-                &raw_response,
-                duration_ms,
-            )
-            .await
-            .map_err(|e| {
-                error!("Error saving transcript for event {}: {}", event.id, e);
-                state.stats.error_count.fetch_add(1, Ordering::Relaxed);
-                e
-            })?;
-
-            state.stats.processed_count.fetch_add(1, Ordering::Relaxed);
-            state
-                .stats
-                .total_processing_time_ms
-                .fetch_add(duration_ms as u64, Ordering::Relaxed);
-
-            let mut last_time = state.last_processed_time.lock().await;
-            *last_time = event.start;
-            info!(
-                "Successfully processed event {} in {}ms",
-                event.id, duration_ms
-            );
-            Ok(())
-        }
-        Err(e) => {
-            error!("Error processing video for event {}: {}", event.id, e);
-            state.stats.error_count.fetch_add(1, Ordering::Relaxed);
-            Err(e)
-        }
-    };
-
-    // Always remove the task from active tasks
-    {
-        let mut active_tasks = state.active_tasks.lock().await;
-        active_tasks.remove(&event.id);
-    }
-
-    result
 }
 
 // Health check endpoint
@@ -1645,7 +1442,7 @@ pub async fn serve() -> Result<()> {
         info!("Starting background processing task");
         let processing_state = state.clone();
         Some(tokio::spawn(async move {
-            process_events(processing_state).await;
+            process_events::process_events(processing_state).await;
         }))
     } else {
         info!("Background transcription task disabled");

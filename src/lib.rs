@@ -17,6 +17,7 @@ use tracing::warn;
 
 pub mod app;
 pub mod openai;
+pub mod process_events;
 pub mod prompts;
 pub mod storyboard;
 pub mod summary;
@@ -327,6 +328,19 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
             content TEXT NOT NULL,                -- The actual summary content
             duration_ms INTEGER NOT NULL,         -- Time taken to generate the summary
             UNIQUE(date, model, prompt_name, summary_type)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS corrupted_files (
+            event_id TEXT PRIMARY KEY,
+            video_path TEXT NOT NULL,
+            first_failure_at INTEGER NOT NULL,
+            last_attempt_at INTEGER NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'failed'
         )",
         [],
     )?;
