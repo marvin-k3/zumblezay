@@ -7,34 +7,11 @@ use http_body_util::BodyExt;
 use pretty_assertions::assert_eq;
 use rusqlite::params;
 use std::sync::Arc;
-use std::sync::Once;
 use tower::util::ServiceExt;
 use tracing::debug;
 use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
+use zumblezay::test_utils::init_test_logging;
 use zumblezay::AppState;
-
-// Initialize logging once for all tests
-static INIT: Once = Once::new();
-
-// Helper function to initialize tracing for tests
-fn init_test_logging() {
-    INIT.call_once(|| {
-        // Initialize the tracing subscriber only once
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "debug".into()),
-            )
-            .with_test_writer()
-            .finish();
-
-        // Set as global default
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Failed to set tracing subscriber");
-
-        debug!("Test logging initialized");
-    });
-}
 
 /// Create a test app with just the health endpoint
 fn app() -> (Arc<AppState>, Router) {

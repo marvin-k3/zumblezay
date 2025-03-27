@@ -3,6 +3,7 @@ use crate::transcripts;
 use crate::AppState;
 use crate::Event;
 use anyhow::Result;
+use async_trait::async_trait;
 use rusqlite::params;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -18,6 +19,47 @@ const INITIAL_RETRY_DELAY_SECS: i64 = 60; // 1 minute
 struct EventRetry {
     retry_attempt: Option<i32>,
     last_attempt: Option<i64>,
+}
+
+// Define a trait for transcription service
+
+#[async_trait]
+pub trait TranscriptionService: Send + Sync {
+    async fn get_transcript(
+        &self,
+        event: &Event,
+        state: &AppState,
+    ) -> Result<(String, i64)>;
+
+    fn as_str(&self) -> &'static str;
+}
+
+// Implement the trait for the real service
+#[derive(Clone)]
+pub struct RealTranscriptionService;
+#[async_trait]
+impl TranscriptionService for RealTranscriptionService {
+    async fn get_transcript(
+        &self,
+        event: &Event,
+        state: &AppState,
+    ) -> Result<(String, i64)> {
+        transcription::get_transcript(event, state).await
+    }
+
+    fn as_str(&self) -> &'static str {
+        "whisper"
+    }
+}
+
+// Add a factory function to get the appropriate service
+pub fn get_transcription_service(
+    service_type: &str,
+) -> Arc<dyn TranscriptionService> {
+    match service_type {
+        "whisper-local" | "runpod" => Arc::new(RealTranscriptionService),
+        unknown => panic!("Unknown transcription service: {}", unknown),
+    }
 }
 
 #[instrument(skip(state))]
@@ -41,6 +83,10 @@ pub async fn process_events(state: Arc<AppState>) {
     // Create a JoinSet to track running tasks
     let mut tasks = tokio::task::JoinSet::new();
 
+    // Create the transcription service once
+    let transcription_service =
+        get_transcription_service(&state.transcription_service);
+
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -53,13 +99,14 @@ pub async fn process_events(state: Arc<AppState>) {
                         for event in events {
                             let state = state.clone();
                             let event = event.clone();
+                            let transcription_service = transcription_service.clone();
 
                             // Acquire semaphore permit before spawning task
                             let permit = state.semaphore.clone().acquire_owned().await.unwrap();
 
                             tasks.spawn(async move {
                                 let _permit = permit; // Keep permit alive for duration of task
-                                if let Err(e) = process_single_event(&state, event).await {
+                                if let Err(e) = process_single_event(&state, event, transcription_service.as_ref()).await {
                                     error!("Error processing event: {}", e);
                                 }
                             });
@@ -90,10 +137,11 @@ pub async fn process_events(state: Arc<AppState>) {
 }
 
 // Modify process_single_event to use the new Event fields
-#[instrument(skip(state), err)]
+#[instrument(skip(state, transcription_service), err)]
 async fn process_single_event(
     state: &AppState,
     (event, retry_info): (Event, EventRetry),
+    transcription_service: &dyn TranscriptionService,
 ) -> Result<()> {
     {
         let mut active_tasks = state.active_tasks.lock().await;
@@ -105,7 +153,8 @@ async fn process_single_event(
     );
 
     // Process the event
-    let result = match transcription::get_transcript(&event, state).await {
+    let result = match transcription_service.get_transcript(&event, state).await
+    {
         Ok((raw_response, duration_ms)) => {
             // If successful and was previously marked as corrupted, update the status
             if retry_info.retry_attempt.is_some() {
@@ -218,7 +267,7 @@ async fn fetch_new_events(
                 cf.event_id IS NULL
                 OR (
                     cf.attempt_count < ?
-                    AND cf.last_attempt_at < unixepoch() - (? * pow(2, cf.attempt_count - 1))
+                    AND cf.last_attempt_at < unixepoch() - (? * (1 << (cf.attempt_count - 1)))
                 )
             )
          ORDER BY e.event_start DESC 
@@ -262,46 +311,19 @@ async fn fetch_new_events(
 #[cfg(test)]
 mod process_events_tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use crate::time_util;
-    use std::sync::Once;
-    use tracing::debug;
-    use tracing_subscriber;
 
-    // Initialize logging once for all tests
-    static INIT: Once = Once::new();
-
-    // Helper function to initialize tracing for tests
-    fn init_test_logging() {
-        INIT.call_once(|| {
-            // Initialize the tracing subscriber only once
-            let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env(),
-                )
-                .with_test_writer()
-                .finish();
-
-            // Set as global default
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("Failed to set tracing subscriber");
-
-            debug!("Test logging initialized");
-        });
-    } // Helper function to set up a test database with events and transcriptions
+    // Helper function to set up a test database with events and transcriptions
     async fn setup_test_db(state: &AppState) -> Result<(), anyhow::Error> {
         // Get the correct timestamp range for 2023-01-01
         let conn = state.zumblezay_db.get()?;
-        let (start_ts, end_ts) =
-            time_util::parse_local_date_to_utc_range_with_time(
-                "2023-01-01",
-                &None,
-                &None,
-                state.timezone,
-            )?;
-        println!(
-            "Setting up test data with timestamps in range: {} to {}",
-            start_ts, end_ts
-        );
+        let (start_ts, _) = time_util::parse_local_date_to_utc_range_with_time(
+            "2023-01-01",
+            &None,
+            &None,
+            state.timezone,
+        )?;
 
         // Use timestamps within this range
         let event1_ts = start_ts + 3600.0; // 1 hour into the day
@@ -353,10 +375,273 @@ mod process_events_tests {
     }
 
     #[tokio::test]
-    async fn test_process_events() -> Result<(), anyhow::Error> {
+    async fn test_successful_transcription() -> Result<(), anyhow::Error> {
         init_test_logging();
         let state = AppState::new_for_testing();
         setup_test_db(&state).await?;
+
+        // Create a test event
+        let event = Event {
+            id: "test-event-1".to_string(),
+            type_: "motion".to_string(),
+            camera_id: "camera1".to_string(),
+            camera_name: Some("Living Room".to_string()),
+            start: 1672531200.0, // 2023-01-01 00:00:00
+            end: 1672531210.0,
+            path: Some("/data/videos/test1.mp4".to_string()),
+        };
+
+        let retry_info = EventRetry {
+            retry_attempt: None,
+            last_attempt: None,
+        };
+
+        // Create a mock transcription service that succeeds
+        struct MockTranscriptionService;
+        #[async_trait]
+        impl TranscriptionService for MockTranscriptionService {
+            async fn get_transcript(
+                &self,
+                _event: &Event,
+                _state: &AppState,
+            ) -> Result<(String, i64)> {
+                Ok((r#"{"text": "Test transcript"}"#.to_string(), 100))
+            }
+
+            fn as_str(&self) -> &'static str {
+                "mock"
+            }
+        }
+
+        // Process the event with the mock service
+        process_single_event(
+            &state,
+            (event, retry_info),
+            &MockTranscriptionService,
+        )
+        .await?;
+
+        // Verify the transcript was saved
+        let conn = state.zumblezay_db.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM transcriptions WHERE event_id = ?",
+            params!["test-event-1"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        // Verify stats were updated
+        assert_eq!(
+            state
+                .stats
+                .processed_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .stats
+                .error_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_failed_transcription() -> Result<(), anyhow::Error> {
+        init_test_logging();
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        // Create a test event
+        let event = Event {
+            id: "test-event-1".to_string(),
+            type_: "motion".to_string(),
+            camera_id: "camera1".to_string(),
+            camera_name: Some("Living Room".to_string()),
+            start: 1672531200.0,
+            end: 1672531210.0,
+            path: Some("/data/videos/test1.mp4".to_string()),
+        };
+
+        let retry_info = EventRetry {
+            retry_attempt: None,
+            last_attempt: None,
+        };
+
+        // Create a mock transcription service that fails
+        struct MockTranscriptionService;
+        #[async_trait]
+        impl TranscriptionService for MockTranscriptionService {
+            async fn get_transcript(
+                &self,
+                _event: &Event,
+                _state: &AppState,
+            ) -> Result<(String, i64)> {
+                Err(anyhow::anyhow!("Transcription failed"))
+            }
+
+            fn as_str(&self) -> &'static str {
+                "mock"
+            }
+        }
+
+        // Process the event with the mock service
+        process_single_event(
+            &state,
+            (event, retry_info),
+            &MockTranscriptionService,
+        )
+        .await
+        .expect_err("Expected transcription to fail");
+
+        // Verify error was recorded in corrupted_files
+        let conn = state.zumblezay_db.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM corrupted_files WHERE event_id = ? AND status = 'failed'",
+            params!["test-event-1"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        // Verify stats were updated
+        assert_eq!(
+            state
+                .stats
+                .processed_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .stats
+                .error_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retry_resolution() -> Result<(), anyhow::Error> {
+        init_test_logging();
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        // Create a test event that was previously failed
+        let event = Event {
+            id: "test-event-1".to_string(),
+            type_: "motion".to_string(),
+            camera_id: "camera1".to_string(),
+            camera_name: Some("Living Room".to_string()),
+            start: 1672531200.0,
+            end: 1672531210.0,
+            path: Some("/data/videos/test1.mp4".to_string()),
+        };
+
+        let retry_info = EventRetry {
+            retry_attempt: Some(1),
+            last_attempt: Some(1672531200),
+        };
+
+        // First insert a failed record
+        let conn = state.zumblezay_db.get()?;
+        conn.execute(
+            "INSERT INTO corrupted_files (event_id, status, first_failure_at, last_attempt_at, attempt_count, video_path, last_error) VALUES (?, 'failed', ?, ?, ?, ?, ?)",
+            params!["test-event-1", 1672531200, 1672531200, 1, "/data/videos/test1.mp4", "Previous error"],
+        )?;
+
+        // Create a mock transcription service that succeeds
+        struct MockTranscriptionService;
+        #[async_trait]
+        impl TranscriptionService for MockTranscriptionService {
+            async fn get_transcript(
+                &self,
+                _event: &Event,
+                _state: &AppState,
+            ) -> Result<(String, i64)> {
+                Ok((r#"{"text": "Test transcript"}"#.to_string(), 100))
+            }
+
+            fn as_str(&self) -> &'static str {
+                "mock"
+            }
+        }
+
+        // Process the event with the mock service
+        process_single_event(
+            &state,
+            (event, retry_info),
+            &MockTranscriptionService,
+        )
+        .await?;
+
+        // Verify the corrupted_files record was updated to resolved
+        let status: String = conn.query_row(
+            "SELECT status FROM corrupted_files WHERE event_id = ?",
+            params!["test-event-1"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "resolved");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_new_events() -> Result<(), anyhow::Error> {
+        init_test_logging();
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        // Fetch new events
+        let events = fetch_new_events(&state).await?;
+
+        // Verify we got the expected events
+        assert_eq!(events.len(), 2);
+
+        // Verify event details (ordered by event_start DESC)
+        let event1 = &events[0].0;
+        assert_eq!(event1.id, "test-event-2"); // Later event first
+        assert_eq!(event1.camera_id, "camera2");
+        assert_eq!(event1.camera_name, Some("Front Door".to_string()));
+
+        let event2 = &events[1].0;
+        assert_eq!(event2.id, "test-event-1"); // Earlier event second
+        assert_eq!(event2.camera_id, "camera1");
+        assert_eq!(event2.camera_name, Some("Living Room".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_new_events_with_retries() -> Result<(), anyhow::Error> {
+        init_test_logging();
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        // Insert a failed event with retries
+        let conn = state.zumblezay_db.get()?;
+        conn.execute(
+            "INSERT INTO corrupted_files (event_id, status, first_failure_at, last_attempt_at, attempt_count, video_path, last_error) VALUES (?, 'failed', ?, ?, ?, ?, ?)",
+            params!["test-event-1", 1672531200, 1672531200, 1, "/data/videos/test1.mp4", "Previous error"],
+        )?;
+
+        // Fetch new events
+        let events = fetch_new_events(&state).await?;
+
+        // Verify we got the expected events
+        assert_eq!(events.len(), 2);
+
+        // Verify retry info for the failed event (ordered by event_start DESC)
+        let event1_retry = &events[0].1;
+        assert_eq!(event1_retry.retry_attempt, None); // test-event-2 has no retries
+
+        let event2_retry = &events[1].1;
+        assert_eq!(event2_retry.retry_attempt, Some(1)); // test-event-1 has retries
+        assert_eq!(event2_retry.last_attempt, Some(1672531200));
 
         Ok(())
     }

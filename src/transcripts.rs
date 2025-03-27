@@ -321,9 +321,6 @@ mod tests {
             |row| row.get(0),
         )?;
 
-        // Print the transcription service for debugging
-        println!("Transcription service: {}", state.transcription_service);
-
         // Insert test transcriptions
         conn.execute(
             "INSERT INTO transcriptions (

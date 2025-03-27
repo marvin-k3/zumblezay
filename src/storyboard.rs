@@ -376,35 +376,12 @@ async fn check_or_register_in_progress(
 #[cfg(test)]
 mod storyboard_tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use std::path::PathBuf;
-    use std::sync::Once;
     use tracing::{debug, info};
-    use tracing_subscriber;
-
-    // Initialize logging once for all tests
-    static INIT: Once = Once::new();
-
-    // Helper function to initialize tracing for tests
-    fn init_test_logging() {
-        INIT.call_once(|| {
-            // Initialize the tracing subscriber only once
-            let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env(),
-                )
-                .with_test_writer()
-                .finish();
-
-            // Set as global default
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("Failed to set tracing subscriber");
-
-            debug!("Test logging initialized");
-        });
-    }
-
     #[tokio::test]
     async fn test_generate_storyboard() {
+        init_test_logging();
         // Use the test file from testdata directory
         let test_video_path = "testdata/10s-bars.mp4";
 

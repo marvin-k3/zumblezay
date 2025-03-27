@@ -27,6 +27,8 @@ pub mod time_util;
 pub mod transcription;
 pub mod transcripts;
 
+pub mod test_utils;
+
 use crate::storyboard::StoryboardData;
 
 // ServiceStats struct for both main app and testing
