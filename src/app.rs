@@ -404,12 +404,26 @@ fn init_templates() -> Tera {
     tera
 }
 
-// Update the status endpoint handler
-#[instrument(skip(state))]
-async fn get_status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+#[axum::debug_handler]
+async fn get_status_page(State(state): State<Arc<AppState>>) -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/status");
+
+    let timezone_str = state.timezone.to_string().replace("::", "/");
+    context.insert("timezone", &timezone_str);
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("status.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let last_processed_time = *state.last_processed_time.lock().await;
     let active_tasks = state.active_tasks.lock().await.clone();
 
@@ -433,24 +447,7 @@ async fn get_status(
         },
     };
 
-    // Check if the client accepts HTML
-    if headers
-        .get("accept")
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.contains("text/html"))
-        .unwrap_or(false)
-    {
-        let templates = TEMPLATES.get().unwrap();
-        let mut context = TeraContext::new();
-        context.insert("build_info", &get_build_info());
-        context.insert("request_path", &"/status");
-        let html = templates
-            .render("status.html", &context)
-            .unwrap_or_else(|e| format!("Template error: {}", e));
-        Html(html).into_response()
-    } else {
-        Json(status).into_response()
-    }
+    Json(status).into_response()
 }
 
 // Add these new endpoint handlers
@@ -783,6 +780,7 @@ struct TranscriptListItem {
 }
 
 // Update the events page handler
+#[axum::debug_handler]
 async fn events_page() -> Html<String> {
     let templates = TEMPLATES.get().unwrap();
     let mut context = TeraContext::new();
@@ -1484,13 +1482,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/", get(events_page))
         .route("/events", get(events_page))
         .route("/health", get(health_check))
-        .route("/status", get(get_status))
+        .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route("/api/models", get(get_available_models))
         .route("/api/cameras", get(get_cameras))
         .route("/video/{event_id}", get(stream_video))
+        .route("/api/status", get(get_status))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
         .route(
             "/api/transcripts/summary/{date}",

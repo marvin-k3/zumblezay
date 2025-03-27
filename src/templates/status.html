@@ -58,8 +58,22 @@
 
 {% block scripts %}
 <script>
+    // Get the timezone from the server - use safe rendering to prevent HTML encoding
+    const appTimezone = "{{timezone | safe}}";
+    console.log("Using timezone:", appTimezone);
+    function isValidTimezone(tz) {
+        try {
+            Intl.DateTimeFormat(undefined, {timeZone: tz});
+            return true;
+        } catch (e) {
+            console.error(`Invalid timezone: ${tz}`, e);
+            return false;
+        }
+    }
+    const validTimezone = isValidTimezone(appTimezone) ? appTimezone : "Australia/Adelaide";
+
     function updateStatus() {
-        fetch('/status', {
+        fetch('/api/status', {
             headers: {
                 'Accept': 'application/json'
             }
@@ -83,8 +97,11 @@
                     `).join('');
             }
             
-            const timestamp = new Date(data.last_processed_time * 1000).toISOString();
-            document.getElementById('last-processed').textContent = timestamp;
+            const lastProcessedDate = new Date(data.last_processed_time * 1000).toISOString();
+            const localLastProcessedDate = new Intl.DateTimeFormat('en', {
+                timeZone: validTimezone,
+            }).format(lastProcessedDate);
+            document.getElementById('last-processed').textContent = localLastProcessedDate;
         })
         .catch(error => console.error('Error fetching status:', error));
     }
