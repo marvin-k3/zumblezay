@@ -258,3 +258,106 @@ async fn fetch_new_events(
     info!("Found {} events needing transcription", events.len());
     Ok(events)
 }
+
+#[cfg(test)]
+mod process_events_tests {
+    use super::*;
+    use crate::time_util;
+    use std::sync::Once;
+    use tracing::debug;
+    use tracing_subscriber;
+
+    // Initialize logging once for all tests
+    static INIT: Once = Once::new();
+
+    // Helper function to initialize tracing for tests
+    fn init_test_logging() {
+        INIT.call_once(|| {
+            // Initialize the tracing subscriber only once
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env(),
+                )
+                .with_test_writer()
+                .finish();
+
+            // Set as global default
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("Failed to set tracing subscriber");
+
+            debug!("Test logging initialized");
+        });
+    } // Helper function to set up a test database with events and transcriptions
+    async fn setup_test_db(state: &AppState) -> Result<(), anyhow::Error> {
+        // Get the correct timestamp range for 2023-01-01
+        let conn = state.zumblezay_db.get()?;
+        let (start_ts, end_ts) =
+            time_util::parse_local_date_to_utc_range_with_time(
+                "2023-01-01",
+                &None,
+                &None,
+                state.timezone,
+            )?;
+        println!(
+            "Setting up test data with timestamps in range: {} to {}",
+            start_ts, end_ts
+        );
+
+        // Use timestamps within this range
+        let event1_ts = start_ts + 3600.0; // 1 hour into the day
+        let event2_ts = start_ts + 7200.0; // 2 hours into the day
+
+        // Insert test events with timestamps in the correct range
+        conn.execute(
+            "INSERT INTO events (
+                event_id, created_at, event_start, event_end, 
+                event_type, camera_id, video_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "test-event-1",
+                start_ts,
+                event1_ts,
+                event1_ts + 10.0,
+                "motion",
+                "camera1",
+                "/data/videos/test1.mp4",
+            ],
+        )?;
+
+        conn.execute(
+            "INSERT INTO events (
+                event_id, created_at, event_start, event_end, 
+                event_type, camera_id, video_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "test-event-2",
+                start_ts,
+                event2_ts,
+                event2_ts + 20.0,
+                "person",
+                "camera2",
+                "/data/videos/test2.mp4",
+            ],
+        )?;
+
+        // Add camera names to the cache
+        {
+            let mut camera_names = state.camera_name_cache.lock().await;
+            camera_names
+                .insert("camera1".to_string(), "Living Room".to_string());
+            camera_names
+                .insert("camera2".to_string(), "Front Door".to_string());
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_process_events() -> Result<(), anyhow::Error> {
+        init_test_logging();
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        Ok(())
+    }
+}
