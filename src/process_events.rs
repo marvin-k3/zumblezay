@@ -223,6 +223,19 @@ async fn process_single_event(
                 ],
             )?;
 
+            let next_retry_delay =
+                INITIAL_RETRY_DELAY_SECS * (1 << (attempt_count));
+            let next_retry_time =
+                retry_info.last_attempt.unwrap_or(0) + next_retry_delay;
+            let next_retry_datetime =
+                chrono::DateTime::from_timestamp(next_retry_time, 0)
+                    .unwrap()
+                    .with_timezone(&state.timezone);
+            info!(
+                "Event {} will be eligible for next retry at {} (attempt {})",
+                event.id, next_retry_datetime, attempt_count
+            );
+
             Err(e)
         }
     };
