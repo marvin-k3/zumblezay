@@ -245,19 +245,6 @@ async fn test_events_api() {
         .unwrap();
     }
 
-    // Test basic events retrieval
-    let (status, body) =
-        make_api_request(app_router.clone(), "/api/events").await;
-    let events = validate_and_parse_events(status, &body);
-
-    // Verify we got our test events
-    assert_eq!(events.len(), 3);
-    let event_ids = extract_event_ids(&events);
-
-    assert!(event_ids.contains(&"test-event-1"));
-    assert!(event_ids.contains(&"test-event-2"));
-    assert!(event_ids.contains(&"test-event-3"));
-
     // Test with date filter - using fixed date "2022-12-31"
     let fixed_date = "2022-12-31";
     let (status, body) = make_api_request(
@@ -275,9 +262,11 @@ async fn test_events_api() {
     assert!(event_ids.contains(&"test-event-3"));
 
     // Test with camera filter
-    let (status, body) =
-        make_api_request(app_router.clone(), "/api/events?camera_id=camera1")
-            .await;
+    let (status, body) = make_api_request(
+        app_router.clone(),
+        "/api/events?camera_id=camera1&date=2022-12-31",
+    )
+    .await;
     let events = validate_and_parse_events(status, &body);
 
     // Verify camera-filtered events

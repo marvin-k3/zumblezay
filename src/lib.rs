@@ -285,10 +285,8 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
 pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
     info!("Initializing zumblezay database");
 
-    // Enable WAL mode
     conn.pragma_update(None, "journal_mode", "WAL")?;
 
-    // Create events table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS events (
             event_id TEXT PRIMARY KEY,
@@ -302,7 +300,12 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
         [],
     )?;
 
-    // Create transcriptions table
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_camera_start_end
+            ON events(camera_id, event_start, event_end)",
+        [],
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS transcriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -318,7 +321,6 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
         [],
     )?;
 
-    // Create daily summaries table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS daily_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

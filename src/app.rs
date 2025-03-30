@@ -268,45 +268,45 @@ async fn get_completed_events(
         .get()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mut query = String::from(
-        "SELECT event_id, camera_id, event_start, event_end 
-         FROM events 
-         WHERE 1=1",
+    let date = filters.date.ok_or((
+        StatusCode::BAD_REQUEST,
+        "Date filter is required".to_string(),
+    ))?;
+
+    let (start_ts, end_ts) =
+        time_util::parse_local_date_to_utc_range_with_time(
+            &date,
+            &filters.time_start,
+            &filters.time_end,
+            state.timezone,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let mut query: String = String::from(
+        "WITH filtered AS (
+            SELECT *
+            FROM events
+            WHERE event_start BETWEEN ? AND ?
+          )
+          SELECT e1.event_id, e1.camera_id, e1.event_start, e1.event_end
+          FROM filtered e1
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM filtered e2
+            WHERE e2.camera_id = e1.camera_id
+              AND e2.event_start <= e1.event_start
+              AND e2.event_end >= e1.event_end
+              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+          )",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(date) = filters.date {
-        // Convert date to timestamp range in UTC
-        let (start_ts, end_ts) =
-            time_util::parse_local_date_to_utc_range_with_time(
-                &date,
-                &filters.time_start,
-                &filters.time_end,
-                state.timezone,
-            )
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-        query.push_str(" AND event_start >= ? AND event_start < ?");
-        params.push(Box::new(start_ts));
-        params.push(Box::new(end_ts));
-    } else if filters.time_start.is_some() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Time start is not supported without a date".to_string(),
-        ));
-    } else if filters.time_end.is_some() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Time end is not supported without a date".to_string(),
-        ));
-    }
-
+    params.push(Box::new(start_ts));
+    params.push(Box::new(end_ts));
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));
     }
-
-    query.push_str(" ORDER BY event_start DESC LIMIT 5000");
+    query.push_str(" ORDER BY event_start DESC");
 
     let mut stmt = conn
         .prepare(&query)
