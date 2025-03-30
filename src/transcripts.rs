@@ -74,18 +74,24 @@ pub async fn get_formatted_transcripts_for_date(
         .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
     let mut stmt = conn
         .prepare(
-            "SELECT 
-            e.event_start,
-            t.raw_response,
-            e.camera_id,
-            e.event_id
-         FROM events e
-         JOIN transcriptions t ON e.event_id = t.event_id
-         WHERE 
-            e.event_start >= ? 
-            AND e.event_start < ? 
-            AND t.transcription_type = ?
-         ORDER BY e.event_start ASC",
+        "WITH filtered AS (
+            SELECT *
+            FROM events
+            WHERE event_start BETWEEN ? AND ?
+          )
+          SELECT e1.event_start, t.raw_response, e1.camera_id, e1.event_id
+          FROM filtered e1
+          JOIN transcriptions t ON e1.event_id = t.event_id
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM filtered e2
+            WHERE e2.camera_id = e1.camera_id
+              AND e2.event_start <= e1.event_start
+              AND e2.event_end >= e1.event_end
+              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+          )
+          AND t.transcription_type = ?
+          ORDER BY e1.event_start ASC",
         )
         .map_err(|e| anyhow::anyhow!("Failed to prepare statement: {}", e))?;
 
@@ -509,6 +515,142 @@ mod tests {
             err.to_string().contains("No events found for the date"),
             "Expected 'No events found for the date' error, got: {}",
             err
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_contained_events_are_filtered() -> Result<(), anyhow::Error> {
+        // Create a test AppState
+        let state = AppState::new_for_testing();
+
+        // Create DB connection and get the date range timestamps
+        let conn = state.zumblezay_db.get()?;
+        let (start_ts, _) = time_util::parse_local_date_to_utc_range_with_time(
+            "2023-01-01",
+            &None,
+            &None,
+            state.timezone,
+        )?;
+
+        // Create two events where one is fully contained within the other
+        // Outer event: spans from 1 hour to 3 hours into the day
+        let outer_event_start = start_ts + 3600.0; // 1 hour into day
+        let outer_event_end = start_ts + 10800.0; // 3 hours into day
+
+        // Inner event: spans from 1.5 hours to 2.5 hours into the day (fully contained)
+        let inner_event_start = start_ts + 5400.0; // 1.5 hours into day
+        let inner_event_end = start_ts + 9000.0; // 2.5 hours into day
+
+        // Insert the outer event
+        conn.execute(
+            "INSERT INTO events (
+                event_id, created_at, event_start, event_end, 
+                event_type, camera_id, video_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "outer-event",
+                start_ts,
+                outer_event_start,
+                outer_event_end,
+                "motion",
+                "camera1",
+                "/data/videos/outer.mp4",
+            ],
+        )?;
+
+        // Insert the inner event (same camera)
+        conn.execute(
+            "INSERT INTO events (
+                event_id, created_at, event_start, event_end, 
+                event_type, camera_id, video_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "inner-event",
+                start_ts,
+                inner_event_start,
+                inner_event_end,
+                "motion",
+                "camera1",
+                "/data/videos/inner.mp4",
+            ],
+        )?;
+
+        // Add camera name to the cache
+        {
+            let mut camera_names = state.camera_name_cache.lock().await;
+            camera_names
+                .insert("camera1".to_string(), "Living Room".to_string());
+        }
+
+        // Add transcriptions for both events
+        conn.execute(
+            "INSERT INTO transcriptions (
+                event_id, created_at, transcription_type, url,
+                duration_ms, raw_response
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                "outer-event",
+                chrono::Utc::now().timestamp(),
+                state.transcription_service.as_str(),
+                state.whisper_url,
+                500,
+                r#"{"text": "This is the outer event transcript"}"#,
+            ],
+        )?;
+
+        conn.execute(
+            "INSERT INTO transcriptions (
+                event_id, created_at, transcription_type, url,
+                duration_ms, raw_response
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                "inner-event",
+                chrono::Utc::now().timestamp(),
+                state.transcription_service.as_str(),
+                state.whisper_url,
+                300,
+                r#"{"text": "This is the inner event transcript that should be filtered out"}"#,
+            ],
+        )?;
+
+        // Get formatted transcripts
+        let (csv_content, event_ids) =
+            get_formatted_transcripts_for_date(&state, "2023-01-01").await?;
+
+        // Print the CSV content for debugging
+        println!("CSV Content for contained events test: {}", csv_content);
+
+        // Verify only the outer event is included
+        assert_eq!(
+            event_ids.len(),
+            1,
+            "Only one event should be returned (the outer event)"
+        );
+        assert!(
+            event_ids.contains(&"outer-event".to_string()),
+            "The outer event should be included"
+        );
+        assert!(
+            !event_ids.contains(&"inner-event".to_string()),
+            "The inner event should be filtered out"
+        );
+
+        // Verify the CSV contains only the outer event transcript
+        assert!(
+            verify_csv_contains(
+                &csv_content,
+                "This is the outer event transcript"
+            ),
+            "CSV should contain the outer event transcript"
+        );
+        assert!(
+            !verify_csv_contains(
+                &csv_content,
+                "This is the inner event transcript"
+            ),
+            "CSV should NOT contain the inner event transcript"
         );
 
         Ok(())
