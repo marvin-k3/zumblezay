@@ -7,6 +7,8 @@ use http_body_util::BodyExt;
 use pretty_assertions::assert_eq;
 use rusqlite::params;
 use std::sync::Arc;
+use tokio::time;
+use tokio_util::bytes;
 use tower::util::ServiceExt;
 use tracing::debug;
 use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
@@ -517,4 +519,49 @@ async fn test_models_api() {
             expected_id
         );
     }
+}
+
+#[tokio::test]
+async fn test_prompt_context_api() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+    app_state
+        .prompt_context_store
+        .insert(
+            "test-key".to_string(),
+            vec![bytes::Bytes::from("test-data")],
+            time::Duration::from_secs(60),
+        )
+        .await;
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .uri("/api/prompt_context/test-key/0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"test-data");
+}
+
+#[tokio::test]
+async fn test_prompt_context_api_not_found() {
+    init_test_logging();
+    let (_app_state, app_router) = app();
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .uri("/api/prompt_context/test-key/0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

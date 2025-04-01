@@ -18,6 +18,7 @@ use tracing::warn;
 pub mod app;
 pub mod openai;
 pub mod process_events;
+pub mod prompt_context;
 pub mod prompts;
 pub mod storyboard;
 pub mod summary;
@@ -88,6 +89,8 @@ pub struct AppState {
     // Track in-progress storyboard generations
     pub in_progress_storyboards:
         Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    // Holds temporary data for prompt context.
+    pub prompt_context_store: Arc<prompt_context::Store>,
     // Add fields to track temp files
     #[allow(dead_code)]
     temp_events_path: Option<tempfile::NamedTempFile>,
@@ -181,6 +184,7 @@ impl AppState {
             timezone: chrono_tz::Australia::Adelaide,
             // Track in-progress storyboard generations
             in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
+            prompt_context_store: Arc::new(prompt_context::Store::new()),
             // Store temp files so they're cleaned up when AppState is dropped
             temp_events_path: Some(temp_events_file),
             temp_zumblezay_path: Some(temp_zumblezay_file),
@@ -274,6 +278,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         video_path_replacement_prefix: config.video_path_replacement_prefix,
         timezone,
         in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
+        prompt_context_store: Arc::new(prompt_context::Store::new()),
         temp_events_path: None,
         temp_zumblezay_path: None,
         temp_cache_db_path: None,

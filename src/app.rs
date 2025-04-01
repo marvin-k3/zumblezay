@@ -1,5 +1,6 @@
 use super::storyboard;
 use crate::process_events;
+use crate::prompt_context::PromptContextError;
 use crate::prompts::{SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON};
 use crate::summary;
 use crate::time_util;
@@ -1245,6 +1246,34 @@ pub struct CamerasResponse {
     pub cameras: Vec<Camera>,
 }
 
+#[axum::debug_handler]
+async fn get_prompt_context(
+    State(state): State<Arc<AppState>>,
+    Path((key, offset)): Path<(String, usize)>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let prompt_context = state.prompt_context_store.get(key, offset).await;
+
+    match prompt_context {
+        Ok(prompt_context) => Ok(prompt_context),
+        Err(e) => match e {
+            PromptContextError::NotFound => {
+                return Err((StatusCode::NOT_FOUND, e.to_string()));
+            }
+            PromptContextError::OffsetOutOfRange => {
+                return Err((StatusCode::BAD_REQUEST, e.to_string()));
+            }
+            _ => {
+                error!("Failed to get prompt context: {}", e);
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error: Failed to get prompt context"
+                        .to_string(),
+                ))
+            }
+        },
+    }
+}
+
 async fn get_cameras(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<CamerasResponse>, (StatusCode, String)> {
@@ -1311,6 +1340,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/api/storyboard/vtt/{event_id}", get(get_storyboard_vtt))
         .route("/audio/{event_id}/wav", get(stream_audio))
+        .route("/api/prompt_context/{key}/{offset}", get(get_prompt_context))
         .layer(compression_layer)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
