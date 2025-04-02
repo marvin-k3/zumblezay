@@ -87,6 +87,11 @@ impl Store {
         self.entries.read().await.len()
     }
 
+    /// Check if the store is empty.
+    pub async fn is_empty(&self) -> bool {
+        self.entries.read().await.is_empty()
+    }
+
     /// Get an object from the store.
     /// Returns the object if it exists and is not expired.
     pub async fn get(
@@ -234,7 +239,63 @@ mod tests {
     #[tokio::test]
     async fn test_new_store_is_empty() {
         let store = Store::new();
+        assert!(store.is_empty().await);
         assert_eq!(store.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_store_not_empty_after_insert() {
+        let store = Store::new();
+        let key = "test_key".to_string();
+        let data = bytes::Bytes::from("test data");
+
+        assert!(store.is_empty().await);
+        store
+            .insert(
+                key.clone(),
+                vec![data.clone()],
+                time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(!store.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_store_empty_after_clear() {
+        let store = Store::new();
+        let key = "test_key".to_string();
+        let data = bytes::Bytes::from("test data");
+
+        store
+            .insert(
+                key.clone(),
+                vec![data.clone()],
+                time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(!store.is_empty().await);
+
+        store.clear().await;
+        assert!(store.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_store_empty_after_remove() {
+        let store = Store::new();
+        let key = "test_key".to_string();
+        let data = bytes::Bytes::from("test data");
+
+        store
+            .insert(
+                key.clone(),
+                vec![data.clone()],
+                time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(!store.is_empty().await);
+
+        store.remove(&key).await;
+        assert!(store.is_empty().await);
     }
 
     #[tokio::test]
@@ -335,20 +396,6 @@ mod tests {
         let store = Store::new();
         let result = store.object_count(&"nonexistent".to_string()).await;
         assert!(matches!(result, Err(PromptContextError::NotFound)));
-    }
-
-    #[tokio::test]
-    async fn test_clear_store() {
-        let store = Store::new();
-        let key = "test_key".to_string();
-
-        store
-            .insert(key.clone(), vec![], time::Duration::from_secs(60))
-            .await;
-        assert_eq!(store.len().await, 1);
-
-        store.clear().await;
-        assert_eq!(store.len().await, 0);
     }
 
     #[tokio::test]
