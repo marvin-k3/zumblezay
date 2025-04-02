@@ -46,6 +46,12 @@ pub struct Store {
     entries: RwLock<HashMap<Key, Arc<Entry>>>,
 }
 
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Store {
     pub fn new() -> Self {
         Self {
@@ -160,9 +166,8 @@ pub mod sign {
         mac.update(offset.to_string().as_bytes());
         mac.update(expires.to_string().as_bytes());
         let result = mac.finalize().into_bytes().to_vec();
-        let encoded =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&result);
-        encoded
+        
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&result)
     }
 
     pub fn sign_request_with_duration(

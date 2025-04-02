@@ -1257,10 +1257,10 @@ async fn get_prompt_context(
         Ok(prompt_context) => Ok(prompt_context),
         Err(e) => match e {
             PromptContextError::NotFound => {
-                return Err((StatusCode::NOT_FOUND, e.to_string()));
+                Err((StatusCode::NOT_FOUND, e.to_string()))
             }
             PromptContextError::OffsetOutOfRange => {
-                return Err((StatusCode::BAD_REQUEST, e.to_string()));
+                Err((StatusCode::BAD_REQUEST, e.to_string()))
             }
             _ => {
                 error!("Failed to get prompt context: {}", e);
