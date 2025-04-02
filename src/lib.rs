@@ -266,7 +266,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         let mut key = [0u8; 32]; // 256-bit secret
         OsRng.fill_bytes(&mut key);
         // URL-safe base64 encoded string
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&key)
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key)
     });
 
     Arc::new(AppState {
@@ -292,7 +292,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         video_path_replacement_prefix: config.video_path_replacement_prefix,
         timezone,
         in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
-        signing_secret: signing_secret,
+        signing_secret,
         prompt_context_store: Arc::new(prompt_context::Store::new()),
         temp_events_path: None,
         temp_zumblezay_path: None,
