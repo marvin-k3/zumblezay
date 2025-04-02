@@ -19,6 +19,8 @@ pub struct Entry {
 pub enum PromptContextError {
     NotFound,
     OffsetOutOfRange,
+    Expired,
+    InvalidSignature,
     Other(String),
 }
 
@@ -28,6 +30,10 @@ impl std::fmt::Display for PromptContextError {
             PromptContextError::NotFound => write!(f, "Not found"),
             PromptContextError::OffsetOutOfRange => {
                 write!(f, "Offset out of range")
+            }
+            PromptContextError::Expired => write!(f, "Expired"),
+            PromptContextError::InvalidSignature => {
+                write!(f, "Invalid signature")
             }
             PromptContextError::Other(msg) => write!(f, "{}", msg),
         }
@@ -130,6 +136,72 @@ impl Store {
     /// Clear all entries from the store.
     pub async fn clear(&self) {
         self.entries.write().await.clear();
+    }
+}
+
+pub mod sign {
+    use super::Key;
+    use super::PromptContextError;
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    pub fn sign_request(
+        secret: &str,
+        expires: u64,
+        entry_key: &Key,
+        offset: usize,
+    ) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .expect("HMAC can handle any key length");
+        mac.update(entry_key.as_bytes());
+        mac.update(offset.to_string().as_bytes());
+        mac.update(expires.to_string().as_bytes());
+        let result = mac.finalize().into_bytes().to_vec();
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&result);
+        encoded
+    }
+
+    pub fn sign_request_with_duration(
+        secret: &str,
+        duration: Duration,
+        entry_key: &Key,
+        offset: usize,
+    ) -> Result<String, PromptContextError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PromptContextError::Expired)?;
+        let expires = now + duration;
+        Ok(sign_request(
+            secret,
+            expires.as_millis() as u64,
+            entry_key,
+            offset,
+        ))
+    }
+
+    pub fn verify_request(
+        secret: &str,
+        expires: u64,
+        entry_key: &Key,
+        offset: usize,
+        signature: &str,
+    ) -> Result<(), PromptContextError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PromptContextError::Expired)?;
+        let expiry = Duration::from_millis(expires);
+        if now > expiry {
+            return Err(PromptContextError::Expired);
+        }
+        let expected = sign_request(secret, expires, entry_key, offset);
+        if expected != signature {
+            return Err(PromptContextError::InvalidSignature);
+        }
+        Ok(())
     }
 }
 
@@ -274,5 +346,114 @@ mod tests {
         let removed = store.garbage_collect().await;
         assert_eq!(removed, 1);
         assert_eq!(store.len().await, 0);
+    }
+
+    #[test]
+    fn test_sign_request_basic() {
+        let secret = "test_secret";
+        let expires = 1234567890;
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+
+        let signature = sign::sign_request(secret, expires, &entry_key, offset);
+        assert!(!signature.is_empty());
+        assert!(signature
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_sign_request_different_inputs() {
+        let secret = "test_secret";
+        let expires = 1234567890;
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+
+        let sig1 = sign::sign_request(secret, expires, &entry_key, offset);
+        let sig2 = sign::sign_request(secret, expires + 1, &entry_key, offset);
+        let sig3 = sign::sign_request(secret, expires, &entry_key, offset + 1);
+
+        assert_ne!(sig1, sig2);
+        assert_ne!(sig1, sig3);
+    }
+
+    #[test]
+    fn test_verify_request_valid() {
+        let secret = "test_secret";
+        let expires = (std::time::SystemTime::now()
+            + std::time::Duration::from_secs(60))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+
+        let signature = sign::sign_request(secret, expires, &entry_key, offset);
+        let result = sign::verify_request(
+            secret, expires, &entry_key, offset, &signature,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_request_expired() {
+        let secret = "test_secret";
+        let expires = (std::time::SystemTime::now()
+            - std::time::Duration::from_secs(60))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+
+        let signature = sign::sign_request(secret, expires, &entry_key, offset);
+        let result = sign::verify_request(
+            secret, expires, &entry_key, offset, &signature,
+        );
+        assert!(matches!(result, Err(PromptContextError::Expired)));
+    }
+
+    #[test]
+    fn test_verify_request_invalid_signature() {
+        let secret = "test_secret";
+        let expires = (std::time::SystemTime::now()
+            + std::time::Duration::from_secs(60))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+
+        let result = sign::verify_request(
+            secret,
+            expires,
+            &entry_key,
+            offset,
+            "invalid_signature",
+        );
+        assert!(matches!(result, Err(PromptContextError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_sign_request_with_duration() {
+        let secret = "test_secret";
+        let entry_key = "test_key".to_string();
+        let offset = 0;
+        let duration = std::time::Duration::from_secs(60);
+
+        // Calculate expiration time once
+        let expires = (std::time::SystemTime::now() + duration)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Generate signature with the calculated expiration time
+        let signature = sign::sign_request(secret, expires, &entry_key, offset);
+
+        // Verify with the same expiration time
+        let verify_result = sign::verify_request(
+            secret, expires, &entry_key, offset, &signature,
+        );
+        assert!(verify_result.is_ok());
     }
 }
