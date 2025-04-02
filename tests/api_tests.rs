@@ -525,6 +525,8 @@ async fn test_models_api() {
 async fn test_prompt_context_api() {
     init_test_logging();
     let (app_state, app_router) = app();
+
+    // Insert test data
     app_state
         .prompt_context_store
         .insert(
@@ -534,13 +536,23 @@ async fn test_prompt_context_api() {
         )
         .await;
 
+    // Generate HMAC signature
+    let signed_request = zumblezay::app::create_signed_request(
+        &app_state,
+        &"test-key".to_string(),
+        0,
+        time::Duration::from_secs(60),
+    )
+    .unwrap();
+
+    // Build request with HMAC parameters
+    let uri = format!(
+        "/api/prompt_context/test-key/0?expires={}&hmac={}",
+        signed_request.expires, signed_request.hmac
+    );
+
     let response = app_router
-        .oneshot(
-            Request::builder()
-                .uri("/api/prompt_context/test-key/0")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -552,16 +564,129 @@ async fn test_prompt_context_api() {
 #[tokio::test]
 async fn test_prompt_context_api_not_found() {
     init_test_logging();
-    let (_app_state, app_router) = app();
+    let (app_state, app_router) = app();
+
+    // Generate HMAC signature for non-existent key
+    let signed_request = zumblezay::app::create_signed_request(
+        &app_state,
+        &"test-key".to_string(),
+        0,
+        time::Duration::from_secs(60),
+    )
+    .unwrap();
+
+    // Build request with HMAC parameters
+    let uri = format!(
+        "/api/prompt_context/test-key/0?expires={}&hmac={}",
+        signed_request.expires, signed_request.hmac
+    );
+
     let response = app_router
-        .oneshot(
-            Request::builder()
-                .uri("/api/prompt_context/test-key/0")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_prompt_context_api_hmac_expired() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+
+    // Insert test data
+    app_state
+        .prompt_context_store
+        .insert(
+            "test-key".to_string(),
+            vec![bytes::Bytes::from("test-data")],
+            time::Duration::from_secs(60),
+        )
+        .await;
+
+    // Generate HMAC signature with expired timestamp
+    let signed_request = zumblezay::app::create_signed_request(
+        &app_state,
+        &"test-key".to_string(),
+        0,
+        time::Duration::from_secs(0), // Set to 0 to make it expired
+    )
+    .unwrap();
+
+    // Build request with expired HMAC parameters
+    let uri = format!(
+        "/api/prompt_context/test-key/0?expires={}&hmac={}",
+        signed_request.expires, signed_request.hmac
+    );
+
+    let response = app_router
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_prompt_context_api_hmac_invalid() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+
+    // Insert test data
+    app_state
+        .prompt_context_store
+        .insert(
+            "test-key".to_string(),
+            vec![bytes::Bytes::from("test-data")],
+            time::Duration::from_secs(60),
+        )
+        .await;
+
+    // Generate valid HMAC signature
+    let signed_request = zumblezay::app::create_signed_request(
+        &app_state,
+        &"test-key".to_string(),
+        0,
+        time::Duration::from_secs(60),
+    )
+    .unwrap();
+
+    // Build request with invalid HMAC (tampered with)
+    let uri = format!(
+        "/api/prompt_context/test-key/0?expires={}&hmac=tampered_hmac",
+        signed_request.expires
+    );
+
+    let response = app_router
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_prompt_context_api_hmac_missing() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+
+    // Insert test data
+    app_state
+        .prompt_context_store
+        .insert(
+            "test-key".to_string(),
+            vec![bytes::Bytes::from("test-data")],
+            time::Duration::from_secs(60),
+        )
+        .await;
+
+    // Make request without HMAC parameters
+    let uri = "/api/prompt_context/test-key/0";
+
+    let response = app_router
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

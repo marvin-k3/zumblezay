@@ -1,5 +1,6 @@
 use super::storyboard;
 use crate::process_events;
+use crate::prompt_context;
 use crate::prompt_context::PromptContextError;
 use crate::prompts::{SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON};
 use crate::summary;
@@ -659,6 +660,10 @@ struct Args {
     #[arg(long, env = "RUNPOD_API_KEY")]
     runpod_api_key: Option<String>,
 
+    /// Signing secret for prompt context
+    #[arg(long, env = "SIGNING_SECRET")]
+    signing_secret: Option<String>,
+
     /// Enable event sync task (enabled by default)
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     enable_sync: bool,
@@ -1246,11 +1251,76 @@ pub struct CamerasResponse {
     pub cameras: Vec<Camera>,
 }
 
+pub fn create_signed_request(
+    state: &AppState,
+    entry_key: &prompt_context::Key,
+    offset: usize,
+    duration: Duration,
+) -> Result<prompt_context::sign::SignedRequestParams, PromptContextError> {
+    let hmac = prompt_context::sign::sign_request_with_duration(
+        state.signing_secret.as_ref(),
+        duration,
+        entry_key,
+        offset,
+    )?;
+    Ok(hmac)
+}
+
+pub fn verify_signed_request(
+    state: &AppState,
+    entry_key: &prompt_context::Key,
+    offset: usize,
+    signed_request: &prompt_context::sign::SignedRequestParams,
+) -> Result<(), PromptContextError> {
+    prompt_context::sign::verify_request(
+        state.signing_secret.as_ref(),
+        signed_request.expires,
+        entry_key,
+        offset,
+        &signed_request.hmac,
+    )
+}
+#[derive(Debug, Deserialize)]
+pub struct OptionalSignedRequestParams {
+    hmac: Option<String>,
+    expires: Option<u64>,
+}
+
+impl OptionalSignedRequestParams {
+    pub fn into_signed_request(
+        self,
+    ) -> Result<prompt_context::sign::SignedRequestParams, PromptContextError>
+    {
+        let hmac = self.hmac.unwrap_or_default();
+        let expires = self.expires.unwrap_or_default();
+        let params =
+            prompt_context::sign::SignedRequestParams { hmac, expires };
+        params.validate()?;
+        Ok(params)
+    }
+}
+
 #[axum::debug_handler]
 async fn get_prompt_context(
     State(state): State<Arc<AppState>>,
     Path((key, offset)): Path<(String, usize)>,
+    Query(params): Query<OptionalSignedRequestParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let params = params.into_signed_request().map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            "Missing or invalid HMAC parameters".to_string(),
+        )
+    })?;
+
+    verify_signed_request(&state, &key, offset, &params).map_err(|e| {
+        error!("hmac verification failed: {}", e);
+        (
+            StatusCode::FORBIDDEN,
+            "hmac verification failed".to_string(),
+        )
+    })?;
+
     let prompt_context = state.prompt_context_store.get(key, offset).await;
 
     match prompt_context {
@@ -1428,6 +1498,7 @@ pub async fn serve() -> Result<()> {
         openai_api_key: args.openai_api_key,
         openai_api_base: args.openai_api_base,
         runpod_api_key: args.runpod_api_key,
+        signing_secret: args.signing_secret,
         transcription_service: args.transcription_service,
         default_summary_model: args.default_summary_model,
         video_path_original_prefix: args.video_path_original_prefix,

@@ -1,8 +1,11 @@
 use crate::openai::{real::maybe_create_openai_client, OpenAIClientTrait};
 use anyhow::Result;
+use base64::Engine;
 use lru::LruCache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
@@ -89,6 +92,7 @@ pub struct AppState {
     // Track in-progress storyboard generations
     pub in_progress_storyboards:
         Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    pub signing_secret: String,
     // Holds temporary data for prompt context.
     pub prompt_context_store: Arc<prompt_context::Store>,
     // Add fields to track temp files
@@ -184,6 +188,7 @@ impl AppState {
             timezone: chrono_tz::Australia::Adelaide,
             // Track in-progress storyboard generations
             in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
+            signing_secret: "test_secret".to_string(),
             prompt_context_store: Arc::new(prompt_context::Store::new()),
             // Store temp files so they're cleaned up when AppState is dropped
             temp_events_path: Some(temp_events_file),
@@ -231,6 +236,7 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     pub openai_api_base: Option<String>,
     pub runpod_api_key: Option<String>,
+    pub signing_secret: Option<String>,
     pub transcription_service: String,
     pub default_summary_model: String,
     pub video_path_original_prefix: String,
@@ -255,6 +261,14 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         }
     };
 
+    let signing_secret = config.signing_secret.unwrap_or_else(|| {
+        info!("No secret provided, generating random one");
+        let mut key = [0u8; 32]; // 256-bit secret
+        OsRng.fill_bytes(&mut key);
+        // URL-safe base64 encoded string
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&key)
+    });
+
     Arc::new(AppState {
         events_db: config.events_pool,
         zumblezay_db: config.zumblezay_pool,
@@ -278,6 +292,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         video_path_replacement_prefix: config.video_path_replacement_prefix,
         timezone,
         in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
+        signing_secret: signing_secret,
         prompt_context_store: Arc::new(prompt_context::Store::new()),
         temp_events_path: None,
         temp_zumblezay_path: None,

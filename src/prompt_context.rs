@@ -152,6 +152,7 @@ pub mod sign {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
+    use serde::{Deserialize, Serialize};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     pub fn sign_request(
@@ -166,8 +167,23 @@ pub mod sign {
         mac.update(offset.to_string().as_bytes());
         mac.update(expires.to_string().as_bytes());
         let result = mac.finalize().into_bytes().to_vec();
-        
+
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&result)
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct SignedRequestParams {
+        pub hmac: String,
+        pub expires: u64,
+    }
+
+    impl SignedRequestParams {
+        pub fn validate(&self) -> Result<(), PromptContextError> {
+            if self.hmac.is_empty() || self.expires == 0 {
+                return Err(PromptContextError::InvalidSignature);
+            }
+            Ok(())
+        }
     }
 
     pub fn sign_request_with_duration(
@@ -175,17 +191,17 @@ pub mod sign {
         duration: Duration,
         entry_key: &Key,
         offset: usize,
-    ) -> Result<String, PromptContextError> {
+    ) -> Result<SignedRequestParams, PromptContextError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| PromptContextError::Expired)?;
         let expires = now + duration;
-        Ok(sign_request(
-            secret,
-            expires.as_millis() as u64,
-            entry_key,
-            offset,
-        ))
+        let hmac =
+            sign_request(secret, expires.as_millis() as u64, entry_key, offset);
+        Ok(SignedRequestParams {
+            hmac,
+            expires: expires.as_millis() as u64,
+        })
     }
 
     pub fn verify_request(
