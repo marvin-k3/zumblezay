@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "zumblezay_server"
 path = "src/server_main.rs"
 
+[[bin]]
+name = "zumblezay_eval"
+path = "src/eval/eval_main.rs"
+
 [dependencies]
 anyhow = "1.0"
 async-openai = "0.27.2"

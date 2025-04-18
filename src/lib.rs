@@ -19,6 +19,7 @@ use tracing::instrument;
 use tracing::warn;
 
 pub mod app;
+pub mod eval;
 pub mod openai;
 pub mod process_events;
 pub mod prompt_context;
