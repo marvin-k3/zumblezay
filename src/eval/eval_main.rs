@@ -1,8 +1,7 @@
 use anyhow::Result;
-use zumblezay::eval::run_evaluation;
+use zumblezay::eval::run_app;
 
-fn main() -> Result<()> {
-    let result = run_evaluation()?;
-    println!("{}", result);
-    Ok(())
+#[tokio::main]
+async fn main() -> Result<()> {
+    run_app().await
 }
