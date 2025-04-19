@@ -1,4 +1,5 @@
 use super::storyboard;
+use crate::cli::CommonArgs;
 use crate::process_events;
 use crate::prompt_context;
 use crate::prompt_context::PromptContextError;
@@ -26,6 +27,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::SeekFrom;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -67,17 +69,18 @@ struct StatusStats {
 
 #[derive(Debug)]
 struct DbAttacher {
-    events_db: String,
+    events_db: PathBuf,
 }
 
 impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for DbAttacher {
     fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
-        if self.events_db.is_empty() {
+        if self.events_db.as_os_str().is_empty() {
             return Err(rusqlite::Error::InvalidPath(
                 std::path::PathBuf::from("events_db path is empty"),
             ));
         }
-        conn.execute("ATTACH DATABASE ? AS ubnt", params![&self.events_db])?;
+        let events_db_path = self.events_db.to_str().unwrap_or("");
+        conn.execute("ATTACH DATABASE ? AS ubnt", params![events_db_path])?;
         Ok(())
     }
 }
@@ -119,8 +122,8 @@ pub async fn health_check() -> &'static str {
 }
 
 #[instrument(level = "debug")]
-fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
-    let file_path = std::path::Path::new(path);
+fn check_file_is_writable(path: &PathBuf, file_type: &str) -> Result<()> {
+    let file_path = path;
     if let Some(parent) = file_path.parent() {
         if !parent.exists() {
             return Err(anyhow::anyhow!(
@@ -144,7 +147,7 @@ fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
         return Err(anyhow::anyhow!(
             "Cannot write to {} at '{}': {}. Please check file permissions.",
             file_type,
-            path,
+            path.display(),
             e
         ));
     }
@@ -609,31 +612,10 @@ fn create_app_lock() -> Result<File> {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// URL of the Whisper ASR API endpoint
-    #[arg(
-        long,
-        env = "WHISPER_URL",
-        default_value = "http://localhost:9000/asr"
-    )]
-    whisper_url: String,
+    #[command(flatten)]
+    common: CommonArgs,
 
-    /// Path to the events database
-    #[arg(long)]
-    events_db: String,
-
-    /// Path to the transcripts database
-    #[arg(long, default_value = "data/zumblezay.db")]
-    zumblezay_db: String,
-
-    /// Path to the cache database
-    #[arg(long, default_value = "data/cache.db")]
-    cache_db: String,
-
-    /// Maximum concurrent transcription tasks
-    #[arg(long, default_value_t = 3)]
-    max_concurrent_tasks: usize,
-
-    // Should create lock file to prevent multiple instances from running
+    /// Should create lock file to prevent multiple instances from running
     #[arg(long, default_value_t = true)]
     create_lock_file: bool,
 
@@ -649,26 +631,6 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     enable_transcription: bool,
 
-    // Transcription service
-    #[arg(long, default_value = "whisper-local")]
-    transcription_service: String,
-
-    /// OpenAI API key for summary generation
-    #[arg(long, env = "OPENAI_API_KEY")]
-    openai_api_key: Option<String>,
-
-    /// OpenAI API base URL
-    #[arg(long, env = "OPENAI_API_BASE")]
-    openai_api_base: Option<String>,
-
-    /// RunPod API key for transcription
-    #[arg(long, env = "RUNPOD_API_KEY")]
-    runpod_api_key: Option<String>,
-
-    /// Signing secret for prompt context
-    #[arg(long, env = "SIGNING_SECRET")]
-    signing_secret: Option<String>,
-
     /// Enable event sync task (enabled by default)
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     enable_sync: bool,
@@ -676,23 +638,6 @@ struct Args {
     /// Interval in seconds between event sync attempts
     #[arg(long, default_value_t = 10)]
     sync_interval: u64,
-
-    /// Default model to use for summary generation
-    #[arg(long, default_value = "anthropic-claude-haiku")]
-    default_summary_model: String,
-
-    /// Original path prefix to replace in video paths
-    #[arg(long, default_value = "/data")]
-    video_path_original_prefix: String,
-
-    /// Replacement path prefix for video paths
-    #[arg(long, default_value = "/path/to/replacement")]
-    video_path_replacement_prefix: String,
-
-    /// Timezone to use for date/time conversions (e.g., "Australia/Adelaide")
-    /// If not specified, the system timezone will be used
-    #[arg(long)]
-    timezone: Option<String>,
 }
 
 // Update get_transcripts_csv to use the new function
@@ -1492,23 +1437,24 @@ pub async fn serve() -> Result<()> {
     info!("Creating database connection pools");
 
     // Check if events_db path is empty
-    if args.events_db.is_empty() {
+    if args.common.events_db.as_os_str().is_empty() {
         return Err(anyhow::anyhow!("events_db path cannot be empty. Please provide a valid path using --events-db"));
     }
 
     // Check if zumblezay_db file exists and is writable
     info!("Checking if zumblezay database is writable");
-    check_file_is_writable(&args.zumblezay_db, "zumblezay database")?;
+    check_file_is_writable(&args.common.zumblezay_db, "zumblezay database")?;
 
-    let events_manager = SqliteConnectionManager::file(&args.events_db)
+    let events_manager = SqliteConnectionManager::file(&args.common.events_db)
         .with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY);
     let events_pool = Pool::new(events_manager)?;
 
     // Create zumblezay pool with connection customization
-    let zumblezay_manager = SqliteConnectionManager::file(&args.zumblezay_db);
+    let zumblezay_manager =
+        SqliteConnectionManager::file(&args.common.zumblezay_db);
     let zumblezay_pool = Pool::builder()
         .connection_customizer(Box::new(DbAttacher {
-            events_db: args.events_db.clone(),
+            events_db: args.common.events_db.clone(),
         }))
         .build(zumblezay_manager)?;
 
@@ -1520,9 +1466,9 @@ pub async fn serve() -> Result<()> {
 
     // Check if cache_db file exists and is writable
     info!("Checking if cache database is writable");
-    check_file_is_writable(&args.cache_db, "cache database")?;
+    check_file_is_writable(&args.common.cache_db, "cache database")?;
 
-    let cache_manager = SqliteConnectionManager::file(&args.cache_db);
+    let cache_manager = SqliteConnectionManager::file(&args.common.cache_db);
     let cache_pool = Pool::new(cache_manager)?;
 
     // Initialize cache database schema
@@ -1531,23 +1477,29 @@ pub async fn serve() -> Result<()> {
         crate::init_cache_db(&mut conn)?;
     }
 
-    info!("Using Whisper API URL: {}", args.whisper_url);
+    info!("Using Whisper API URL: {}", args.common.whisper_url);
 
     let state = crate::create_app_state(crate::AppConfig {
         events_pool,
         zumblezay_pool,
         cache_pool,
-        whisper_url: args.whisper_url,
-        max_concurrent_tasks: args.max_concurrent_tasks,
-        openai_api_key: args.openai_api_key,
-        openai_api_base: args.openai_api_base,
-        runpod_api_key: args.runpod_api_key,
-        signing_secret: args.signing_secret,
-        transcription_service: args.transcription_service,
-        default_summary_model: args.default_summary_model,
-        video_path_original_prefix: args.video_path_original_prefix,
-        video_path_replacement_prefix: args.video_path_replacement_prefix,
-        timezone_str: args.timezone,
+        whisper_url: args.common.whisper_url,
+        max_concurrent_tasks: args.common.max_concurrent_tasks,
+        openai_api_key: args.common.openai_api_key.clone(),
+        openai_api_base: args.common.openai_api_base.clone(),
+        runpod_api_key: args.common.runpod_api_key.clone(),
+        signing_secret: args.common.signing_secret.clone(),
+        transcription_service: args.common.transcription_service.clone(),
+        default_summary_model: args.common.default_summary_model.clone(),
+        video_path_original_prefix: args
+            .common
+            .video_path_original_prefix
+            .clone(),
+        video_path_replacement_prefix: args
+            .common
+            .video_path_replacement_prefix
+            .clone(),
+        timezone_str: args.common.timezone.clone(),
     });
 
     // Create a channel for shutdown coordination
