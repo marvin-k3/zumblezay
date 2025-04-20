@@ -3,6 +3,7 @@
 
 use super::models;
 use anyhow::Result;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -221,4 +222,65 @@ async fn list_datasets(state: Arc<crate::AppState>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AppState;
+    use rusqlite::{params, Connection};
+
+    #[test]
+    fn list_datasets_test() {
+        // Create a test state and fake OpenAI client
+        let state = Arc::new(AppState::new_for_testing());
+
+        // Set up test database
+        {
+            let mut conn = state
+                .zumblezay_db
+                .get()
+                .expect("Failed to get DB connection");
+
+            // Insert test data
+            let now = Utc::now();
+            let timestamp = now.timestamp();
+
+            conn.execute(
+                "INSERT INTO eval_datasets (name, description, created_at) VALUES (?, ?, ?)",
+                params!["Test Dataset 1", "First test dataset", timestamp],
+            ).expect("Failed to insert first test dataset");
+
+            conn.execute(
+                "INSERT INTO eval_datasets (name, description, created_at) VALUES (?, ?, ?)",
+                params!["Test Dataset 2", "Second test dataset", timestamp],
+            ).expect("Failed to insert second test dataset");
+        }
+
+        // Create a runtime for async test
+        let rt =
+            tokio::runtime::Runtime::new().expect("Failed to create runtime");
+
+        // Run the list_datasets function
+        rt.block_on(async {
+            let result = list_datasets(state.clone()).await;
+            assert!(result.is_ok(), "list_datasets should return Ok");
+
+            // Verify datasets were fetched
+            let conn = state
+                .zumblezay_db
+                .get()
+                .expect("Failed to get DB connection");
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM eval_datasets", [], |row| {
+                    row.get(0)
+                })
+                .expect("Failed to count datasets");
+
+            assert_eq!(
+                count, 2,
+                "There should be exactly 2 datasets in the test database"
+            );
+        });
+    }
 }
