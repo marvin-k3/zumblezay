@@ -373,7 +373,7 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS eval_datasets (
-            datastset_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dataset_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             description TEXT NOT NULL,
             created_at INTEGER NOT NULL,
@@ -381,6 +381,7 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
         )",
         [],
     )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS eval_dataset_tasks (
             task_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -389,7 +390,7 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             evaluation_data JSON CHECK (json_valid(evaluation_data) AND json_type(evaluation_data) = 'object'),
-            FOREIGN KEY(dataset_id) REFERENCES eval_datasets(datastset_id)
+            FOREIGN KEY(dataset_id) REFERENCES eval_datasets(dataset_id)
             UNIQUE(dataset_id, task_id)
         )",
         [],

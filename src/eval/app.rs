@@ -1,7 +1,12 @@
+#![allow(dead_code)]
+#![allow(unused)]
+
+use super::models;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::Row;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -46,6 +51,9 @@ enum Commands {
         #[arg(long, default_value = "summary")]
         report_type: String,
     },
+
+    /// List all available datasets
+    ListDatasets,
 }
 
 /// Helper struct to attach events db to zumblezay connection
@@ -69,6 +77,7 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error>
     }
 }
 
+/// Represents a dataset in the system
 pub async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
@@ -156,6 +165,10 @@ pub async fn run_app() -> Result<()> {
             info!("Generating {} report to {}", report_type, output.display());
             generate_report(state, &output, &report_type).await?;
         }
+        Commands::ListDatasets => {
+            info!("Listing available datasets");
+            list_datasets(state).await?;
+        }
     }
 
     Ok(())
@@ -190,5 +203,22 @@ async fn generate_report(
     info!("Generating {} report to {}", report_type, output.display());
     // TODO: Implement report generation logic
     println!("Report generated successfully to {}", output.display());
+    Ok(())
+}
+
+async fn list_datasets(state: Arc<crate::AppState>) -> Result<()> {
+    info!("Listing available datasets");
+
+    // Fetch datasets using the helper function
+    let datasets = {
+        let mut conn = state.zumblezay_db.get()?;
+        models::fetch_all_datasets(&mut conn)?
+    };
+
+    println!("Available datasets:");
+    for dataset in datasets {
+        println!("  - {}: {}", dataset.name, dataset.description);
+    }
+
     Ok(())
 }

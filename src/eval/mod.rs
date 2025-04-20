@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 mod app;
+mod models;
 
 pub use app::main;
 
