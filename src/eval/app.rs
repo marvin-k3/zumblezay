@@ -55,6 +55,17 @@ enum Commands {
 
     /// List all available datasets
     ListDatasets,
+
+    /// Add a new dataset
+    AddDataset {
+        /// Name of the dataset
+        #[arg(long)]
+        name: String,
+
+        /// Description of the dataset
+        #[arg(long)]
+        description: String,
+    },
 }
 
 /// Helper struct to attach events db to zumblezay connection
@@ -170,6 +181,10 @@ pub async fn run_app() -> Result<()> {
             info!("Listing available datasets");
             list_datasets(state).await?;
         }
+        Commands::AddDataset { name, description } => {
+            info!("Adding new dataset: {}", name);
+            add_dataset(state, &name, &description).await?;
+        }
     }
 
     Ok(())
@@ -221,6 +236,31 @@ async fn list_datasets(state: Arc<crate::AppState>) -> Result<()> {
         println!("  - {}: {}", dataset.name, dataset.description);
     }
 
+    Ok(())
+}
+
+async fn add_dataset(
+    state: Arc<crate::AppState>,
+    name: &str,
+    description: &str,
+) -> Result<()> {
+    info!(
+        "Adding dataset '{}' with description '{}'",
+        name, description
+    );
+
+    let now = Utc::now();
+    let timestamp = now.timestamp();
+
+    {
+        let mut conn = state.zumblezay_db.get()?;
+        conn.execute(
+            "INSERT INTO eval_datasets (name, description, created_at) VALUES (?, ?, ?)",
+            rusqlite::params![name, description, timestamp],
+        )?;
+    }
+
+    println!("Dataset '{}' added successfully", name);
     Ok(())
 }
 
@@ -281,6 +321,77 @@ mod tests {
                 count, 2,
                 "There should be exactly 2 datasets in the test database"
             );
+        });
+    }
+
+    #[test]
+    fn add_dataset_test() {
+        // Create a test state
+        let state = Arc::new(AppState::new_for_testing());
+
+        // Make sure the database is properly initialized
+        {
+            let conn = state
+                .zumblezay_db
+                .get()
+                .expect("Failed to get DB connection");
+            
+            // Check if the table exists, if not create it
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS eval_datasets (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )",
+                [],
+            ).expect("Failed to create eval_datasets table");
+        }
+
+        // Create a runtime for async test
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+
+        // Test dataset details
+        let test_name = "New Test Dataset";
+        let test_description = "This is a test dataset added through the API";
+
+        // Run the add_dataset function
+        rt.block_on(async {
+            // Add the dataset
+            let result = add_dataset(state.clone(), test_name, test_description).await;
+            assert!(result.is_ok(), "add_dataset should return Ok");
+
+            // Verify dataset was added
+            let conn = state
+                .zumblezay_db
+                .get()
+                .expect("Failed to get DB connection");
+            
+            // Check the total count
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM eval_datasets", [], |row| {
+                    row.get(0)
+                })
+                .expect("Failed to count datasets");
+            
+            assert_eq!(count, 1, "There should be exactly 1 dataset in the test database");
+            
+            // Verify the dataset details
+            let dataset = conn
+                .query_row(
+                    "SELECT name, description FROM eval_datasets WHERE name = ?",
+                    params![test_name],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0).expect("Failed to get name"),
+                            row.get::<_, String>(1).expect("Failed to get description"),
+                        ))
+                    },
+                )
+                .expect("Failed to find added dataset");
+            
+            assert_eq!(dataset.0, test_name, "Dataset name should match");
+            assert_eq!(dataset.1, test_description, "Dataset description should match");
         });
     }
 }
