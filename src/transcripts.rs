@@ -25,6 +25,14 @@ pub struct Transcript {
     url: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TranscriptEntry {
+    pub time: String,
+    pub camera: String,
+    pub text: String,
+    pub event_id: String,
+}
+
 #[instrument(skip(state, raw_response), err)]
 pub async fn save_transcript(
     state: &AppState,
@@ -169,6 +177,104 @@ pub async fn get_formatted_transcripts_for_date(
     }
 
     Ok((csv_content, event_ids))
+}
+
+#[instrument(skip(state))]
+pub async fn get_transcripts_with_event_ids(
+    state: &AppState,
+    date: &str,
+) -> Result<Vec<TranscriptEntry>, anyhow::Error> {
+    let camera_names: HashMap<String, String> =
+        state.camera_name_cache.lock().await.clone();
+    let (start_timestamp, end_timestamp) =
+        time_util::parse_local_date_to_utc_range_with_time(
+            date,
+            &None,
+            &None,
+            state.timezone,
+        )?;
+
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+        "WITH filtered AS (
+            SELECT *
+            FROM events
+            WHERE event_start BETWEEN ? AND ?
+          )
+          SELECT e1.event_start, t.raw_response, e1.camera_id, e1.event_id
+          FROM filtered e1
+          JOIN transcriptions t ON e1.event_id = t.event_id
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM filtered e2
+            WHERE e2.camera_id = e1.camera_id
+              AND e2.event_start <= e1.event_start
+              AND e2.event_end >= e1.event_end
+              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+          )
+          AND t.transcription_type = ?
+          ORDER BY e1.event_start ASC",
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to prepare statement: {}", e))?;
+
+    let mut rows = stmt
+        .query(params![
+            start_timestamp,
+            end_timestamp,
+            state.transcription_service.as_str()
+        ])
+        .map_err(|e| anyhow::anyhow!("Failed to query transcripts: {}", e))?;
+
+    let mut transcript_entries = Vec::new();
+
+    // Process each row
+    while let Some(row) = rows.next()? {
+        let event_start: f64 = row.get(0)?;
+        let raw_response: String = row.get(1)?;
+        let camera_id: String = row.get(2)?;
+        let event_id: String = row.get(3)?;
+
+        // Format the timestamp
+        let dt = Utc
+            .timestamp_opt(event_start as i64, 0)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("Invalid timestamp"))?;
+        let local_time = dt.with_timezone(&state.timezone);
+        let time_str = local_time.format("%H:%M:%S").to_string();
+
+        // Get the camera name
+        let camera_name = camera_names
+            .get(&camera_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Camera {}", camera_id));
+
+        // Parse the transcription JSON
+        let json_response: Value = serde_json::from_str(&raw_response)?;
+        let text = json_response["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        // Skip empty transcriptions
+        if text.is_empty() {
+            continue;
+        }
+
+        // Add to the transcript entries
+        transcript_entries.push(TranscriptEntry {
+            time: time_str,
+            camera: camera_name,
+            text,
+            event_id,
+        });
+    }
+
+    Ok(transcript_entries)
 }
 
 #[cfg(test)]

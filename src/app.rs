@@ -1382,6 +1382,24 @@ async fn transcript_page(State(state): State<Arc<AppState>>) -> Html<String> {
     Html(rendered)
 }
 
+// Add a new API endpoint for transcripts with event IDs
+#[axum::debug_handler]
+async fn get_transcripts_json(
+    State(state): State<Arc<AppState>>,
+    Path(date): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let transcript_entries =
+        transcripts::get_transcripts_with_event_ids(&state, &date)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create the response
+    Ok(Json(json!({
+        "date": date,
+        "transcripts": transcript_entries
+    })))
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
@@ -1412,6 +1430,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/video/{event_id}", get(stream_video))
         .route("/api/status", get(get_status))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
+        .route("/api/transcripts/json/{date}", get(get_transcripts_json))
         .route(
             "/api/transcripts/summary/{date}",
             get(get_transcripts_summary),

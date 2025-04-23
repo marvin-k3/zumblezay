@@ -46,6 +46,7 @@
         padding: 10px;
         border-bottom: 1px solid var(--bs-border-color);
         transition: background-color 0.2s ease;
+        cursor: pointer;
     }
     .transcript-entry:hover {
         background-color: var(--bs-tertiary-bg);
@@ -64,6 +65,14 @@
     }
     .transcript-text {
         margin-top: 5px;
+    }
+    .transcript-action {
+        margin-top: 8px;
+        text-align: right;
+    }
+    .transcript-action-button {
+        font-size: 0.8rem;
+        padding: 2px 8px;
     }
     .search-highlight {
         background-color: rgba(255, 255, 0, 0.4);
@@ -256,6 +265,7 @@
     // Variables for search functionality
     let currentSearchResults = [];
     let currentSearchIndex = -1;
+    let transcriptData = [];
     
     document.addEventListener('DOMContentLoaded', function() {
         // Set up the controls toggle for mobile view
@@ -353,6 +363,12 @@
         return `${year}-${month}-${day}`;
     }
     
+    // Function to view video for a specific event
+    function viewVideo(eventId) {
+        // Navigate to the events page with the video parameter
+        window.location.href = `/events?video=${eventId}`;
+    }
+    
     // Load transcript data for the selected date
     function loadTranscript() {
         const date = document.getElementById('date-picker').value;
@@ -375,16 +391,18 @@
         document.querySelector('.search-navigation').style.display = 'none';
         currentSearchResults = [];
         currentSearchIndex = -1;
+        transcriptData = [];
         
-        // Load CSV data and format as transcript
-        fetch(`/api/transcripts/csv/${date}`)
+        // Load JSON data for transcripts
+        fetch(`/api/transcripts/json/${date}`)
             .then(response => {
                 if (!response.ok) {
                     throw new Error('No transcript data available');
                 }
-                return response.text();
+                return response.json();
             })
             .then(data => {
+                transcriptData = data.transcripts;
                 displayTranscript(data, date);
                 document.getElementById('loading').style.display = 'none';
             })
@@ -399,48 +417,53 @@
     }
     
     // Function to display the transcript data
-    function displayTranscript(csvData, date) {
+    function displayTranscript(data, date) {
         const transcriptContent = document.getElementById('transcript-content');
         
-        // Parse CSV data
-        const rows = csvData.trim().split('\n');
-        if (rows.length <= 1) { // Only header or empty
+        // Check if we have any transcripts
+        if (!data.transcripts || data.transcripts.length === 0) {
             transcriptContent.innerHTML = '<div class="no-results">No transcript data available for this date.</div>';
             return;
         }
         
-        // Parse the header row (assuming CSV format with quotes)
-        const headerCells = parseCSVRow(rows[0]);
-        
         // Create transcript entries
         let transcriptHTML = '';
         
-        // Skip header row (start from index 1)
-        for (let i = 1; i < rows.length; i++) {
-            if (rows[i].trim() === '') continue;
-            
-            const rowData = parseCSVRow(rows[i]);
-            if (rowData.length >= 3) {
-                const time = rowData[0];
-                const camera = rowData[1];
-                const text = rowData[2];
-                
-                transcriptHTML += `
-                <div class="transcript-entry" data-time="${time}" data-camera="${camera}">
-                    <div class="d-flex justify-content-between">
-                        <span class="transcript-time">${time}</span>
-                        <span class="transcript-camera">${camera}</span>
-                    </div>
-                    <div class="transcript-text">${text}</div>
-                </div>`;
-            }
-        }
+        // Create HTML for each transcript entry
+        data.transcripts.forEach((entry, index) => {
+            transcriptHTML += `
+            <div class="transcript-entry" data-time="${entry.time}" data-camera="${entry.camera}" data-event-id="${entry.event_id}" data-index="${index}">
+                <div class="d-flex justify-content-between">
+                    <span class="transcript-time">${entry.time}</span>
+                    <span class="transcript-camera">${entry.camera}</span>
+                </div>
+                <div class="transcript-text">${entry.text}</div>
+                <div class="transcript-action">
+                    <button class="btn btn-sm btn-outline-primary transcript-action-button" onclick="viewVideo('${entry.event_id}')">
+                        <i class="bi bi-camera-video"></i> View Video
+                    </button>
+                </div>
+            </div>`;
+        });
         
         if (transcriptHTML) {
             transcriptContent.innerHTML = transcriptHTML;
             
             // Update metadata with date information
             updateTranscriptMetadata(date);
+            
+            // Add click event to transcript entries
+            document.querySelectorAll('.transcript-entry').forEach(entry => {
+                entry.addEventListener('click', function(e) {
+                    // Don't trigger if they clicked the button
+                    if (e.target.closest('.transcript-action-button')) {
+                        return;
+                    }
+                    
+                    const eventId = this.getAttribute('data-event-id');
+                    viewVideo(eventId);
+                });
+            });
         } else {
             transcriptContent.innerHTML = '<div class="no-results">No transcript data available for this date.</div>';
         }
