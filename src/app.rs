@@ -200,6 +200,11 @@ fn init_templates() -> Tera {
         include_str!("templates/summary.html"),
     )
     .unwrap();
+    tera.add_raw_template(
+        "transcript.html",
+        include_str!("templates/transcript.html"),
+    )
+    .unwrap();
     tera
 }
 
@@ -1358,6 +1363,25 @@ async fn get_cameras(
     Ok(Json(CamerasResponse { cameras }))
 }
 
+// Add transcript page handler
+#[axum::debug_handler]
+async fn transcript_page(State(state): State<Arc<AppState>>) -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/transcript");
+
+    let timezone_str = state.timezone.to_string().replace("::", "/");
+    context.insert("timezone", &timezone_str);
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("transcript.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
@@ -1380,6 +1404,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))
+        .route("/transcript", get(transcript_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route("/api/models", get(get_available_models))
