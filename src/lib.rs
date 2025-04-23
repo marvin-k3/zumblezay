@@ -397,6 +397,34 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS eval_pipeline_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline_name TEXT NOT NULL,
+            run_start INTEGER NOT NULL,
+            run_end INTEGER NOT NULL,
+            dataset_id INTEGER NOT NULL,
+            notes TEXT,
+            run_parameters JSON CHECK (json_valid(run_parameters) AND json_type(run_parameters) = 'object'),
+            FOREIGN KEY(dataset_id) REFERENCES eval_datasets(dataset_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS eval_pipeline_run_results (
+            run_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            result_json JSON CHECK (json_valid(result_json) AND json_type(result_json) = 'object'),
+            cost_json JSON CHECK (json_valid(cost_json) AND json_type(cost_json) = 'object'),
+            FOREIGN KEY(run_id) REFERENCES eval_pipeline_runs(id),
+            FOREIGN KEY(task_id) REFERENCES eval_dataset_tasks(task_id)
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 
