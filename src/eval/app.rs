@@ -81,6 +81,13 @@ enum Commands {
         #[arg(long)]
         notes: Option<String>,
     },
+
+    /// List all tasks for a dataset
+    ListDatasetTasks {
+        /// Name of the dataset
+        #[arg(long)]
+        dataset_name: String,
+    },
 }
 
 /// Helper struct to attach events db to zumblezay connection
@@ -203,6 +210,10 @@ pub async fn run_app() -> Result<()> {
         Commands::AddDatasetTask { dataset_id, event_ids, notes } => {
             info!("Adding new task to dataset: {} with event IDs: {}", dataset_id, event_ids);
             add_dataset_task(state, dataset_id, &event_ids, notes.as_deref()).await?;
+        }
+        Commands::ListDatasetTasks { dataset_name } => {
+            info!("Listing tasks for dataset: {}", dataset_name);
+            list_dataset_tasks(state, &dataset_name).await?;
         }
     }
 
@@ -352,6 +363,71 @@ async fn add_dataset_task(
     tx.commit()?;
 
     println!("Task added successfully to dataset: {}", dataset_id);
+    Ok(())
+}
+
+async fn list_dataset_tasks(
+    state: Arc<crate::AppState>,
+    dataset_name: &str,
+) -> Result<()> {
+    info!("Listing tasks for dataset: {}", dataset_name);
+    
+    let mut conn = state.zumblezay_db.get()?;
+    let tx = conn.transaction()?;
+
+    // First get the dataset ID from the name
+    let dataset_id: i64 = tx.query_row(
+        "SELECT dataset_id FROM eval_datasets WHERE name = ?",
+        rusqlite::params![dataset_name],
+        |row| row.get(0)
+    ).map_err(|_| anyhow::anyhow!("Dataset '{}' not found", dataset_name))?;
+
+    // Now fetch all tasks for this dataset
+    let mut stmt = tx.prepare(
+        "SELECT task_id, events, created_at, updated_at, notes, evaluation_data 
+         FROM eval_dataset_tasks 
+         WHERE dataset_id = ? 
+         ORDER BY created_at DESC"
+    )?;
+
+    let tasks = stmt.query_map(rusqlite::params![dataset_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?, // task_id
+            row.get::<_, String>(1)?, // events (JSON)
+            row.get::<_, i64>(2)?, // created_at
+            row.get::<_, i64>(3)?, // updated_at
+            row.get::<_, Option<String>>(4)?, // notes
+            row.get::<_, Option<String>>(5)?, // evaluation_data
+        ))
+    })?;
+
+    println!("Tasks for dataset '{}':", dataset_name);
+    for task_result in tasks {
+        let (task_id, events_json, created_at, updated_at, notes, eval_data) = task_result?;
+        
+        // Parse events JSON array
+        let events: Vec<String> = serde_json::from_str(&events_json)?;
+        
+        // Format timestamps
+        let created = chrono::DateTime::from_timestamp(created_at, 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid created_at timestamp"))?;
+        let updated = chrono::DateTime::from_timestamp(updated_at, 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid updated_at timestamp"))?;
+
+        println!("\nTask ID: {}", task_id);
+        println!("  Events: {}", events.join(", "));
+        println!("  Created: {}", created.format("%Y-%m-%d %H:%M:%S UTC"));
+        println!("  Updated: {}", updated.format("%Y-%m-%d %H:%M:%S UTC"));
+        
+        if let Some(notes) = notes {
+            println!("  Notes: {}", notes);
+        }
+        
+        if let Some(eval_data) = eval_data {
+            println!("  Has evaluation data: yes");
+        }
+    }
+
     Ok(())
 }
 
@@ -621,5 +697,61 @@ mod tests {
         ).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No valid event IDs provided"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dataset_tasks() {
+        // Create a test state
+        let state = Arc::new(AppState::new_for_testing());
+        let conn = state.zumblezay_db.get().expect("Failed to get DB connection");
+
+        // Set up test data
+        let now = Utc::now();
+        let timestamp = now.timestamp();
+
+        // Create a test dataset
+        conn.execute(
+            "INSERT INTO eval_datasets (dataset_id, name, description, created_at) VALUES (?, ?, ?, ?)",
+            params![1, "Test Dataset", "Test Description", timestamp],
+        ).expect("Failed to create test dataset");
+
+        // Create some test tasks
+        let events1 = serde_json::to_string(&vec!["event1", "event2"]).unwrap();
+        let events2 = serde_json::to_string(&vec!["event3", "event4"]).unwrap();
+
+        conn.execute(
+            "INSERT INTO eval_dataset_tasks (task_id, dataset_id, events, created_at, updated_at, notes) 
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                1,
+                1,
+                events1,
+                timestamp,
+                timestamp,
+                "Test notes 1"
+            ],
+        ).expect("Failed to create first test task");
+
+        conn.execute(
+            "INSERT INTO eval_dataset_tasks (task_id, dataset_id, events, created_at, updated_at, notes) 
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                2,
+                1,
+                events2,
+                timestamp + 100,
+                timestamp + 100,
+                "Test notes 2"
+            ],
+        ).expect("Failed to create second test task");
+
+        // Test listing tasks for existing dataset
+        let result = list_dataset_tasks(state.clone(), "Test Dataset").await;
+        assert!(result.is_ok(), "Failed to list dataset tasks: {:?}", result);
+
+        // Test listing tasks for non-existent dataset
+        let result = list_dataset_tasks(state.clone(), "Nonexistent Dataset").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }
