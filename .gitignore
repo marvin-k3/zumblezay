@@ -4,6 +4,8 @@
 /data/
 /data2/
 
+.env
+
 # IDE specific files
 .idea/
 .vscode/

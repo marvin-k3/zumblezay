@@ -33,7 +33,11 @@ pub struct CommonArgs {
     pub runpod_api_key: Option<String>,
 
     /// Whisper API URL
-    #[arg(long, default_value = "http://localhost:9000/asr")]
+    #[arg(
+        long,
+        default_value = "http://localhost:9000/asr",
+        env = "WHISPER_URL"
+    )]
     pub whisper_url: String,
 
     /// Transcription service to use (whisper-local, openai)
@@ -53,10 +57,10 @@ pub struct CommonArgs {
     pub video_path_replacement_prefix: String,
 
     /// Timezone
-    #[arg(long)]
+    #[arg(long, env = "TIMEZONE")]
     pub timezone: Option<String>,
 
     /// Signing secret
-    #[arg(long)]
+    #[arg(long, env = "SIGNING_SECRET")]
     pub signing_secret: Option<String>,
 }

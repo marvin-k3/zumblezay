@@ -6,6 +6,8 @@
 target/
 **/*.rs.bk
 
+.env
+
 # Editor files
 .vscode/
 .idea/

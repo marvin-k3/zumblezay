@@ -1442,7 +1442,10 @@ pub async fn serve() -> Result<()> {
     }
 
     // Check if zumblezay_db file exists and is writable
-    info!("Checking if zumblezay database is writable");
+    info!(
+        "Checking if zumblezay database is writable: {}",
+        args.common.zumblezay_db.display()
+    );
     check_file_is_writable(&args.common.zumblezay_db, "zumblezay database")?;
 
     let events_manager = SqliteConnectionManager::file(&args.common.events_db)
