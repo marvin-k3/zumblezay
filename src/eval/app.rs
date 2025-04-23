@@ -66,6 +66,21 @@ enum Commands {
         #[arg(long)]
         description: String,
     },
+
+    /// Add a new task to an existing dataset
+    AddDatasetTask {
+        /// Dataset ID to add task to
+        #[arg(long)]
+        dataset_id: i64,
+
+        /// Comma-separated list of event IDs
+        #[arg(long)]
+        event_ids: String,
+    
+        /// Notes for the task
+        #[arg(long)]
+        notes: Option<String>,
+    },
 }
 
 /// Helper struct to attach events db to zumblezay connection
@@ -185,6 +200,10 @@ pub async fn run_app() -> Result<()> {
             info!("Adding new dataset: {}", name);
             add_dataset(state, &name, &description).await?;
         }
+        Commands::AddDatasetTask { dataset_id, event_ids, notes } => {
+            info!("Adding new task to dataset: {} with event IDs: {}", dataset_id, event_ids);
+            add_dataset_task(state, dataset_id, &event_ids, notes.as_deref()).await?;
+        }
     }
 
     Ok(())
@@ -261,6 +280,78 @@ async fn add_dataset(
     }
 
     println!("Dataset '{}' added successfully", name);
+    Ok(())
+}
+
+async fn add_dataset_task(
+    state: Arc<crate::AppState>,
+    dataset_id: i64,
+    event_ids: &str,
+    notes: Option<&str>,
+) -> Result<()> {
+    info!("Adding new task to dataset: {} with event IDs: {}", dataset_id, event_ids);
+    
+    let mut conn = state.zumblezay_db.get()?;
+    let tx = conn.transaction()?;
+    
+    // First verify the dataset exists
+    let dataset_exists: bool = tx.query_row(
+        "SELECT 1 FROM eval_datasets WHERE dataset_id = ?",
+        rusqlite::params![dataset_id],
+        |_| Ok(true)
+    ).unwrap_or(false);
+
+    if !dataset_exists {
+        return Err(anyhow::anyhow!("Dataset {} not found", dataset_id));
+    }
+
+    // Parse and validate event IDs
+    let event_id_list: Vec<&str> = event_ids.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if event_id_list.is_empty() {
+        return Err(anyhow::anyhow!("No valid event IDs provided"));
+    }
+
+    // Verify all events exist in the events database
+    let mut invalid_events = Vec::new();
+    for event_id in &event_id_list {
+        let exists: bool = tx.query_row(
+            "SELECT 1 FROM events WHERE event_id = ?",
+            rusqlite::params![event_id],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !exists {
+            invalid_events.push(*event_id);
+        }
+    }
+
+    if !invalid_events.is_empty() {
+        return Err(anyhow::anyhow!(
+            "The following event IDs were not found: {}",
+            invalid_events.join(", ")
+        ));
+    }
+
+    // Create JSON array of event IDs
+    let events_json = serde_json::to_string(&event_id_list)?;
+    let now = Utc::now().timestamp();
+
+    // Insert the new task
+    tx.execute(
+        "INSERT INTO eval_dataset_tasks (
+            dataset_id, events, created_at, updated_at, notes
+        ) VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![dataset_id, events_json, now, now, notes],
+    )?;
+
+    // Commit the transaction
+    tx.commit()?;
+
+    println!("Task added successfully to dataset: {}", dataset_id);
     Ok(())
 }
 
@@ -393,5 +484,142 @@ mod tests {
             assert_eq!(dataset.0, test_name, "Dataset name should match");
             assert_eq!(dataset.1, test_description, "Dataset description should match");
         });
+    }
+
+    #[tokio::test]
+    async fn test_add_dataset_task() {
+        // Create a test state
+        let state = Arc::new(AppState::new_for_testing());
+        let conn = state.zumblezay_db.get().expect("Failed to get DB connection");
+
+        // Set up test data
+        let now = Utc::now();
+        let timestamp = now.timestamp();
+
+        // Create a test dataset
+        conn.execute(
+            "INSERT INTO eval_datasets (dataset_id, name, description, created_at) VALUES (?, ?, ?, ?)",
+            params![1, "Test Dataset", "Test Description", timestamp],
+        ).expect("Failed to create test dataset");
+
+        // Create some test events
+        conn.execute(
+            "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "event1",
+                timestamp,
+                1000.0,
+                1010.0,
+                "motion",
+                "camera1",
+                "/path/to/video1"
+            ],
+        ).expect("Failed to create test event 1");
+
+        conn.execute(
+            "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "event2",
+                timestamp,
+                1020.0,
+                1030.0,
+                "motion",
+                "camera1",
+                "/path/to/video2"
+            ],
+        ).expect("Failed to create test event 2");
+
+        // Test successful case without notes
+        let result = add_dataset_task(
+            state.clone(),
+            1,
+            "event1,event2",
+            None,
+        ).await;
+        assert!(result.is_ok(), "Failed to add dataset task: {:?}", result);
+
+        // Test successful case with notes
+        let result = add_dataset_task(
+            state.clone(),
+            1,
+            "event1,event2",
+            Some("Test notes"),
+        ).await;
+        assert!(result.is_ok(), "Failed to add dataset task with notes: {:?}", result);
+
+        // Verify the tasks were created correctly
+        let tasks: Vec<(i64, String, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT dataset_id, events, notes FROM eval_dataset_tasks WHERE dataset_id = 1 ORDER BY created_at"
+            ).expect("Failed to prepare query");
+            
+            let task_iter = stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                ))
+            }).expect("Failed to execute query");
+            
+            task_iter.collect::<Result<Vec<_>, _>>().expect("Failed to collect tasks")
+        };
+
+        assert_eq!(tasks.len(), 2, "Expected two tasks to be created");
+        
+        // Check first task (without notes)
+        assert_eq!(tasks[0].0, 1);
+        let events: Vec<String> = serde_json::from_str(&tasks[0].1).expect("Failed to parse events JSON");
+        assert_eq!(events, vec!["event1", "event2"]);
+        assert_eq!(tasks[0].2, None);
+
+        // Check second task (with notes)
+        assert_eq!(tasks[1].0, 1);
+        let events: Vec<String> = serde_json::from_str(&tasks[1].1).expect("Failed to parse events JSON");
+        assert_eq!(events, vec!["event1", "event2"]);
+        assert_eq!(tasks[1].2, Some("Test notes".to_string()));
+
+        // Test error cases
+
+        // Test non-existent dataset
+        let result = add_dataset_task(
+            state.clone(),
+            999,
+            "event1,event2",
+            None,
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Dataset 999 not found"));
+
+        // Test non-existent event
+        let result = add_dataset_task(
+            state.clone(),
+            1,
+            "event1,nonexistent",
+            None,
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+
+        // Test empty event list
+        let result = add_dataset_task(
+            state.clone(),
+            1,
+            "",
+            None,
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid event IDs provided"));
+
+        // Test whitespace-only event list
+        let result = add_dataset_task(
+            state.clone(),
+            1,
+            "  ,  ,  ",
+            None,
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid event IDs provided"));
     }
 }

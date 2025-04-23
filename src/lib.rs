@@ -389,6 +389,7 @@ pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
             events JSON CHECK (json_valid(events) AND json_type(events) = 'array') NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
+            notes TEXT,
             evaluation_data JSON CHECK (json_valid(evaluation_data) AND json_type(evaluation_data) = 'object'),
             FOREIGN KEY(dataset_id) REFERENCES eval_datasets(dataset_id)
             UNIQUE(dataset_id, task_id)
