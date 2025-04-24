@@ -21,6 +21,7 @@ use tracing::warn;
 pub mod app;
 pub mod cli;
 pub mod eval;
+pub mod event_understanding;
 pub mod openai;
 pub mod process_events;
 pub mod prompt_context;

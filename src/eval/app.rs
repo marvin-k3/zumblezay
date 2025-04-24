@@ -90,28 +90,6 @@ enum Commands {
     },
 }
 
-/// Helper struct to attach events db to zumblezay connection
-#[derive(Debug)]
-struct DbAttacher {
-    events_db: PathBuf,
-}
-
-impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error>
-    for DbAttacher
-{
-    fn on_acquire(
-        &self,
-        conn: &mut rusqlite::Connection,
-    ) -> Result<(), rusqlite::Error> {
-        let events_db_path = self.events_db.to_str().unwrap();
-        conn.execute_batch(&format!(
-            "ATTACH DATABASE '{}' AS events",
-            events_db_path
-        ))
-    }
-}
-
-/// Represents a dataset in the system
 pub async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
@@ -137,11 +115,7 @@ pub async fn run_app() -> Result<()> {
     // Create zumblezay pool with connection customization
     let zumblezay_manager =
         SqliteConnectionManager::file(&cli.common_args.zumblezay_db);
-    let zumblezay_pool = Pool::builder()
-        .connection_customizer(Box::new(DbAttacher {
-            events_db: cli.common_args.events_db.clone(),
-        }))
-        .build(zumblezay_manager)?;
+    let zumblezay_pool = Pool::new(zumblezay_manager)?;
 
     // Create cache pool
     let cache_manager =
