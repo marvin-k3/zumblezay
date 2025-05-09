@@ -1,8 +1,10 @@
 /target/
 
-# Data directory
+# Data directories
 /data/
 /data2/
+/output/
+/models/
 
 .env
 
