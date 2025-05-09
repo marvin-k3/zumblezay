@@ -18,3 +18,4 @@ Thumbs.db
 models/
 events.db
 transcripts.db*
+output/
