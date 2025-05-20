@@ -20,3 +20,6 @@ Thumbs.db
 
 events.db
 transcripts.db*
+.python-version
+.stignore
+.stfolder/
