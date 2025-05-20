@@ -49,11 +49,15 @@ pub struct CommonArgs {
     pub default_summary_model: String,
 
     /// Video path original prefix
-    #[arg(long, default_value = "/data")]
+    #[arg(long, env = "VIDEO_PATH_ORIGINAL_PREFIX", default_value = "/data")]
     pub video_path_original_prefix: String,
 
     /// Video path replacement prefix
-    #[arg(long, default_value = "/path/to/replacement")]
+    #[arg(
+        long,
+        env = "VIDEO_PATH_REPLACEMENT_PREFIX",
+        default_value = "/path/to/replacement"
+    )]
     pub video_path_replacement_prefix: String,
 
     /// Timezone
