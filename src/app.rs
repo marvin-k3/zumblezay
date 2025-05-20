@@ -208,6 +208,11 @@ fn init_templates() -> Tera {
         include_str!("templates/transcript.html"),
     )
     .unwrap();
+    tera.add_raw_template(
+        "annotations.html",
+        include_str!("templates/annotations.html"),
+    )
+    .unwrap();
     tera
 }
 
@@ -1345,6 +1350,21 @@ async fn get_transcripts_json(
     })))
 }
 
+// Add annotations page handler
+#[axum::debug_handler]
+async fn annotations_page() -> Html<String> {
+    let templates = TEMPLATES.get().unwrap();
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/annotations");
+
+    let rendered = templates
+        .render("annotations.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
@@ -1364,6 +1384,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(events_page))
         .route("/events", get(events_page))
+        .route("/annotations", get(annotations_page))
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))
