@@ -237,108 +237,180 @@
         gap: 0.5rem;
         align-items: center;
     }
+
+    .container-fluid {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+
+    .row {
+        margin-left: -0.5rem;
+        margin-right: -0.5rem;
+    }
+
+    .col, .col-md-3, .col-md-9 {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+    }
+
+    .sidebar {
+        transition: all 0.3s ease;
+        position: relative;
+    }
+
+    .sidebar.collapsed {
+        width: 40px !important;
+        min-width: 40px !important;
+        max-width: 40px !important;
+    }
+
+    .sidebar-toggle {
+        position: absolute;
+        right: -12px;
+        top: 10px;
+        z-index: 1000;
+        background: var(--bs-body-bg);
+        border: 1px solid var(--bs-border-color);
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+    }
+
+    .sidebar-toggle:hover {
+        background: var(--bs-tertiary-bg);
+    }
+
+    .sidebar.collapsed .card-body {
+        display: none;
+    }
+
+    .sidebar.collapsed .card-header {
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        transform: rotate(180deg);
+        height: 100%;
+        padding: 1rem 0.5rem;
+    }
+
+    .sidebar.collapsed .card {
+        height: 100%;
+    }
+
+    .main-content {
+        transition: all 0.3s ease;
+    }
 </style>
 {% endblock %}
 
 {% block page_title %}Annotations{% endblock %}
 
 {% block content %}
-<div class="row mb-4">
-    <div class="col">
-        <div class="filter-bar">
-            <form id="filter-form" class="filter-form-row">
-                <div class="filter-form-group">
-                    <label for="date-filter" class="form-label">Date</label>
-                    <input type="date" class="form-control" id="date-filter">
-                </div>
-                <div class="filter-form-group">
-                    <label for="camera-filter" class="form-label">Camera</label>
-                    <select class="form-select" id="camera-filter">
-                        <option value="">All Cameras</option>
-                    </select>
-                </div>
-                <div class="filter-form-group">
-                    <label class="form-label">Time Range</label>
-                    <div class="time-range-inputs">
-                        <input type="time" class="form-control" id="time-start">
-                        <span>to</span>
-                        <input type="time" class="form-control" id="time-end">
+<div class="container-fluid px-4">
+    <div class="row mb-2">
+        <div class="col">
+            <div class="filter-bar">
+                <form id="filter-form" class="filter-form-row">
+                    <div class="filter-form-group">
+                        <label for="date-filter" class="form-label">Date</label>
+                        <input type="date" class="form-control" id="date-filter">
                     </div>
-                </div>
-                <div class="filter-form-group">
-                    <button type="button" class="btn btn-secondary" id="reset-filters">Reset</button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-md-3">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Recent Events</h5>
-            </div>
-            <div id="event-list" class="card-body event-list">
-                <p class="text-muted">Loading events...</p>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-9">
-        <div class="card">
-            <div class="card-header">
-                <h5 id="video-title" class="card-title mb-0">Select an event</h5>
-            </div>
-            <div class="card-body">
-                <div class="video-container">
-                    <media-controller>
-                        <video 
-                            id="video-player"
-                            slot="media"
-                            preload="auto"
-                            playsinline
-                            muted
-                            >
-                            <track kind="captions" src="" label="English" default>
-                        </video>
-                        <media-control-bar>
-                            <media-play-button></media-play-button>
-                            <media-seek-backward-button seekoffset="1"></media-seek-backward-button>
-                            <media-seek-forward-button seekoffset="1"></media-seek-forward-button>
-                            <media-time-range></media-time-range>
-                            <media-time-display></media-time-display>
-                            <media-playback-rate-button></media-playback-rate-button>
-                            <media-mute-button></media-mute-button>
-                            <media-volume-range></media-volume-range>
-                            <media-captions-button></media-captions-button>
-                            <media-fullscreen-button></media-fullscreen-button>
-                        </media-control-bar>
-                    </media-controller>
-                </div>
-                <div class="storyboard-container">
-                    <div id="storyboard" class="storyboard">
-                        <img id="storyboard-img">
+                    <div class="filter-form-group">
+                        <label for="camera-filter" class="form-label">Camera</label>
+                        <select class="form-select" id="camera-filter">
+                            <option value="">All Cameras</option>
+                        </select>
                     </div>
-                </div> 
-                <!-- Add transcript container -->
-                <div class="card mt-3">
-                    <div class="transcript-header">
-                        <h5 class="card-title mb-0">Transcript</h5>
-                        <div class="transcript-controls">
-                            <button id="thumbnail-size-toggle" class="btn btn-sm btn-outline-secondary" title="Toggle thumbnail size">
-                                <i class="bi bi-arrows-angle-expand"></i>
-                            </button>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="auto-scroll-toggle" checked>
-                                <label class="form-check-label" for="auto-scroll-toggle">Auto-scroll</label>
-                            </div>
+                    <div class="filter-form-group">
+                        <label class="form-label">Time Range</label>
+                        <div class="time-range-inputs">
+                            <input type="time" class="form-control" id="time-start">
+                            <span>to</span>
+                            <input type="time" class="form-control" id="time-end">
                         </div>
                     </div>
-                    <div class="card-body p-0">
-                        <div id="transcript-container" class="transcript-container">
-                            <div class="transcript-placeholder">
-                                Select a video to view its transcript
+                    <div class="filter-form-group">
+                        <button type="button" class="btn btn-secondary" id="reset-filters">Reset</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-3 sidebar collapsed">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Recent Events</h5>
+                </div>
+                <div id="event-list" class="card-body event-list">
+                    <p class="text-muted">Loading events...</p>
+                </div>
+                <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
+                    <i class="bi bi-chevron-left"></i>
+                </button>
+            </div>
+        </div>
+        
+        <div class="col-md-9 main-content">
+            <div class="card">
+                <div class="card-header">
+                    <h5 id="video-title" class="card-title mb-0">Select an event</h5>
+                </div>
+                <div class="card-body">
+                    <div class="video-container">
+                        <media-controller>
+                            <video 
+                                id="video-player"
+                                slot="media"
+                                preload="auto"
+                                playsinline
+                                muted
+                                >
+                                <track kind="captions" src="" label="English" default>
+                            </video>
+                            <media-control-bar>
+                                <media-play-button></media-play-button>
+                                <media-seek-backward-button seekoffset="1"></media-seek-backward-button>
+                                <media-seek-forward-button seekoffset="1"></media-seek-forward-button>
+                                <media-time-range></media-time-range>
+                                <media-time-display></media-time-display>
+                                <media-playback-rate-button></media-playback-rate-button>
+                                <media-mute-button></media-mute-button>
+                                <media-volume-range></media-volume-range>
+                                <media-captions-button></media-captions-button>
+                                <media-fullscreen-button></media-fullscreen-button>
+                            </media-control-bar>
+                        </media-controller>
+                    </div>
+                    <div class="storyboard-container">
+                        <div id="storyboard" class="storyboard">
+                            <img id="storyboard-img">
+                        </div>
+                    </div> 
+                    <!-- Add transcript container -->
+                    <div class="card mt-3">
+                        <div class="transcript-header">
+                            <h5 class="card-title mb-0">Transcript</h5>
+                            <div class="transcript-controls">
+                                <button id="thumbnail-size-toggle" class="btn btn-sm btn-outline-secondary" title="Toggle thumbnail size">
+                                    <i class="bi bi-arrows-angle-expand"></i>
+                                </button>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="auto-scroll-toggle" checked>
+                                    <label class="form-check-label" for="auto-scroll-toggle">Auto-scroll</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <div id="transcript-container" class="transcript-container">
+                                <div class="transcript-placeholder">
+                                    Select a video to view its transcript
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1018,6 +1090,36 @@
         if (videoId) {
             loadVideo(videoId);
         }
+
+        // Add sidebar toggle functionality
+        const sidebar = document.querySelector('.sidebar');
+        const sidebarToggle = document.getElementById('sidebar-toggle');
+        const mainContent = document.querySelector('.main-content');
+        
+        // Check if sidebar state is saved
+        const sidebarState = localStorage.getItem('sidebarCollapsed');
+        if (sidebarState === 'true') {
+            sidebar.classList.add('collapsed');
+            mainContent.classList.add('col-md-12');
+            mainContent.classList.remove('col-md-9');
+            sidebarToggle.querySelector('i').classList.replace('bi-chevron-left', 'bi-chevron-right');
+        }
+
+        sidebarToggle.addEventListener('click', function() {
+            sidebar.classList.toggle('collapsed');
+            mainContent.classList.toggle('col-md-12');
+            mainContent.classList.toggle('col-md-9');
+            
+            // Update icon
+            const icon = this.querySelector('i');
+            if (sidebar.classList.contains('collapsed')) {
+                icon.classList.replace('bi-chevron-left', 'bi-chevron-right');
+                localStorage.setItem('sidebarCollapsed', 'true');
+            } else {
+                icon.classList.replace('bi-chevron-right', 'bi-chevron-left');
+                localStorage.setItem('sidebarCollapsed', 'false');
+            }
+        });
     });
 
     // This function needs to be global to be called from the HTML

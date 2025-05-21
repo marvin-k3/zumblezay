@@ -53,16 +53,13 @@
         </div>
     </nav>
 
-    <div class="container mt-4">
-        <!--
-        <div class="row mb-4">
-            <div class="col">
-                <h1>{% block page_title %}{% endblock %}</h1>
-                {% block page_actions %}{% endblock %}
-            </div>
-        </div>
-        -->
+    {% if request_path == '/annotations' %}
         {% block content %}{% endblock %}
+    {% else %}
+        <div class="container mt-4">
+            {% block content %}{% endblock %}
+        </div>
+    {% endif %}
     
     <footer class="footer mt-4 py-3 border-top">
         <div class="container text-center">
