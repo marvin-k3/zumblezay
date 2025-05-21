@@ -254,7 +254,7 @@
     }
 
     .sidebar {
-        transition: all 0.3s ease;
+        transition: all 0.1s ease;
         position: relative;
     }
 
@@ -342,7 +342,7 @@
     </div>
 
     <div class="row">
-        <div class="col-md-3 sidebar collapsed">
+        <div class="sidebar col-md-3">
             <div class="card">
                 <div class="card-header">
                     <h5 class="card-title mb-0">Recent Events</h5>
@@ -356,7 +356,7 @@
             </div>
         </div>
         
-        <div class="col-md-9 main-content">
+        <div class="main-content col-md-9">
             <div class="card">
                 <div class="card-header">
                     <h5 id="video-title" class="card-title mb-0">Select an event</h5>
@@ -1096,20 +1096,35 @@
         const sidebarToggle = document.getElementById('sidebar-toggle');
         const mainContent = document.querySelector('.main-content');
         
+        // Helper to set correct col classes
+        function updateColClasses() {
+            if (sidebar.classList.contains('collapsed')) {
+                sidebar.classList.remove('col-md-3');
+                sidebar.classList.add('col-auto');
+                mainContent.classList.remove('col-md-9');
+                mainContent.classList.add('col');
+            } else {
+                sidebar.classList.add('col-md-3');
+                sidebar.classList.remove('col-auto');
+                mainContent.classList.add('col-md-9');
+                mainContent.classList.remove('col');
+            }
+        }
         // Check if sidebar state is saved
         const sidebarState = localStorage.getItem('sidebarCollapsed');
         if (sidebarState === 'true') {
             sidebar.classList.add('collapsed');
-            mainContent.classList.add('col-md-12');
-            mainContent.classList.remove('col-md-9');
+            updateColClasses();
             sidebarToggle.querySelector('i').classList.replace('bi-chevron-left', 'bi-chevron-right');
+        } else {
+            sidebar.classList.remove('collapsed');
+            updateColClasses();
+            sidebarToggle.querySelector('i').classList.replace('bi-chevron-right', 'bi-chevron-left');
         }
 
         sidebarToggle.addEventListener('click', function() {
             sidebar.classList.toggle('collapsed');
-            mainContent.classList.toggle('col-md-12');
-            mainContent.classList.toggle('col-md-9');
-            
+            updateColClasses();
             // Update icon
             const icon = this.querySelector('i');
             if (sidebar.classList.contains('collapsed')) {
