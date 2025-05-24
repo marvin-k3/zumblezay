@@ -53,6 +53,7 @@ tracing-tree = "0.4.0"
 url = "2.5.2"
 walkdir = "2.5.0"
 dotenv = "0.15.0"
+zip = "0.6"
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -10,6 +10,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Row;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::io::Write;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -87,6 +88,17 @@ enum Commands {
         /// Name of the dataset
         #[arg(long)]
         dataset_name: String,
+    },
+
+    /// Export a dataset to a zip file with videos and annotations
+    ExportZip {
+        /// Name of the dataset to export
+        #[arg(long)]
+        dataset_name: String,
+
+        /// Path to the output zip file
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -188,6 +200,160 @@ pub async fn run_app() -> Result<()> {
         Commands::ListDatasetTasks { dataset_name } => {
             info!("Listing tasks for dataset: {}", dataset_name);
             list_dataset_tasks(state, &dataset_name).await?;
+        }
+        Commands::ExportZip { dataset_name, output } => {
+            info!("Exporting dataset {} to zip file {}", dataset_name, output.display());
+            info!("Video path mapping: original='{}', replacement='{}'", 
+                state.video_path_original_prefix, 
+                state.video_path_replacement_prefix);
+
+            // Get dataset ID and tasks
+            let mut conn = state.zumblezay_db.get()?;
+            let dataset_id: i64 = conn.query_row(
+                "SELECT dataset_id FROM eval_datasets WHERE name = ?",
+                rusqlite::params![dataset_name],
+                |row| row.get(0)
+            ).map_err(|_| anyhow::anyhow!("Dataset '{}' not found", dataset_name))?;
+
+            // Get all tasks for this dataset
+            let mut stmt = conn.prepare(
+                "SELECT task_id, events, notes, evaluation_data 
+                 FROM eval_dataset_tasks 
+                 WHERE dataset_id = ? 
+                 ORDER BY created_at DESC"
+            )?;
+
+            let tasks = stmt.query_map(rusqlite::params![dataset_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?, // task_id
+                    row.get::<_, String>(1)?, // events (JSON)
+                    row.get::<_, Option<String>>(2)?, // notes
+                    row.get::<_, Option<String>>(3)?, // evaluation_data
+                ))
+            })?;
+
+            // Create annotations structure
+            let mut annotations = serde_json::Map::new();
+            let mut missing_videos = Vec::new();
+            let mut found_videos = Vec::new();
+            let mut video_paths = std::collections::HashMap::new();
+
+            // Process each task
+            for task_result in tasks {
+                let (task_id, events_json, notes, eval_data) = task_result?;
+                let events: Vec<String> = serde_json::from_str(&events_json)?;
+
+                // Get event details from events database
+                for event_id in events {
+                    let event_details: (f64, f64, String, String) = conn.query_row(
+                        "SELECT event_start, event_end, camera_id, video_path FROM events WHERE event_id = ?",
+                        rusqlite::params![event_id],
+                        |row| Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                        ))
+                    )?;
+
+                    let (event_start, event_end, camera_id, video_path) = event_details;
+                    let video_filename = PathBuf::from(&video_path)
+                        .file_name()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid video path"))?
+                        .to_string_lossy()
+                        .to_string();
+
+                    // Map the video path using the configured prefixes
+                    let actual_video_path = if !state.video_path_original_prefix.is_empty() {
+                        let mapped = video_path.replace(&state.video_path_original_prefix, &state.video_path_replacement_prefix);
+                        info!("Mapping video path: {} -> {}", video_path, mapped);
+                        mapped
+                    } else {
+                        video_path.clone()
+                    };
+
+                    // Check if video file exists
+                    let video_path = PathBuf::from(actual_video_path);
+                    if !video_path.exists() {
+                        info!("Video file not found: {}", video_path.display());
+                        missing_videos.push(video_filename.clone());
+                        continue;
+                    }
+                    info!("Found video file: {}", video_path.display());
+                    found_videos.push(video_filename.clone());
+                    video_paths.insert(video_filename.clone(), video_path);
+
+                    // Create annotation entry
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("event_id".to_string(), serde_json::Value::String(event_id));
+                    entry.insert("filename".to_string(), serde_json::Value::String(video_filename.clone()));
+                    entry.insert("event_start".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_start).unwrap()));
+                    entry.insert("event_end".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_end).unwrap()));
+                    entry.insert("camera_name".to_string(), serde_json::Value::String(camera_id));
+                    
+                    if let Some(notes) = &notes {
+                        entry.insert("human_notes".to_string(), serde_json::Value::String(notes.clone()));
+                    }
+                    
+                    if let Some(eval_data) = &eval_data {
+                        if let Ok(eval_json) = serde_json::from_str::<serde_json::Value>(eval_data) {
+                            if let Some(summary) = eval_json.get("summary") {
+                                entry.insert("generated_summary".to_string(), summary.clone());
+                            }
+                            if let Some(judge_summary) = eval_json.get("judge_summary") {
+                                entry.insert("human_judge_summary".to_string(), judge_summary.clone());
+                            }
+                        }
+                    }
+
+                    annotations.insert(video_filename, serde_json::Value::Object(entry));
+                }
+            }
+
+            info!("Found {} videos, {} missing", found_videos.len(), missing_videos.len());
+
+            // Create zip file
+            let output_str = output.to_string_lossy().to_string();
+            let file = std::fs::File::create(&output)?;
+            let mut zip = zip::ZipWriter::new(file);
+
+            // Add videos directory
+            zip.add_directory("videos", zip::write::FileOptions::default())?;
+
+            // Add video files
+            for (video_filename, _) in &annotations {
+                if let Some(video_path) = video_paths.get(video_filename) {
+                    info!("Adding video to zip: {}", video_path.display());
+                    let options = zip::write::FileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored);
+                    zip.start_file(format!("videos/{}", video_filename), options)?;
+                    let mut video_file = std::fs::File::open(video_path)?;
+                    std::io::copy(&mut video_file, &mut zip)?;
+                } else {
+                    info!("Video file not found for zip: {}", video_filename);
+                }
+            }
+
+            // Add annotations.json
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("annotations.json", options)?;
+            let annotations_json = serde_json::to_string_pretty(&annotations)?;
+            zip.write_all(annotations_json.as_bytes())?;
+
+            // Finish zip file
+            zip.finish()?;
+
+            // Report any missing videos
+            if !missing_videos.is_empty() {
+                println!("Warning: The following videos were not found:");
+                for video in missing_videos {
+                    println!("  - {}", video);
+                }
+            }
+
+            println!("Successfully exported dataset to {}", output_str);
+            return Ok(())
         }
     }
 
