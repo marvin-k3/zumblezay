@@ -459,10 +459,16 @@
 
     function initializeFilters() {
         console.log('Initializing filters...');
-        // Set default date to today
+        
+        // Check URL parameters first
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlDate = urlParams.get('date');
+        
+        // Set date from URL or default to today
         const today = new Date();
-        document.getElementById('date-filter').value = today.toLocaleDateString('en-CA'); // 'en-CA' gives YYYY-MM-DD format
-        currentFilters.date = today.toLocaleDateString('en-CA');
+        const initialDate = urlDate || today.toLocaleDateString('en-CA');
+        document.getElementById('date-filter').value = initialDate;
+        currentFilters.date = initialDate;
 
         // Add event listeners
         document.getElementById('date-filter').addEventListener('change', updateFilters);
@@ -500,7 +506,6 @@
         // Load datasets and handle URL parameter
         loadDatasets().then(() => {
             // After datasets are loaded, check URL for dataset parameter
-            const urlParams = new URLSearchParams(window.location.search);
             const datasetId = urlParams.get('dataset');
             if (datasetId) {
                 console.log('Found dataset ID in URL:', datasetId);
@@ -528,8 +533,13 @@
         const datasetChanged = newDataset !== currentDataset;
         currentDataset = newDataset;
         
-        // Update URL with dataset
+        // Update URL with all current parameters
         const url = new URL(window.location);
+        if (currentFilters.date) {
+            url.searchParams.set('date', currentFilters.date);
+        } else {
+            url.searchParams.delete('date');
+        }
         if (currentDataset) {
             url.searchParams.set('dataset', currentDataset);
         } else {
