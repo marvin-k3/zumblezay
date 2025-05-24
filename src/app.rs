@@ -271,6 +271,16 @@ struct EventFilters {
     time_end: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct TranscriptListItem {
+    event_id: String,
+    camera_id: String,
+    camera_name: Option<String>,
+    event_start: f64,
+    event_end: f64,
+    has_notes: bool,
+}
+
 #[axum::debug_handler]
 async fn get_completed_events(
     State(state): State<Arc<AppState>>,
@@ -303,7 +313,15 @@ async fn get_completed_events(
             FROM events
             WHERE event_start BETWEEN ? AND ?
           )
-          SELECT e1.event_id, e1.camera_id, e1.event_start, e1.event_end
+          SELECT e1.event_id, e1.camera_id, e1.event_start, e1.event_end,
+                 EXISTS (
+                    SELECT 1 
+                    FROM eval_dataset_tasks t 
+                    WHERE json_array_length(t.events) = 1 
+                    AND json_extract(t.events, '$[0]') = e1.event_id
+                    AND t.notes IS NOT NULL
+                    AND t.notes != ''
+                 ) as has_notes
           FROM filtered e1
           WHERE NOT EXISTS (
             SELECT 1
@@ -340,6 +358,7 @@ async fn get_completed_events(
                     .cloned(),
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
+                has_notes: row.get(4)?,
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -579,16 +598,6 @@ async fn stream_video(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(response)
-}
-
-// Add this new struct
-#[derive(Debug, Serialize)]
-struct TranscriptListItem {
-    event_id: String,
-    camera_id: String,
-    camera_name: Option<String>,
-    event_start: f64,
-    event_end: f64,
 }
 
 // Update the events page handler

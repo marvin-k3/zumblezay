@@ -18,9 +18,19 @@
     .event-item {
         cursor: pointer;
         padding: 0.5rem !important;
+        position: relative;
     }
     .event-item:hover {
         background-color: var(--bs-tertiary-bg);
+    }
+    .note-indicator {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background-color: #28a745;
+        border-radius: 50%;
+        margin-right: 6px;
+        vertical-align: middle;
     }
     media-controller {
         width: 100%;
@@ -603,7 +613,10 @@
                      onclick="loadVideo('${t.event_id}')"
                      onmouseenter="startPreview('${t.event_id}', this, ${t.event_end - t.event_start})"
                      onmouseleave="stopPreview(this)">
-                    <div class="fw-bold">${t.camera_name || t.camera_id}</div>
+                    <div class="fw-bold">
+                        ${t.has_notes ? '<span class="note-indicator" title="Has notes"></span>' : ''}
+                        ${t.camera_name || t.camera_id}
+                    </div>
                     <div class="small text-muted">${formatTimestamp(t.event_start)} - ${Math.max(Math.round(t.event_end - t.event_start), 1)} seconds</div>
                     <div class="event-preview">
                         <img>
