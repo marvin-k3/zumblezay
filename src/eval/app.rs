@@ -100,6 +100,17 @@ enum Commands {
         #[arg(long)]
         output: PathBuf,
     },
+
+    /// Export a dataset's annotations to a JSON file
+    ExportJson {
+        /// Name of the dataset to export
+        #[arg(long)]
+        dataset_name: String,
+
+        /// Path to the output JSON file
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 pub async fn main() -> Result<()> {
@@ -245,6 +256,9 @@ pub async fn run_app() -> Result<()> {
 
                 // Get event details from events database
                 for event_id in events {
+                    // Use the full event ID since that's what's in the transcriptions table
+                    info!("Processing event_id: {}", event_id);
+
                     let event_details: (f64, f64, String, String) = conn.query_row(
                         "SELECT event_start, event_end, camera_id, video_path FROM events WHERE event_id = ?",
                         rusqlite::params![event_id],
@@ -285,7 +299,7 @@ pub async fn run_app() -> Result<()> {
 
                     // Create annotation entry
                     let mut entry = serde_json::Map::new();
-                    entry.insert("event_id".to_string(), serde_json::Value::String(event_id));
+                    entry.insert("event_id".to_string(), serde_json::Value::String(event_id.clone()));
                     entry.insert("filename".to_string(), serde_json::Value::String(video_filename.clone()));
                     entry.insert("event_start".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_start).unwrap()));
                     entry.insert("event_end".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_end).unwrap()));
@@ -353,6 +367,152 @@ pub async fn run_app() -> Result<()> {
             }
 
             println!("Successfully exported dataset to {}", output_str);
+            return Ok(())
+        }
+        Commands::ExportJson { dataset_name, output } => {
+            info!("Exporting dataset {} to JSON file {}", dataset_name, output.display());
+
+            // Get dataset ID and tasks
+            let mut conn = state.zumblezay_db.get()?;
+            let dataset_id: i64 = conn.query_row(
+                "SELECT dataset_id FROM eval_datasets WHERE name = ?",
+                rusqlite::params![dataset_name],
+                |row| row.get(0)
+            ).map_err(|_| anyhow::anyhow!("Dataset '{}' not found", dataset_name))?;
+
+            // Debug: Check what's in the transcriptions table
+            let mut stmt = conn.prepare("SELECT event_id, transcription_type FROM transcriptions LIMIT 5")?;
+            let sample_transcriptions = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                ))
+            })?;
+            info!("Sample transcriptions in database:");
+            for result in sample_transcriptions {
+                if let Ok((event_id, trans_type)) = result {
+                    info!("  event_id: {}, type: {}", event_id, trans_type);
+                }
+            }
+
+            // Get all tasks for this dataset
+            let mut stmt = conn.prepare(
+                "SELECT task_id, events, notes, evaluation_data 
+                 FROM eval_dataset_tasks 
+                 WHERE dataset_id = ? 
+                 ORDER BY created_at DESC"
+            )?;
+
+            let tasks = stmt.query_map(rusqlite::params![dataset_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?, // task_id
+                    row.get::<_, String>(1)?, // events (JSON)
+                    row.get::<_, Option<String>>(2)?, // notes
+                    row.get::<_, Option<String>>(3)?, // evaluation_data
+                ))
+            })?;
+
+            // Create annotations structure
+            let mut annotations = serde_json::Map::new();
+            let mut event_count = 0;
+            let mut transcription_count = 0;
+
+            // Process each task
+            for task_result in tasks {
+                let (task_id, events_json, notes, eval_data) = task_result?;
+                let events: Vec<String> = serde_json::from_str(&events_json)?;
+
+                // Create annotation entry for this task
+                let mut entry = serde_json::Map::new();
+                entry.insert("task_id".to_string(), serde_json::Value::Number(serde_json::Number::from(task_id)));
+                entry.insert("events".to_string(), serde_json::Value::Array(events.iter().map(|e| serde_json::Value::String(e.clone())).collect()));
+                
+                if let Some(notes) = &notes {
+                    entry.insert("human_notes".to_string(), serde_json::Value::String(notes.clone()));
+                }
+                
+                if let Some(eval_data) = &eval_data {
+                    if let Ok(eval_json) = serde_json::from_str::<serde_json::Value>(eval_data) {
+                        if let Some(summary) = eval_json.get("summary") {
+                            entry.insert("generated_summary".to_string(), summary.clone());
+                        }
+                        if let Some(judge_summary) = eval_json.get("judge_summary") {
+                            entry.insert("human_judge_summary".to_string(), judge_summary.clone());
+                        }
+                    }
+                }
+
+                // Get event details from events database
+                let mut event_details = Vec::new();
+                for event_id in events {
+                    info!("Processing event_id: {}", event_id);
+
+                    let event_data: (f64, f64, String, String) = conn.query_row(
+                        "SELECT event_start, event_end, camera_id, video_path FROM events WHERE event_id = ?",
+                        rusqlite::params![event_id],
+                        |row| Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                        ))
+                    )?;
+
+                    let (event_start, event_end, camera_id, video_path) = event_data;
+                    let video_filename = PathBuf::from(&video_path)
+                        .file_name()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid video path"))?
+                        .to_string_lossy()
+                        .to_string();
+
+                    // Get transcription data
+                    info!("Checking transcription for event_id: {}", event_id);
+                    let transcription_data = conn.query_row(
+                        "SELECT raw_response FROM transcriptions WHERE event_id = ? AND transcription_type = 'whisper-local'",
+                        rusqlite::params![event_id],
+                        |row| row.get::<_, Option<String>>(0)
+                    ).unwrap_or(None);
+
+                    if transcription_data.is_none() {
+                        info!("No transcription found for event_id: {}", event_id);
+                    } else {
+                        info!("Found transcription for event_id: {}", event_id);
+                    }
+
+                    // Create event entry
+                    let mut event_entry = serde_json::Map::new();
+                    event_entry.insert("event_id".to_string(), serde_json::Value::String(event_id.clone()));
+                    event_entry.insert("filename".to_string(), serde_json::Value::String(video_filename.clone()));
+                    event_entry.insert("event_start".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_start).unwrap()));
+                    event_entry.insert("event_end".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(event_end).unwrap()));
+                    event_entry.insert("camera_name".to_string(), serde_json::Value::String(camera_id));
+                    event_entry.insert("video_path".to_string(), serde_json::Value::String(video_path));
+
+                    // Add transcription data if available
+                    if let Some(transcript_json) = transcription_data {
+                        if let Ok(transcript_value) = serde_json::from_str::<serde_json::Value>(&transcript_json) {
+                            event_entry.insert("transcription".to_string(), transcript_value);
+                            transcription_count += 1;
+                        } else {
+                            info!("Failed to parse transcription JSON for event_id: {}", event_id);
+                        }
+                    }
+
+                    event_details.push(serde_json::Value::Object(event_entry));
+                    event_count += 1;
+                }
+
+                entry.insert("event_details".to_string(), serde_json::Value::Array(event_details));
+                annotations.insert(task_id.to_string(), serde_json::Value::Object(entry));
+            }
+
+            // Write annotations to JSON file
+            let annotations_json = serde_json::to_string_pretty(&annotations)?;
+            std::fs::write(&output, annotations_json)?;
+
+            println!("Successfully exported dataset annotations to {}", output.display());
+            println!("Total events exported: {}", event_count);
+            println!("Events with transcription: {}", transcription_count);
             return Ok(())
         }
     }
