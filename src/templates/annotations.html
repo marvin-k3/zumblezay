@@ -571,6 +571,10 @@
     }
 
     function updateEvents() {
+        // Save current scroll position
+        const eventList = document.getElementById('event-list');
+        const scrollPosition = eventList.scrollTop;
+
         // Build query parameters
         const params = new URLSearchParams();
         if (currentFilters.date) {
@@ -623,6 +627,9 @@
                     </div>
                 </div>
             `).join('');
+
+            // Restore scroll position
+            eventList.scrollTop = scrollPosition;
         })
         .catch(error => {
             console.error('Error fetching events:', error);
@@ -1397,6 +1404,9 @@
             successMsg.textContent = 'Notes saved successfully';
             notesContainer.appendChild(successMsg);
             setTimeout(() => successMsg.remove(), 3000);
+
+            // Refresh the event list to update the note indicator
+            updateEvents();
         })
         .catch(error => {
             console.error('Error saving notes:', error);
