@@ -20,7 +20,7 @@ use clap::Parser;
 use fs2::FileExt as Fs2FileExt;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
@@ -1365,6 +1365,156 @@ async fn annotations_page() -> Html<String> {
     Html(rendered)
 }
 
+#[derive(Debug, Serialize)]
+struct EvalDataset {
+    dataset_id: i64,
+    name: String,
+    description: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EvalDatasetsResponse {
+    datasets: Vec<EvalDataset>,
+}
+
+#[axum::debug_handler]
+async fn get_eval_datasets(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<EvalDatasetsResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT dataset_id, name, description, created_at 
+             FROM eval_datasets 
+             ORDER BY name",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let datasets = stmt
+        .query_map([], |row| {
+            Ok(EvalDataset {
+                dataset_id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let datasets: Result<Vec<_>, _> = datasets.collect();
+    Ok(Json(EvalDatasetsResponse {
+        datasets: datasets
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct EventNotes {
+    task_id: Option<i64>,
+    notes: Option<String>,
+}
+
+#[axum::debug_handler]
+async fn get_event_notes(
+    State(state): State<Arc<AppState>>,
+    Path((dataset_id, event_id)): Path<(i64, String)>,
+) -> Result<Json<EventNotes>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Find the first task that contains this event
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_id, notes 
+             FROM eval_dataset_tasks 
+             WHERE dataset_id = ? 
+             AND json_array_length(events) = 1 
+             AND json_extract(events, '$[0]') = ? 
+             LIMIT 1",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let result = stmt
+        .query_row(params![dataset_id, event_id], |row| {
+            Ok(EventNotes {
+                task_id: Some(row.get(0)?),
+                notes: row.get(1)?,
+            })
+        })
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(result.unwrap_or(EventNotes {
+        task_id: None,
+        notes: None,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateNotesRequest {
+    notes: String,
+}
+
+#[axum::debug_handler]
+async fn update_event_notes(
+    State(state): State<Arc<AppState>>,
+    Path((dataset_id, event_id)): Path<(i64, String)>,
+    Json(request): Json<UpdateNotesRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // First try to find an existing task
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_id 
+             FROM eval_dataset_tasks 
+             WHERE dataset_id = ? 
+             AND json_array_length(events) = 1 
+             AND json_extract(events, '$[0]') = ? 
+             LIMIT 1",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let task_id: Option<i64> = stmt
+        .query_row(params![dataset_id, event_id], |row| row.get(0))
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let now = chrono::Utc::now().timestamp();
+
+    if let Some(task_id) = task_id {
+        // Update existing task
+        conn.execute(
+            "UPDATE eval_dataset_tasks 
+             SET notes = ?, updated_at = ? 
+             WHERE task_id = ?",
+            params![request.notes, now, task_id],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        // Create new task
+        conn.execute(
+            "INSERT INTO eval_dataset_tasks 
+             (dataset_id, events, created_at, updated_at, notes) 
+             VALUES (?, json_array(?), ?, ?, ?)",
+            params![dataset_id, event_id, now, now, request.notes],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    Ok(StatusCode::OK)
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
@@ -1421,6 +1571,12 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/storyboard/vtt/{event_id}", get(get_storyboard_vtt))
         .route("/audio/{event_id}/wav", get(stream_audio))
         .route("/api/prompt_context/{key}/{offset}", get(get_prompt_context))
+        // Add new eval dataset routes
+        .route("/api/evals/datasets", get(get_eval_datasets))
+        .route(
+            "/api/evals/{dataset_id}/events/{event_id}/notes",
+            get(get_event_notes).post(update_event_notes),
+        )
         .layer(compression_layer)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
