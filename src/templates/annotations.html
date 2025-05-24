@@ -37,23 +37,7 @@
         height: 100%;
         --media-background-color: rgb(0 0 0);
     }
-    .storyboard {
-        position: relative;
-        width: 100%;
-        height: 60px;
-        background: #000;
-        overflow: hidden;
-        margin-top: 0.5rem;
-    }
     
-    .storyboard img {
-        position: absolute;
-        max-width: none;
-    }
-    
-    .storyboard-container {
-        margin-top: 0.5rem;
-    }
     .event-preview {
         position: absolute;
         width: 160px;
@@ -402,12 +386,18 @@
                             </media-control-bar>
                         </media-controller>
                     </div>
-                    <div class="storyboard-container">
-                        <div id="storyboard" class="storyboard">
-                            <img id="storyboard-img">
+                    <div class="card mt-3">
+                        <div class="transcript-header">
+                            <h5 class="card-title mb-0">Notes</h5>
                         </div>
-                    </div> 
-                    <!-- Add transcript container -->
+                        <div class="card-body p-0">
+                            <div id="notes-container" class="transcript-container">
+                                <div class="transcript-placeholder">
+                                    Select a dataset and video to view/edit notes
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div class="card mt-3">
                         <div class="transcript-header">
                             <h5 class="card-title mb-0">Transcript</h5>
@@ -430,19 +420,6 @@
                         </div>
                     </div>
 
-                    <!-- Add notes section after transcript container -->
-                    <div class="card mt-3">
-                        <div class="transcript-header">
-                            <h5 class="card-title mb-0">Notes</h5>
-                        </div>
-                        <div class="card-body p-0">
-                            <div id="notes-container" class="transcript-container">
-                                <div class="transcript-placeholder">
-                                    Select a dataset and video to view/edit notes
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -757,7 +734,6 @@
 
         // Remove existing event listeners
         videoPlayer.removeEventListener('timeupdate', updateActiveTranscriptSegment);
-        videoPlayer.removeEventListener('timeupdate', updateStoryboardPreview);
 
         fetch(`/api/event/${encodeURIComponent(eventId)}`)
         .then(response => {
@@ -839,37 +815,6 @@
             // Clear transcript
             transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
         });
-    }
-
-    function updateStoryboardPreview() {
-        const video = videoPlayer;
-        const storyboardImg = document.getElementById('storyboard-img');
-        
-        // Add null checks and verify textTracks exists
-        if (!video || !video.textTracks || video.textTracks.length < 2) {
-            return;
-        }
-        
-        const track = video.textTracks[1]; // metadata track
-        if (!track || !track.cues || track.cues.length === 0) {
-            return;
-        }
-        
-        const currentTime = video.currentTime;
-        for (let i = 0; i < track.cues.length; i++) {
-            const cue = track.cues[i];
-            if (currentTime >= cue.startTime && currentTime <= cue.endTime) {
-                try {
-                    const data = JSON.parse(cue.text);
-                    const [x, y, width, height] = data.xywh;
-                    storyboardImg.style.left = `-${x}px`;
-                    storyboardImg.style.top = `-${y}px`;
-                } catch (error) {
-                    console.error('Error parsing storyboard cue:', error);
-                }
-                break;
-            }
-        }
     }
 
     // Handle browser back/forward buttons
@@ -1021,9 +966,6 @@
             
             // Add timeupdate event listener to highlight current segment
             videoPlayer.addEventListener('timeupdate', updateActiveTranscriptSegment);
-            
-            // Also listen for video timeupdate to update storyboard
-            videoPlayer.addEventListener('timeupdate', updateStoryboardPreview);
         })
         .catch(error => {
             console.error('Error loading transcript:', error);
