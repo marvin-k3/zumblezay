@@ -345,7 +345,7 @@
         <div class="sidebar col-md-3">
             <div class="card">
                 <div class="card-header">
-                    <h5 class="card-title mb-0">Recent Events</h5>
+                    <h5 class="card-title mb-0">Recent Events <span id="notes-count" class="badge bg-success ms-2">0</span></h5>
                 </div>
                 <div id="event-list" class="card-body event-list">
                     <p class="text-muted">Loading events...</p>
@@ -586,8 +586,13 @@
             const listDiv = document.getElementById('event-list');
             if (data.length === 0) {
                 listDiv.innerHTML = '<p class="text-muted">No events available</p>';
+                document.getElementById('notes-count').textContent = '0 Notes';
                 return;
             }
+
+            // Count events with notes
+            const eventsWithNotes = data.filter(t => t.has_notes).length;
+            document.getElementById('notes-count').textContent = `${eventsWithNotes} ${eventsWithNotes === 1 ? 'Note' : 'Notes'}`;
 
             listDiv.innerHTML = data.map(t => `
                 <div class="event-item p-2 border-bottom" 
