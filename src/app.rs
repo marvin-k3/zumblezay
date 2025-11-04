@@ -535,7 +535,8 @@ async fn stream_video(
 
         (start, end)
     } else {
-        (0_u64, (CHUNK_SIZE - 1).min(file_size - 1))
+        // When no range header is provided, send the entire file
+        (0_u64, file_size - 1)
     };
 
     let content_length = end - start + 1;
