@@ -1,4 +1,12 @@
+ARG GIT_BRANCH=unknown
+ARG IMAGE_TAG=unknown
+ARG GIT_SHA=unknown
+
 FROM rust:1.85-slim AS builder
+
+ARG GIT_BRANCH
+ARG IMAGE_TAG
+ARG GIT_SHA
 
 # Create a new empty shell project
 WORKDIR /usr/src/zumblezay
@@ -35,6 +43,9 @@ RUN touch src/lib.rs src/server_main.rs && cargo build --release --bin zumblezay
 
 # Runtime stage
 FROM debian:bookworm-slim
+ARG GIT_BRANCH
+ARG IMAGE_TAG
+ARG GIT_SHA
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     ffmpeg \
@@ -50,6 +61,9 @@ WORKDIR /app
 COPY --from=builder /usr/src/zumblezay/target/release/zumblezay_server .
 
 ENV RUST_LOG=info
+ENV APP_BUILD_BRANCH=${GIT_BRANCH} \
+    APP_BUILD_TAG=${IMAGE_TAG} \
+    APP_BUILD_COMMIT=${GIT_SHA}
 
 # Switch to non-root user
 USER zumblezay

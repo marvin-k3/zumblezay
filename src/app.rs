@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::process::Stdio;
@@ -154,35 +155,52 @@ fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
 
 // Add this new helper function
 fn get_build_info() -> String {
-    let mut info = format!(
-        "Version {}, built for {} by {}.",
-        built_info::PKG_VERSION,
-        built_info::TARGET,
-        built_info::RUSTC_VERSION
-    );
-
-    if let (Some(v), Some(dirty), Some(hash), Some(short_hash)) = (
-        built_info::GIT_VERSION,
-        built_info::GIT_DIRTY,
-        built_info::GIT_COMMIT_HASH,
-        built_info::GIT_COMMIT_HASH_SHORT,
-    ) {
-        info.push_str(&format!(
-            " I was built from git `{}`, commit {}, short_commit {}; the working directory was \"{}\".",
-            v,
-            hash,
-            short_hash,
-            if dirty { "dirty" } else { "clean" }
-        ));
+    fn clean(value: Option<String>) -> Option<String> {
+        value
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty() && v != "unknown")
     }
 
-    if let Some(r) = built_info::GIT_HEAD_REF {
-        info.push_str(&format!(" The branch was `{}`.\n", r));
-    } else {
-        info.push('\n');
+    let clean_env = |key: &str| clean(env::var(key).ok());
+
+    let mut parts = Vec::new();
+    parts.push(format!("Version {}", built_info::PKG_VERSION));
+
+    if let Some(tag) = clean_env("APP_BUILD_TAG") {
+        parts.push(format!("Image {}", tag));
     }
 
-    info
+    let branch = clean_env("APP_BUILD_BRANCH").or_else(|| {
+        clean(
+            built_info::GIT_HEAD_REF
+                .map(|r| r.strip_prefix("refs/heads/").unwrap_or(r).to_string()),
+        )
+    });
+    if let Some(branch) = branch {
+        parts.push(format!("Branch {}", branch));
+    }
+
+    let commit = clean_env("APP_BUILD_COMMIT")
+        .map(|sha| {
+            let short: String = sha.chars().take(7).collect();
+            if short.len() == 7 {
+                short
+            } else {
+                sha
+            }
+        })
+        .or_else(|| clean(built_info::GIT_COMMIT_HASH_SHORT.map(|s| s.to_string())));
+    if let Some(commit) = commit {
+        parts.push(format!("Commit {}", commit));
+    }
+
+    if let Some(dirty) = built_info::GIT_DIRTY {
+        if dirty {
+            parts.push("workspace dirty".to_string());
+        }
+    }
+
+    parts.join(" • ")
 }
 
 static TEMPLATES: OnceLock<Tera> = OnceLock::new();
