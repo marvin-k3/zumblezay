@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: ['main', 'dev', 'feat/*', 'feature/*']
     tags:
       - 'v*' # Add tag trigger for releases
   pull_request:
