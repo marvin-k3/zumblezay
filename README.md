@@ -2,7 +2,29 @@
 
 Zumblezay is an Axum-based service that collects camera events, transcripts, and AI-generated summaries. It exposes a JSON/HTML API for reviewing activity, downloading captions, and kicking off summarization jobs with OpenAI-compatible models.
 
-The project is set up so the application code and the integration test suite both talk to real SQLite databases. Temporary databases are created automatically for tests, which means you can exercise most of the stack without stubbing things out.
+- See `docs/AI_AGENT_GUIDE.md` for an architecture walk-through tuned for LLM-based tooling.
+- The primary binary is `zumblezay_server`; it wires databases, background workers, and the HTTP surface defined in `src/app.rs`.
+- Three SQLite databases are in play: a read-only events source, the application database (`zumblezay.db`), and a cache database for storyboard artefacts.
+
+## Quick start
+
+```bash
+# Run the server with explicit database paths
+cargo run --bin zumblezay_server -- \
+  --events-db /path/to/events.db \
+  --zumblezay-db data/zumblezay.db \
+  --cache-db data/cache.db
+```
+
+Key CLI switches (defined in `src/app.rs`):
+
+- `--whisper-url` / `WHISPER_URL`: upstream transcription endpoint (defaults to `http://localhost:9000/asr`).
+- `--enable-transcription`: toggle the background transcription worker.
+- `--enable-sync` / `--sync-interval`: control the event sync loop.
+- `--default-summary-model`: model identifier passed to the summary generator.
+- `--timezone`: overrides the timezone used in transcript exports.
+
+`cargo run --bin zumblezay_server -- --help` prints the full list of flags and defaults.
 
 ## Running the integration tests
 
@@ -44,7 +66,6 @@ Daily summaries are cached in the `daily_summaries` table. The tests demonstrate
 ## Useful endpoints
 
 The integration tests cover the most important routes; refer to them as living examples of request/response behaviour:
-
 - `GET /api/events` with filters for `date`, `camera_id`, `time_start`, `time_end`.
 - `GET /api/cameras` after calling `cache_camera_names`.
 - `GET /api/transcripts/json/{date}` and `GET /api/transcripts/csv/{date}` for transcript exports.
@@ -52,4 +73,4 @@ The integration tests cover the most important routes; refer to them as living e
 - `GET /api/captions/{event_id}` to stream WebVTT captions generated from the transcript JSON.
 - `GET /api/transcripts/summary/{date}` and related summary endpoints that either reuse cached summaries or call out to the configured AI provider.
 
-For additional examples open `tests/api_tests.rs`, where helper functions such as `insert_event_with_transcript` show the minimal inserts needed to mimic live data.
+For additional examples open `tests/api_tests.rs`, where helper functions such as `insert_event_with_transcript` show the minimal inserts needed to mimic live data. Pair that with the module map in `docs/AI_AGENT_GUIDE.md` when asking tooling to extend the service.
