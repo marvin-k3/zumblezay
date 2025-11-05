@@ -25,22 +25,6 @@
         height: 400px;
         --media-background-color: rgb(0 0 0);
     }
-    .storyboard {
-        position: relative;
-        width: 100%;
-        height: 90px;
-        background: #000;
-        overflow: hidden;
-    }
-    
-    .storyboard img {
-        position: absolute;
-        max-width: none;
-    }
-    
-    .storyboard-container {
-        margin-top: 10px;
-    }
     .event-preview {
         position: absolute;
         width: 160px;
@@ -256,11 +240,6 @@
                         </media-control-bar>
                     </media-controller>
                 </div>
-                <div class="storyboard-container">
-                    <div id="storyboard" class="storyboard">
-                        <img id="storyboard-img">
-                    </div>
-                </div> 
                 <!-- Add transcript container -->
                 <div class="card mt-3">
                     <div class="card-header d-flex justify-content-between align-items-center">
@@ -451,8 +430,6 @@
             console.error('Invalid event ID format');
             return;
         }
-        const storyboardImg = document.getElementById('storyboard-img');
-
         // Update URL without reloading the page
         const newUrl = new URL(window.location);
         newUrl.searchParams.set('video', eventId);
@@ -466,7 +443,6 @@
 
         // Remove existing event listeners
         videoPlayer.removeEventListener('timeupdate', updateActiveTranscriptSegment);
-        videoPlayer.removeEventListener('timeupdate', updateStoryboardPreview);
 
         fetch(`/api/event/${encodeURIComponent(eventId)}`)
         .then(response => {
@@ -500,12 +476,6 @@
             setTimeout(() => {
                 // Set new video source
                 videoPlayer.src = `/video/${encodeURIComponent(eventId)}`;
-                
-                if (storyboardImg) {
-                    storyboardImg.src = `/api/storyboard/image/${encodeURIComponent(eventId)}`;
-                    storyboardImg.style.left = '0';
-                    storyboardImg.style.top = '0';
-                }
                 
                 // Add caption track if transcription exists
                 if (data.has_transcript) {
@@ -549,37 +519,6 @@
             // Clear transcript
             transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
         });
-    }
-
-    function updateStoryboardPreview() {
-        const video = videoPlayer;
-        const storyboardImg = document.getElementById('storyboard-img');
-        
-        // Add null checks and verify textTracks exists
-        if (!video || !video.textTracks || video.textTracks.length < 2) {
-            return;
-        }
-        
-        const track = video.textTracks[1]; // metadata track
-        if (!track || !track.cues || track.cues.length === 0) {
-            return;
-        }
-        
-        const currentTime = video.currentTime;
-        for (let i = 0; i < track.cues.length; i++) {
-            const cue = track.cues[i];
-            if (currentTime >= cue.startTime && currentTime <= cue.endTime) {
-                try {
-                    const data = JSON.parse(cue.text);
-                    const [x, y, width, height] = data.xywh;
-                    storyboardImg.style.left = `-${x}px`;
-                    storyboardImg.style.top = `-${y}px`;
-                } catch (error) {
-                    console.error('Error parsing storyboard cue:', error);
-                }
-                break;
-            }
-        }
     }
 
     // Handle browser back/forward buttons
@@ -725,8 +664,6 @@
             // Add timeupdate event listener to highlight current segment
             videoPlayer.addEventListener('timeupdate', updateActiveTranscriptSegment);
             
-            // Also listen for video timeupdate to update storyboard
-            videoPlayer.addEventListener('timeupdate', updateStoryboardPreview);
         })
         .catch(error => {
             console.error('Error loading transcript:', error);
