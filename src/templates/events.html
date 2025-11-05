@@ -451,6 +451,7 @@
             console.error('Invalid event ID format');
             return;
         }
+        const storyboardImg = document.getElementById('storyboard-img');
 
         // Update URL without reloading the page
         const newUrl = new URL(window.location);
@@ -499,6 +500,12 @@
             setTimeout(() => {
                 // Set new video source
                 videoPlayer.src = `/video/${encodeURIComponent(eventId)}`;
+                
+                if (storyboardImg) {
+                    storyboardImg.src = `/api/storyboard/image/${encodeURIComponent(eventId)}`;
+                    storyboardImg.style.left = '0';
+                    storyboardImg.style.top = '0';
+                }
                 
                 // Add caption track if transcription exists
                 if (data.has_transcript) {
