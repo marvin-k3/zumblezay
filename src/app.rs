@@ -162,6 +162,7 @@ fn get_build_info() -> String {
     }
 
     let clean_env = |key: &str| clean(env::var(key).ok());
+    let clean_opt = |value: Option<&str>| clean(value.map(|v| v.to_string()));
 
     let mut parts = Vec::new();
     parts.push(format!("Version {}", built_info::PKG_VERSION));
@@ -180,17 +181,21 @@ fn get_build_info() -> String {
         parts.push(format!("Branch {}", branch));
     }
 
-    let commit = clean_env("APP_BUILD_COMMIT")
-        .map(|sha| {
-            let short: String = sha.chars().take(7).collect();
-            if short.len() == 7 {
-                short
-            } else {
-                sha
-            }
-        })
-        .or_else(|| clean(built_info::GIT_COMMIT_HASH_SHORT.map(|s| s.to_string())));
-    if let Some(commit) = commit {
+    let env_commit = clean_env("APP_BUILD_COMMIT");
+    let full_commit = env_commit
+        .clone()
+        .or_else(|| clean(built_info::GIT_COMMIT_HASH.map(|s| s.to_string())));
+
+    if let Some(commit) = full_commit {
+        let short: String = commit.chars().take(12).collect();
+        if commit.len() > short.len() {
+            parts.push(format!("Commit {}… (full: {})", short, commit));
+        } else {
+            parts.push(format!("Commit {}", commit));
+        }
+    } else if let Some(commit) =
+        clean(built_info::GIT_COMMIT_HASH_SHORT.map(|s| s.to_string()))
+    {
         parts.push(format!("Commit {}", commit));
     }
 
@@ -198,6 +203,28 @@ fn get_build_info() -> String {
         if dirty {
             parts.push("workspace dirty".to_string());
         }
+    }
+
+    if let Some(time) = clean(Some(built_info::BUILT_TIME_UTC.to_string())) {
+        parts.push(format!("Built {}", time));
+    }
+
+    if let Some(profile) = clean(Some(built_info::PROFILE.to_string())) {
+        parts.push(format!("Profile {}", profile));
+    }
+
+    if let Some(target) = clean(Some(built_info::TARGET.to_string())) {
+        parts.push(format!("Target {}", target));
+    }
+
+    if let Some(ci_platform) = clean_opt(built_info::CI_PLATFORM) {
+        parts.push(format!("CI {}", ci_platform));
+    }
+
+    if let Some(rustc_version) =
+        clean(Some(built_info::RUSTC_VERSION.to_string()))
+    {
+        parts.push(format!("Rustc {}", rustc_version));
     }
 
     parts.join(" • ")
