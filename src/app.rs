@@ -171,12 +171,12 @@ fn get_build_info() -> String {
         parts.push(format!("Image {}", tag));
     }
 
-    let branch = clean_env("APP_BUILD_BRANCH").or_else(|| {
-        clean(
-            built_info::GIT_HEAD_REF
-                .map(|r| r.strip_prefix("refs/heads/").unwrap_or(r).to_string()),
-        )
-    });
+    let branch =
+        clean_env("APP_BUILD_BRANCH").or_else(|| {
+            clean(built_info::GIT_HEAD_REF.map(|r| {
+                r.strip_prefix("refs/heads/").unwrap_or(r).to_string()
+            }))
+        });
     if let Some(branch) = branch {
         parts.push(format!("Branch {}", branch));
     }
