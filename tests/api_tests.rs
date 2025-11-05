@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{header, Request, StatusCode},
     Router,
 };
 use chrono::{LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
@@ -8,7 +8,10 @@ use http_body_util::BodyExt;
 use pretty_assertions::assert_eq;
 use rusqlite::params;
 use serde_json::json;
+use std::env;
 use std::io::ErrorKind;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::time;
 use tokio_util::bytes;
@@ -22,6 +25,17 @@ use zumblezay::AppState;
 fn app() -> (Arc<AppState>, Router) {
     // Create a minimal AppState for testing
     let app_state = Arc::new(AppState::new_for_testing());
+    let routes = zumblezay::app::routes(app_state.clone());
+    (app_state, routes)
+}
+
+fn app_with_custom_state<F>(customize: F) -> (Arc<AppState>, Router)
+where
+    F: FnOnce(&mut AppState),
+{
+    let mut state = AppState::new_for_testing();
+    customize(&mut state);
+    let app_state = Arc::new(state);
     let routes = zumblezay::app::routes(app_state.clone());
     (app_state, routes)
 }
@@ -931,6 +945,142 @@ async fn test_event_detail_and_captions_endpoints() {
         captions_text.contains("Visitor chatted at the door"),
         "VTT output missing transcript text"
     );
+}
+
+#[tokio::test]
+async fn test_video_streams_entire_file_without_range() {
+    init_test_logging();
+    let project_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let video_dir = project_root.join("testdata");
+    let video_filename = "10s-bars.mp4";
+    let file_path = video_dir.join(video_filename);
+    assert!(
+        file_path.exists(),
+        "expected test video at {}",
+        file_path.display()
+    );
+
+    let replacement_prefix = video_dir.to_string_lossy().into_owned();
+    let (app_state, app_router) = app_with_custom_state(|state| {
+        state.video_path_original_prefix = "/data".to_string();
+        state.video_path_replacement_prefix = replacement_prefix.clone();
+    });
+
+    let conn = app_state.zumblezay_db.get().unwrap();
+    let video_path = format!(
+        "{}/{}",
+        app_state.video_path_original_prefix, video_filename
+    );
+    conn.execute(
+        "INSERT INTO events (event_id, created_at, event_start, event_end, event_type, camera_id, video_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            "video-event",
+            0_i64,
+            0.0_f64,
+            10.0_f64,
+            "motion",
+            "camera-test",
+            video_path
+        ],
+    )
+    .unwrap();
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/video/video-event")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let expected = std::fs::read(&file_path).unwrap();
+
+    assert_eq!(body.len(), expected.len());
+    assert_eq!(body.as_ref(), expected.as_slice());
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap(),
+        "video/mp4"
+    );
+    assert_eq!(
+        headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .unwrap(),
+        expected.len().to_string()
+    );
+    let expected_range =
+        format!("bytes 0-{:}/{}", expected.len() - 1, expected.len());
+    assert_eq!(
+        headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap(),
+        expected_range
+    );
+}
+
+#[tokio::test]
+async fn test_status_api_reflects_runtime_metrics() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+
+    {
+        let mut last_processed = app_state.last_processed_time.lock().await;
+        *last_processed = 12345.5;
+    }
+
+    {
+        let mut tasks = app_state.active_tasks.lock().await;
+        tasks.insert("event-1".to_string(), "transcribing".to_string());
+        tasks.insert("event-2".to_string(), "summarizing".to_string());
+    }
+
+    app_state
+        .stats
+        .processed_count
+        .fetch_add(5, Ordering::Relaxed);
+    app_state.stats.error_count.fetch_add(1, Ordering::Relaxed);
+    app_state
+        .stats
+        .total_processing_time_ms
+        .fetch_add(2500, Ordering::Relaxed);
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["last_processed_time"].as_f64().unwrap(), 12345.5);
+    let active_tasks = payload["active_tasks"].as_object().unwrap();
+    assert_eq!(active_tasks.len(), 2);
+    assert_eq!(active_tasks["event-1"], "transcribing");
+    assert_eq!(active_tasks["event-2"], "summarizing");
+
+    let stats = payload["stats"].as_object().unwrap();
+    assert_eq!(stats["processed_count"], 5);
+    assert_eq!(stats["error_count"], 1);
+    assert_eq!(stats["total_processing_time_ms"], 2500);
+    let average = stats["average_processing_time_ms"].as_f64().unwrap();
+    assert!((average - 500.0).abs() < f64::EPSILON);
 }
 
 #[tokio::test]
