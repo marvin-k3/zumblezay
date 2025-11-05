@@ -379,6 +379,7 @@ mod storyboard_tests {
     use crate::test_utils::init_test_logging;
     use std::path::PathBuf;
     use tracing::{debug, info};
+
     #[tokio::test]
     async fn test_generate_storyboard() {
         init_test_logging();
