@@ -4,6 +4,11 @@
 /data/
 /data2/
 
+# Node / Playwright artifacts
+node_modules/
+test-results/
+playwright-report/
+
 # IDE specific files
 .idea/
 .vscode/

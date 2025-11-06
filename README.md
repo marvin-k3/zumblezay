@@ -45,6 +45,25 @@ If you need to reproduce one scenario in isolation, run it by name:
 cargo test --test api_tests -- test_transcript_summary_endpoints_return_cached_content -- --nocapture
 ```
 
+## Playwright UI tests
+
+Browser-level smoke tests live under `playwright-tests/` and are powered by Playwright.
+
+```bash
+# Install JS dependencies (once)
+npm install
+
+# Download the headless browsers (once)
+npm run playwright:install
+
+# Run the UI suite
+npm run test:ui
+```
+
+The Playwright config spins up `cargo run --bin playwright_server`, which seeds an in-memory test database, copies the sample `testdata/10s-bars.mp4`, and exposes the dashboard on `http://127.0.0.1:4173`. Override the host/port with `PLAYWRIGHT_TEST_HOST` / `PLAYWRIGHT_TEST_PORT` if you need to run multiple stacks side-by-side.
+
+If a test fails you can rerun it in headed mode with `npm run test:ui:headed` and inspect the captured trace via `npx playwright show-trace <path-to-trace.zip>`.
+
 ## Manually seeding data
 
 When you run the service locally you can seed the SQLite databases with the same shape the tests expect:

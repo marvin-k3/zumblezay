@@ -253,6 +253,10 @@ fn init_templates() -> Tera {
     tera
 }
 
+pub fn ensure_templates() {
+    TEMPLATES.get_or_init(init_templates);
+}
+
 #[axum::debug_handler]
 async fn get_status_page(State(state): State<Arc<AppState>>) -> Html<String> {
     let mut context = TeraContext::new();
@@ -1640,7 +1644,7 @@ pub async fn serve() -> Result<()> {
     };
 
     // Initialize templates
-    TEMPLATES.get_or_init(init_templates);
+    ensure_templates();
 
     // Start web server
     let app = routes(state);
