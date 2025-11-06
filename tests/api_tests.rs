@@ -369,6 +369,20 @@ async fn test_events_api() {
         .unwrap();
     }
 
+    conn.execute(
+        "INSERT INTO transcriptions (event_id, created_at, transcription_type, url, duration_ms, raw_response)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        params![
+            "test-event-1",
+            1672531200,
+            "whisper-local",
+            "https://example.com/transcript/test-event-1",
+            1234,
+            "{}"
+        ],
+    )
+    .unwrap();
+
     // Test with date filter - using fixed date "2022-12-31"
     let fixed_date = "2022-12-31";
     let (status, body) = make_api_request(
@@ -384,6 +398,19 @@ async fn test_events_api() {
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-2"));
     assert!(event_ids.contains(&"test-event-3"));
+
+    let event_with_transcript = events
+        .iter()
+        .find(|e| e["event_id"] == "test-event-1")
+        .expect("test-event-1 present");
+    assert_eq!(event_with_transcript["has_transcript"], json!(true));
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["event_id"] != "test-event-1")
+            .all(|e| e["has_transcript"] == json!(false)),
+        "Expected other events to have has_transcript=false"
+    );
 
     // Test with camera filter
     let (status, body) = make_api_request(

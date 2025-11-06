@@ -325,6 +325,8 @@ async fn get_completed_events(
         "Date filter is required".to_string(),
     ))?;
 
+    let transcription_type = state.transcription_service.clone();
+
     let (start_ts, end_ts) =
         time_util::parse_local_date_to_utc_range_with_time(
             &date,
@@ -340,7 +342,16 @@ async fn get_completed_events(
             FROM events
             WHERE event_start BETWEEN ? AND ?
           )
-          SELECT e1.event_id, e1.camera_id, e1.event_start, e1.event_end
+          SELECT e1.event_id,
+                 e1.camera_id,
+                 e1.event_start,
+                 e1.event_end,
+                 EXISTS(
+                    SELECT 1
+                    FROM transcriptions t
+                    WHERE t.event_id = e1.event_id
+                      AND t.transcription_type = ?
+                 ) AS has_transcript
           FROM filtered e1
           WHERE NOT EXISTS (
             SELECT 1
@@ -354,6 +365,7 @@ async fn get_completed_events(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     params.push(Box::new(start_ts));
     params.push(Box::new(end_ts));
+    params.push(Box::new(transcription_type));
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));
@@ -377,6 +389,7 @@ async fn get_completed_events(
                     .cloned(),
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
+                has_transcript: row.get(4)?,
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -626,6 +639,7 @@ struct TranscriptListItem {
     camera_name: Option<String>,
     event_start: f64,
     event_end: f64,
+    has_transcript: bool,
 }
 
 // Update the events page handler
