@@ -14,6 +14,38 @@ use tokio::signal;
 use zumblezay::app;
 use zumblezay::AppState;
 
+struct SeedEvent {
+    id: &'static str,
+    camera_id: &'static str,
+    date: &'static str,
+    time: &'static str,
+    transcript: Option<&'static str>,
+}
+
+const SEED_EVENTS: &[SeedEvent] = &[
+    SeedEvent {
+        id: "event-alpha",
+        camera_id: "camera-1",
+        date: "2024-05-01",
+        time: "08:15:00",
+        transcript: Some("Visitor left a package on the porch."),
+    },
+    SeedEvent {
+        id: "event-beta",
+        camera_id: "camera-2",
+        date: "2024-05-01",
+        time: "13:30:00",
+        transcript: None,
+    },
+    SeedEvent {
+        id: "event-gamma",
+        camera_id: "camera-3",
+        date: "2024-05-02",
+        time: "06:45:00",
+        transcript: Some("Morning patrol completed without incidents."),
+    },
+];
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -35,14 +67,14 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let mut state = AppState::new_for_testing();
-    let video_root = prepare_video_assets()?;
+    let video_root = prepare_video_assets(SEED_EVENTS)?;
     state.video_path_replacement_prefix = video_root
         .to_str()
         .ok_or_else(|| anyhow!("Video root path contains invalid UTF-8"))?
         .to_owned();
 
     let state = Arc::new(state);
-    seed_databases(&state).await?;
+    seed_databases(&state, SEED_EVENTS).await?;
     app::cache_camera_names(&state).await?;
     app::ensure_templates();
 
@@ -75,7 +107,7 @@ fn initialize_logging() {
         .try_init();
 }
 
-fn prepare_video_assets() -> Result<PathBuf> {
+fn prepare_video_assets(events: &[SeedEvent]) -> Result<PathBuf> {
     let project_root =
         std::env::current_dir().context("failed to get current dir")?;
     let source = project_root.join("testdata/10s-bars.mp4");
@@ -87,47 +119,60 @@ fn prepare_video_assets() -> Result<PathBuf> {
     }
 
     let video_root = project_root.join("target/playwright-videos");
-    let camera_dir = video_root.join("camera-1");
-    fs::create_dir_all(&camera_dir).with_context(|| {
-        format!("failed to create {}", camera_dir.display())
-    })?;
-
-    let destination = camera_dir.join("event-alpha.mp4");
-    if !destination.exists() {
-        fs::copy(&source, &destination).with_context(|| {
-            format!(
-                "failed to copy video from {} to {}",
-                source.display(),
-                destination.display()
-            )
+    for event in events {
+        let camera_dir = video_root.join(event.camera_id);
+        fs::create_dir_all(&camera_dir).with_context(|| {
+            format!("failed to create {}", camera_dir.display())
         })?;
+
+        let destination = camera_dir.join(format!("{}.mp4", event.id));
+        if !destination.exists() {
+            fs::copy(&source, &destination).with_context(|| {
+                format!(
+                    "failed to copy video from {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
     }
 
     Ok(video_root)
 }
 
-async fn seed_databases(state: &Arc<AppState>) -> Result<()> {
-    const EVENT_ID: &str = "event-alpha";
-    const CAMERA_ID: &str = "camera-1";
-    const EVENT_DATE: &str = "2024-05-01";
-    const EVENT_TIME: &str = "08:15:00";
+async fn seed_databases(
+    state: &Arc<AppState>,
+    events: &[SeedEvent],
+) -> Result<()> {
+    for event in events {
+        let (event_start, created_at) =
+            convert_local_to_epoch(state, event.date, event.time)?;
+        let event_end = event_start + 20.0;
 
-    let (event_start, created_at) =
-        convert_local_to_epoch(state, EVENT_DATE, EVENT_TIME)?;
-    let event_end = event_start + 20.0;
+        insert_event(
+            state,
+            event.id,
+            event.camera_id,
+            event_start,
+            event_end,
+            created_at,
+        )?;
 
-    insert_event(
-        state,
-        EVENT_ID,
-        CAMERA_ID,
-        event_start,
-        event_end,
-        created_at,
-    )?;
-    insert_transcript(state, EVENT_ID, created_at)
-        .context("failed to insert transcript")?;
-    insert_storyboard(state, EVENT_ID)
-        .context("failed to seed storyboard cache")?;
+        if let Some(transcript_text) = event.transcript {
+            insert_transcript(state, event.id, created_at, transcript_text)
+                .with_context(|| {
+                    format!("failed to insert transcript for {}", event.id)
+                })?;
+        } else {
+            remove_transcript(state, event.id).with_context(|| {
+                format!("failed to remove transcript for {}", event.id)
+            })?;
+        }
+
+        insert_storyboard(state, event.id).with_context(|| {
+            format!("failed to seed storyboard for {}", event.id)
+        })?;
+    }
 
     Ok(())
 }
@@ -202,17 +247,27 @@ fn insert_transcript(
     state: &Arc<AppState>,
     event_id: &str,
     created_at: i64,
+    text: &str,
 ) -> Result<()> {
     let conn = state.zumblezay_db.get()?;
+    let segments = serde_json::json!([
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.0,
+            "text": text
+        },
+        {
+            "id": 1,
+            "start": 3.5,
+            "end": 7.0,
+            "text": format!("{} (continued)", text)
+        }
+    ]);
+
     let raw_response = serde_json::json!({
-        "text": "Visitor left a package on the porch.",
-        "segments": [
-            {
-                "start": 0.0,
-                "end": 5.0,
-                "text": "Visitor left a package on the porch."
-            }
-        ]
+        "text": text,
+        "segments": segments
     });
 
     conn.execute(
@@ -239,6 +294,17 @@ fn insert_transcript(
         ],
     )
     .context("failed to insert transcription")?;
+
+    Ok(())
+}
+
+fn remove_transcript(state: &Arc<AppState>, event_id: &str) -> Result<()> {
+    let conn = state.zumblezay_db.get()?;
+    conn.execute(
+        "DELETE FROM transcriptions WHERE event_id = ?",
+        params![event_id],
+    )
+    .context("failed to remove transcription entry")?;
 
     Ok(())
 }
