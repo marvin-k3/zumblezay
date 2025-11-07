@@ -21,6 +21,12 @@ struct EventRetry {
     last_attempt: Option<i64>,
 }
 
+fn calculate_retry_delay_secs(attempt_count: i32) -> i64 {
+    let safe_attempt = attempt_count.max(1) - 1;
+    let backoff_multiplier = 1i64 << safe_attempt;
+    INITIAL_RETRY_DELAY_SECS * backoff_multiplier
+}
+
 // Define a trait for transcription service
 
 #[async_trait]
@@ -223,10 +229,8 @@ async fn process_single_event(
                 ],
             )?;
 
-            let next_retry_delay =
-                INITIAL_RETRY_DELAY_SECS * (1 << (attempt_count));
-            let next_retry_time =
-                retry_info.last_attempt.unwrap_or(0) + next_retry_delay;
+            let next_retry_delay = calculate_retry_delay_secs(attempt_count);
+            let next_retry_time = now + next_retry_delay;
             let next_retry_datetime =
                 chrono::DateTime::from_timestamp(next_retry_time, 0)
                     .unwrap()
@@ -657,5 +661,13 @@ mod process_events_tests {
         assert_eq!(event2_retry.last_attempt, Some(1672531200));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_calculate_retry_delay_secs() {
+        assert_eq!(calculate_retry_delay_secs(0), INITIAL_RETRY_DELAY_SECS);
+        assert_eq!(calculate_retry_delay_secs(1), INITIAL_RETRY_DELAY_SECS);
+        assert_eq!(calculate_retry_delay_secs(2), INITIAL_RETRY_DELAY_SECS * 2);
+        assert_eq!(calculate_retry_delay_secs(3), INITIAL_RETRY_DELAY_SECS * 4);
     }
 }

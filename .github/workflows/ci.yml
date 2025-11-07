@@ -21,7 +21,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install ffmpeg
-      run: sudo apt-get install -y ffmpeg
+      run: sudo apt-get update && sudo apt-get install -y ffmpeg
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -42,12 +42,39 @@ jobs:
       run: cargo test
       if: always()
 
+  ui:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: package-lock.json
+
+    - name: Install npm dependencies
+      run: npm ci
+
+    - name: Install Playwright browsers
+      run: npx playwright install --with-deps chromium
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - uses: Swatinem/rust-cache@v2
+
+    - name: Run Playwright UI tests
+      run: npm run test:ui
+
   coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
     
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

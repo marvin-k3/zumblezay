@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::process::Stdio;
@@ -154,35 +155,79 @@ fn check_file_is_writable(path: &str, file_type: &str) -> Result<()> {
 
 // Add this new helper function
 fn get_build_info() -> String {
-    let mut info = format!(
-        "Version {}, built for {} by {}.",
-        built_info::PKG_VERSION,
-        built_info::TARGET,
-        built_info::RUSTC_VERSION
-    );
-
-    if let (Some(v), Some(dirty), Some(hash), Some(short_hash)) = (
-        built_info::GIT_VERSION,
-        built_info::GIT_DIRTY,
-        built_info::GIT_COMMIT_HASH,
-        built_info::GIT_COMMIT_HASH_SHORT,
-    ) {
-        info.push_str(&format!(
-            " I was built from git `{}`, commit {}, short_commit {}; the working directory was \"{}\".",
-            v,
-            hash,
-            short_hash,
-            if dirty { "dirty" } else { "clean" }
-        ));
+    fn clean(value: Option<String>) -> Option<String> {
+        value
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty() && v != "unknown")
     }
 
-    if let Some(r) = built_info::GIT_HEAD_REF {
-        info.push_str(&format!(" The branch was `{}`.\n", r));
-    } else {
-        info.push('\n');
+    let clean_env = |key: &str| clean(env::var(key).ok());
+    let clean_opt = |value: Option<&str>| clean(value.map(|v| v.to_string()));
+
+    let mut parts = Vec::new();
+    parts.push(format!("Version {}", built_info::PKG_VERSION));
+
+    if let Some(tag) = clean_env("APP_BUILD_TAG") {
+        parts.push(format!("Image {}", tag));
     }
 
-    info
+    let branch =
+        clean_env("APP_BUILD_BRANCH").or_else(|| {
+            clean(built_info::GIT_HEAD_REF.map(|r| {
+                r.strip_prefix("refs/heads/").unwrap_or(r).to_string()
+            }))
+        });
+    if let Some(branch) = branch {
+        parts.push(format!("Branch {}", branch));
+    }
+
+    let env_commit = clean_env("APP_BUILD_COMMIT");
+    let full_commit = env_commit
+        .clone()
+        .or_else(|| clean(built_info::GIT_COMMIT_HASH.map(|s| s.to_string())));
+
+    if let Some(commit) = full_commit {
+        let short: String = commit.chars().take(12).collect();
+        if commit.len() > short.len() {
+            parts.push(format!("Commit {}… (full: {})", short, commit));
+        } else {
+            parts.push(format!("Commit {}", commit));
+        }
+    } else if let Some(commit) =
+        clean(built_info::GIT_COMMIT_HASH_SHORT.map(|s| s.to_string()))
+    {
+        parts.push(format!("Commit {}", commit));
+    }
+
+    if let Some(dirty) = built_info::GIT_DIRTY {
+        if dirty {
+            parts.push("workspace dirty".to_string());
+        }
+    }
+
+    if let Some(time) = clean(Some(built_info::BUILT_TIME_UTC.to_string())) {
+        parts.push(format!("Built {}", time));
+    }
+
+    if let Some(profile) = clean(Some(built_info::PROFILE.to_string())) {
+        parts.push(format!("Profile {}", profile));
+    }
+
+    if let Some(target) = clean(Some(built_info::TARGET.to_string())) {
+        parts.push(format!("Target {}", target));
+    }
+
+    if let Some(ci_platform) = clean_opt(built_info::CI_PLATFORM) {
+        parts.push(format!("CI {}", ci_platform));
+    }
+
+    if let Some(rustc_version) =
+        clean(Some(built_info::RUSTC_VERSION.to_string()))
+    {
+        parts.push(format!("Rustc {}", rustc_version));
+    }
+
+    parts.join(" • ")
 }
 
 static TEMPLATES: OnceLock<Tera> = OnceLock::new();
@@ -206,6 +251,10 @@ fn init_templates() -> Tera {
     )
     .unwrap();
     tera
+}
+
+pub fn ensure_templates() {
+    TEMPLATES.get_or_init(init_templates);
 }
 
 #[axum::debug_handler]
@@ -280,6 +329,8 @@ async fn get_completed_events(
         "Date filter is required".to_string(),
     ))?;
 
+    let transcription_type = state.transcription_service.clone();
+
     let (start_ts, end_ts) =
         time_util::parse_local_date_to_utc_range_with_time(
             &date,
@@ -295,7 +346,16 @@ async fn get_completed_events(
             FROM events
             WHERE event_start BETWEEN ? AND ?
           )
-          SELECT e1.event_id, e1.camera_id, e1.event_start, e1.event_end
+          SELECT e1.event_id,
+                 e1.camera_id,
+                 e1.event_start,
+                 e1.event_end,
+                 EXISTS(
+                    SELECT 1
+                    FROM transcriptions t
+                    WHERE t.event_id = e1.event_id
+                      AND t.transcription_type = ?
+                 ) AS has_transcript
           FROM filtered e1
           WHERE NOT EXISTS (
             SELECT 1
@@ -309,6 +369,7 @@ async fn get_completed_events(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     params.push(Box::new(start_ts));
     params.push(Box::new(end_ts));
+    params.push(Box::new(transcription_type));
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));
@@ -332,6 +393,7 @@ async fn get_completed_events(
                     .cloned(),
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
+                has_transcript: row.get(4)?,
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -581,6 +643,7 @@ struct TranscriptListItem {
     camera_name: Option<String>,
     event_start: f64,
     event_end: f64,
+    has_transcript: bool,
 }
 
 // Update the events page handler
@@ -1595,7 +1658,7 @@ pub async fn serve() -> Result<()> {
     };
 
     // Initialize templates
-    TEMPLATES.get_or_init(init_templates);
+    ensure_templates();
 
     // Start web server
     let app = routes(state);

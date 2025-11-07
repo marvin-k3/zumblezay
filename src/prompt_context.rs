@@ -77,9 +77,34 @@ impl Store {
         &self,
         key: Key,
     ) -> Result<Arc<Entry>, PromptContextError> {
-        let store = self.entries.read().await;
-        let entry = store.get(&key).ok_or(PromptContextError::NotFound)?;
-        Ok(entry.clone())
+        let now = time::Instant::now();
+
+        let (entry, expired) = {
+            let store = self.entries.read().await;
+            match store.get(&key) {
+                Some(entry) if entry.expires > now => {
+                    (Some(entry.clone()), false)
+                }
+                Some(_) => (None, true),
+                None => (None, false),
+            }
+        };
+
+        if let Some(entry) = entry {
+            return Ok(entry);
+        }
+
+        if expired {
+            let mut store = self.entries.write().await;
+            if let Some(entry) = store.get(&key) {
+                if entry.expires <= now {
+                    store.remove(&key);
+                }
+            }
+            return Err(PromptContextError::Expired);
+        }
+
+        Err(PromptContextError::NotFound)
     }
 
     /// Get the number of objects in the store.
@@ -99,13 +124,38 @@ impl Store {
         key: Key,
         offset: usize,
     ) -> Result<bytes::Bytes, PromptContextError> {
-        let store = self.entries.read().await;
-        let entry = store.get(&key).ok_or(PromptContextError::NotFound)?;
-        let object = entry
-            .objects
-            .get(offset)
-            .ok_or(PromptContextError::OffsetOutOfRange)?;
-        Ok(object.clone())
+        let now = time::Instant::now();
+
+        let (entry, expired) = {
+            let store = self.entries.read().await;
+            match store.get(&key) {
+                Some(entry) if entry.expires > now => {
+                    (Some(entry.clone()), false)
+                }
+                Some(_) => (None, true),
+                None => (None, false),
+            }
+        };
+
+        if let Some(entry) = entry {
+            let object = entry
+                .objects
+                .get(offset)
+                .ok_or(PromptContextError::OffsetOutOfRange)?;
+            return Ok(object.clone());
+        }
+
+        if expired {
+            let mut store = self.entries.write().await;
+            if let Some(entry) = store.get(&key) {
+                if entry.expires <= now {
+                    store.remove(&key);
+                }
+            }
+            return Err(PromptContextError::Expired);
+        }
+
+        Err(PromptContextError::NotFound)
     }
 
     /// Garbage collect expired entries.
@@ -336,6 +386,42 @@ mod tests {
 
         let result = store.get(key, 1).await;
         assert!(matches!(result, Err(PromptContextError::OffsetOutOfRange)));
+    }
+
+    #[tokio::test]
+    async fn test_get_expired_entry() {
+        let store = Store::new();
+        let key = "expired_key".to_string();
+        let data = bytes::Bytes::from("stale data");
+
+        store
+            .insert(
+                key.clone(),
+                vec![data.clone()],
+                time::Duration::from_millis(10),
+            )
+            .await;
+
+        tokio::time::sleep(time::Duration::from_millis(20)).await;
+
+        let result = store.get(key.clone(), 0).await;
+        assert!(matches!(result, Err(PromptContextError::Expired)));
+        assert!(!store.contains_key(&key).await);
+    }
+
+    #[tokio::test]
+    async fn test_get_entry_expired() {
+        let store = Store::new();
+        let key = "expired_entry".to_string();
+        store
+            .insert(key.clone(), vec![], time::Duration::from_millis(10))
+            .await;
+
+        tokio::time::sleep(time::Duration::from_millis(20)).await;
+
+        let result = store.get_entry(key.clone()).await;
+        assert!(matches!(result, Err(PromptContextError::Expired)));
+        assert!(!store.contains_key(&key).await);
     }
 
     #[tokio::test]
