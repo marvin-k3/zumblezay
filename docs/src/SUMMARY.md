@@ -2,6 +2,7 @@
 
 - [Introduction](introduction.md)
 - [Getting Started](getting-started.md)
+- [Development Workflow](development.md)
 - [Core Concepts](concepts.md)
 - [Data & Storage](data-storage.md)
 - [API Guide](api-guide.md)

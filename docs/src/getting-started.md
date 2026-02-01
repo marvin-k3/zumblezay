@@ -22,3 +22,6 @@ Helpful flags (full list via `--help`):
 - `--timezone`: override the timezone used in transcript exports.
 
 After the server starts, open the dashboard at `http://127.0.0.1:3000` (or whichever port you configured).
+
+## Local run helper
+For repeatable dev runs, use the `run.sh` helper and a gitignored `run.local.sh` file. See the Development Workflow chapter for details.
