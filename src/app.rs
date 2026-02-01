@@ -401,24 +401,10 @@ async fn get_completed_events(
                 SELECT event_id
                 FROM transcript_search
                 WHERE transcript_search MATCH ?
-             ),
-             matching_snippets AS (
-                SELECT event_id,
-                       snippet(
-                        transcript_search,
-                        1,
-                        '[[H]]',
-                        '[[/H]]',
-                        '…',
-                        12
-                       ) AS snippet
-                FROM transcript_search
-                WHERE transcript_search MATCH ?
              )
             ",
         );
         if let Some(query_string) = search_term.as_ref() {
-            params.push(Box::new(query_string.clone()));
             params.push(Box::new(query_string.clone()));
         }
     }
@@ -436,8 +422,27 @@ async fn get_completed_events(
                       AND t.transcription_type = ?
                  ) AS has_transcript",
     );
+    params.push(Box::new(transcription_type));
     if has_search {
-        query.push_str(", ms.snippet AS snippet");
+        query.push_str(
+            ",
+                 (
+                    SELECT snippet(
+                        transcript_search,
+                        1,
+                        '[[H]]',
+                        '[[/H]]',
+                        '…',
+                        12
+                    )
+                    FROM transcript_search
+                    WHERE event_id = e1.event_id
+                      AND transcript_search MATCH ?
+                 ) AS snippet",
+        );
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
     } else {
         query.push_str(", NULL AS snippet");
     }
@@ -445,13 +450,11 @@ async fn get_completed_events(
         "
           FROM events e1",
     );
-    params.push(Box::new(transcription_type));
 
     if has_search {
         query.push_str(
             "
-          JOIN matching m ON m.event_id = e1.event_id
-          JOIN matching_snippets ms ON ms.event_id = e1.event_id",
+          JOIN matching m ON m.event_id = e1.event_id",
         );
     }
 
