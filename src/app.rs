@@ -395,22 +395,91 @@ async fn get_completed_events(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     let has_search = search_term.is_some();
+    let limit = filters.limit.unwrap_or(200).clamp(1, 500);
+    let query_limit = limit.saturating_add(1);
     if has_search {
         query.push_str(
             "WITH matching AS (
-                SELECT event_id
-                FROM transcript_search
-                WHERE transcript_search MATCH ?
-             )
-            ",
+                SELECT ts.rowid AS ts_rowid, ts.event_id
+                FROM transcript_search ts
+                WHERE ts MATCH ?
+             ),
+             filtered AS (
+                SELECT e1.event_id,
+                       e1.camera_id,
+                       e1.event_start,
+                       e1.event_end,
+                       m.ts_rowid
+                FROM events e1
+                JOIN matching m ON m.event_id = e1.event_id
+                WHERE e1.event_start BETWEEN ? AND ?",
         );
+
         if let Some(query_string) = search_term.as_ref() {
             params.push(Box::new(query_string.clone()));
         }
-    }
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
 
-    query.push_str(
-        "
+        if let Some(camera) = filters.camera_id.clone() {
+            query.push_str(" AND e1.camera_id = ?");
+            params.push(Box::new(camera));
+        }
+
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+
+        query.push_str(
+            " ORDER BY e1.event_start DESC, e1.event_id DESC LIMIT ?",
+        );
+        params.push(Box::new(query_limit as i64));
+
+        query.push_str(
+            ")
+            SELECT f.event_id,
+                   f.camera_id,
+                   f.event_start,
+                   f.event_end,
+                   EXISTS(
+                      SELECT 1
+                      FROM transcriptions t
+                      WHERE t.event_id = f.event_id
+                        AND t.transcription_type = ?
+                   ) AS has_transcript,
+                   snippet(
+                      ts,
+                      1,
+                      '[[H]]',
+                      '[[/H]]',
+                      '…',
+                      12
+                   ) AS snippet
+            FROM filtered f
+            JOIN transcript_search ts ON ts.rowid = f.ts_rowid
+            ORDER BY f.event_start DESC, f.event_id DESC",
+        );
+        params.push(Box::new(transcription_type));
+    } else {
+        query.push_str(
+            "
           SELECT e1.event_id,
                  e1.camera_id,
                  e1.event_start,
@@ -420,46 +489,9 @@ async fn get_completed_events(
                     FROM transcriptions t
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
-                 ) AS has_transcript",
-    );
-    params.push(Box::new(transcription_type));
-    if has_search {
-        query.push_str(
-            ",
-                 (
-                    SELECT snippet(
-                        transcript_search,
-                        1,
-                        '[[H]]',
-                        '[[/H]]',
-                        '…',
-                        12
-                    )
-                    FROM transcript_search
-                    WHERE event_id = e1.event_id
-                      AND transcript_search MATCH ?
-                 ) AS snippet",
-        );
-        if let Some(query_string) = search_term.as_ref() {
-            params.push(Box::new(query_string.clone()));
-        }
-    } else {
-        query.push_str(", NULL AS snippet");
-    }
-    query.push_str(
-        "
-          FROM events e1",
-    );
-
-    if has_search {
-        query.push_str(
-            "
-          JOIN matching m ON m.event_id = e1.event_id",
-        );
-    }
-
-    query.push_str(
-        "
+                 ) AS has_transcript,
+                 NULL AS snippet
+          FROM events e1
           WHERE e1.event_start BETWEEN ? AND ?
             AND NOT EXISTS (
               SELECT 1
@@ -470,42 +502,46 @@ async fn get_completed_events(
                 AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
                 AND e2.event_start BETWEEN ? AND ?
             )",
-    );
-    params.push(Box::new(start_ts));
-    params.push(Box::new(end_ts));
-    params.push(Box::new(start_ts));
-    params.push(Box::new(end_ts));
-    if let Some(camera) = filters.camera_id {
-        query.push_str(" AND (e1.camera_id = ?)");
-        params.push(Box::new(camera));
-    }
-    let cursor_start = filters.cursor_start;
-    let cursor_event_id = filters.cursor_event_id.clone();
-    if cursor_start.is_some() ^ cursor_event_id.is_some() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "cursor_start and cursor_event_id must be provided together"
-                .to_string(),
-        ));
-    }
-
-    if let (Some(cursor_start), Some(cursor_event_id)) =
-        (cursor_start, cursor_event_id)
-    {
-        query.push_str(
-            " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
         );
-        params.push(Box::new(cursor_start));
-        params.push(Box::new(cursor_start));
-        params.push(Box::new(cursor_event_id));
+        params.push(Box::new(transcription_type));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
     }
+    if !has_search {
+        if let Some(camera) = filters.camera_id {
+            query.push_str(" AND (e1.camera_id = ?)");
+            params.push(Box::new(camera));
+        }
+    }
+    if !has_search {
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+    }
+    if !has_search {
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
 
-    query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
-
-    let limit = filters.limit.unwrap_or(200).clamp(1, 500);
-    let query_limit = limit.saturating_add(1);
-    query.push_str(" LIMIT ?");
-    params.push(Box::new(query_limit as i64));
+        query.push_str(" LIMIT ?");
+        params.push(Box::new(query_limit as i64));
+    }
 
     let mut stmt = conn
         .prepare(&query)
