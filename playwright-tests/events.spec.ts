@@ -12,6 +12,7 @@ const EVENT_WITHOUT_TRANSCRIPT_ID = 'event-beta';
 const CAMERA_WITHOUT_TRANSCRIPT = 'camera-2';
 const ALT_EVENT_ID = 'event-gamma';
 const ALT_CAMERA_ID = 'camera-3';
+const SEARCH_TERM = 'package';
 
 type LoadOptions = {
   date?: string;
@@ -129,13 +130,29 @@ test.describe('Events Dashboard', () => {
     await expect(eventList.first()).toContainText(ALT_CAMERA_ID);
 
     await page.click('#reset-filters');
-    const today = new Date().toLocaleDateString('en-CA');
+    const today = await page.evaluate(
+      () => new Date().toISOString().split('T')[0],
+    );
     await expect(dateFilter).toHaveValue(today);
     await expect(page.locator('#camera-filter')).toHaveValue('');
     await expect(page.locator('#time-start')).toHaveValue('');
     await expect(page.locator('#time-end')).toHaveValue('');
+    await expect(page.locator('#search-filter')).toHaveValue('');
     await expect(eventList).toHaveCount(0);
     await expect(page.locator('#event-list')).toContainText('No events available');
+  });
+
+  test('filters events by transcript search', async ({ page }) => {
+    const { eventList } = await loadEventsPage(page, { cameraId: null });
+
+    await expect(eventList).toHaveCount(2);
+
+    const searchInput = page.locator('#search-filter');
+    await searchInput.fill(SEARCH_TERM);
+
+    await expect(eventList).toHaveCount(1);
+    await expect(eventList.first()).toContainText(CAMERA_ID);
+    await expect(eventList.first()).toContainText('Transcript available');
   });
 
   test('handles events without transcripts gracefully', async ({ page }) => {

@@ -310,6 +310,25 @@ struct EventFilters {
     camera_id: Option<String>,
     time_start: Option<String>,
     time_end: Option<String>,
+    q: Option<String>,
+}
+
+fn prepare_search_match(term: &str) -> String {
+    let tokens: Vec<String> = term
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            let escaped = token.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        })
+        .collect();
+
+    if tokens.is_empty() {
+        let escaped = term.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    } else {
+        tokens.join(" AND ")
+    }
 }
 
 #[axum::debug_handler]
@@ -331,6 +350,13 @@ async fn get_completed_events(
 
     let transcription_type = state.transcription_service.clone();
 
+    let search_term = filters
+        .q
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(prepare_search_match);
+
     let (start_ts, end_ts) =
         time_util::parse_local_date_to_utc_range_with_time(
             &date,
@@ -345,7 +371,28 @@ async fn get_completed_events(
             SELECT *
             FROM events
             WHERE event_start BETWEEN ? AND ?
-          )
+          )",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(start_ts), Box::new(end_ts)];
+
+    let has_search = search_term.is_some();
+    if has_search {
+        query.push_str(
+            ",
+          matching AS (
+            SELECT event_id
+            FROM transcript_search
+            WHERE transcript_search MATCH ?
+          )",
+        );
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
+    }
+
+    query.push_str(
+        "
           SELECT e1.event_id,
                  e1.camera_id,
                  e1.event_start,
@@ -356,7 +403,19 @@ async fn get_completed_events(
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
                  ) AS has_transcript
-          FROM filtered e1
+          FROM filtered e1",
+    );
+    params.push(Box::new(transcription_type));
+
+    if has_search {
+        query.push_str(
+            "
+          JOIN matching m ON m.event_id = e1.event_id",
+        );
+    }
+
+    query.push_str(
+        "
           WHERE NOT EXISTS (
             SELECT 1
             FROM filtered e2
@@ -366,10 +425,6 @@ async fn get_completed_events(
               AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
           )",
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    params.push(Box::new(start_ts));
-    params.push(Box::new(end_ts));
-    params.push(Box::new(transcription_type));
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (camera_id = ?)");
         params.push(Box::new(camera));

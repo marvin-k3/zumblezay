@@ -197,6 +197,10 @@
                         <input type="time" class="form-control" id="time-end">
                     </div>
                 </div>
+                <div class="col-md-6">
+                    <label for="search-filter" class="form-label">Transcript Search</label>
+                    <input type="text" class="form-control" id="search-filter" placeholder="Search transcript text...">
+                </div>
                 <div class="col-md-12">
                     <button type="button" class="btn btn-secondary" id="reset-filters">Reset Filters</button>
                 </div>
@@ -289,8 +293,11 @@
         date: null,
         camera_id: '',
         timeStart: '',
-        timeEnd: ''
+        timeEnd: '',
+        q: ''
     };
+
+    let searchDebounce = null;
 
     function initializeFilters() {
         // Set default date to today
@@ -303,6 +310,13 @@
         document.getElementById('camera-filter').addEventListener('change', updateFilters);
         document.getElementById('time-start').addEventListener('change', updateFilters);
         document.getElementById('time-end').addEventListener('change', updateFilters);
+        const searchInput = document.getElementById('search-filter');
+        searchInput.addEventListener('input', () => {
+            if (searchDebounce) {
+                clearTimeout(searchDebounce);
+            }
+            searchDebounce = setTimeout(updateFilters, 300);
+        });
 
         // Load camera list
         loadCameras();
@@ -316,7 +330,8 @@
             date: document.getElementById('date-filter').value,
             camera_id: document.getElementById('camera-filter').value,
             timeStart: document.getElementById('time-start').value,
-            timeEnd: document.getElementById('time-end').value
+            timeEnd: document.getElementById('time-end').value,
+            q: document.getElementById('search-filter').value
         };
         updateEvents();
     }
@@ -339,6 +354,9 @@
         }
         if (currentFilters.timeEnd) {
             params.append('time_end', currentFilters.timeEnd);
+        }
+        if (currentFilters.q) {
+            params.append('q', currentFilters.q);
         }
 
         // Make API call with filters
@@ -640,11 +658,13 @@
         document.getElementById('camera-filter').value = '';
         document.getElementById('time-start').value = '';
         document.getElementById('time-end').value = '';
+        document.getElementById('search-filter').value = '';
         currentFilters = {
             date: today,
             camera_id: '',
             timeStart: '',
-            timeEnd: ''
+            timeEnd: '',
+            q: ''
         };
         updateEvents(); // Refresh events with reset filters
     }
