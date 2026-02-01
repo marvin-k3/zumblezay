@@ -7,6 +7,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rusqlite::Connection;
+use rusqlite_migration::{Migrations, M};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -300,76 +301,78 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
     })
 }
 
+fn zumblezay_migration_steps() -> Vec<M<'static>> {
+    vec![
+        M::up(
+            r#"
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                event_start REAL NOT NULL,
+                event_end REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                camera_id TEXT NOT NULL,
+                video_path TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS transcriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                transcription_type TEXT NOT NULL,
+                url TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                raw_response TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(event_id),
+                UNIQUE(event_id, transcription_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,                   -- Date in YYYY-MM-DD format
+                created_at INTEGER NOT NULL,          -- Unix timestamp of creation
+                model TEXT NOT NULL,                  -- Model used for generation (e.g., 'anthropic-claude-haiku')
+                prompt_name TEXT NOT NULL,            -- Name/identifier of the prompt used
+                summary_type TEXT NOT NULL,           -- Type of summary (e.g., 'text', 'json', 'markdown')
+                content TEXT NOT NULL,                -- The actual summary content
+                duration_ms INTEGER NOT NULL,         -- Time taken to generate the summary
+                UNIQUE(date, model, prompt_name, summary_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS corrupted_files (
+                event_id TEXT PRIMARY KEY,
+                video_path TEXT NOT NULL,
+                first_failure_at INTEGER NOT NULL,
+                last_attempt_at INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                last_error TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'failed'
+            );
+            "#,
+        ),
+        M::up(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_events_camera_start_end
+                ON events(camera_id, event_start, event_end);
+            "#,
+        ),
+    ]
+}
+
+fn apply_zumblezay_migrations(conn: &mut Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+
+    let migrations = Migrations::new(zumblezay_migration_steps());
+    migrations.to_latest(conn)?;
+
+    Ok(())
+}
+
 // Database initialization
 #[instrument]
 pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
     info!("Initializing zumblezay database");
-
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events (
-            event_id TEXT PRIMARY KEY,
-            created_at INTEGER NOT NULL,
-            event_start REAL NOT NULL,
-            event_end REAL NOT NULL,
-            event_type TEXT NOT NULL,
-            camera_id TEXT NOT NULL,
-            video_path TEXT
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_events_camera_start_end
-            ON events(camera_id, event_start, event_end)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS transcriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            transcription_type TEXT NOT NULL,
-            url TEXT NOT NULL,
-            duration_ms INTEGER NOT NULL,
-            raw_response TEXT NOT NULL,
-            FOREIGN KEY(event_id) REFERENCES events(event_id),
-            UNIQUE(event_id, transcription_type)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS daily_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,                   -- Date in YYYY-MM-DD format
-            created_at INTEGER NOT NULL,          -- Unix timestamp of creation
-            model TEXT NOT NULL,                  -- Model used for generation (e.g., 'anthropic-claude-haiku')
-            prompt_name TEXT NOT NULL,            -- Name/identifier of the prompt used
-            summary_type TEXT NOT NULL,           -- Type of summary (e.g., 'text', 'json', 'markdown')
-            content TEXT NOT NULL,                -- The actual summary content
-            duration_ms INTEGER NOT NULL,         -- Time taken to generate the summary
-            UNIQUE(date, model, prompt_name, summary_type)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS corrupted_files (
-            event_id TEXT PRIMARY KEY,
-            video_path TEXT NOT NULL,
-            first_failure_at INTEGER NOT NULL,
-            last_attempt_at INTEGER NOT NULL,
-            attempt_count INTEGER NOT NULL DEFAULT 1,
-            last_error TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'failed'
-        )",
-        [],
-    )?;
-
-    Ok(())
+    apply_zumblezay_migrations(conn)
 }
 
 pub fn init_cache_db(conn: &mut Connection) -> Result<()> {
@@ -392,4 +395,68 @@ pub fn init_cache_db(conn: &mut Connection) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::{init_zumblezay_db, zumblezay_migration_steps};
+    use anyhow::Result;
+    use rusqlite::{Connection, OptionalExtension};
+    use rusqlite_migration::Migrations;
+
+    fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    fn has_index(conn: &Connection, name: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    #[test]
+    fn migrations_apply_on_fresh_database() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+
+        init_zumblezay_db(&mut conn)?;
+
+        assert!(has_table(&conn, "events")?);
+        assert!(has_table(&conn, "transcriptions")?);
+        assert!(has_table(&conn, "daily_summaries")?);
+        assert!(has_table(&conn, "corrupted_files")?);
+        assert!(has_index(&conn, "idx_events_camera_start_end")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrations_upgrade_existing_schema() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+
+        // Apply only the first migration to simulate an older database.
+        let mut partial_steps = zumblezay_migration_steps();
+        let first_step = vec![partial_steps.remove(0)];
+        Migrations::new(first_step).to_latest(&mut conn)?;
+
+        assert!(!has_index(&conn, "idx_events_camera_start_end")?);
+
+        init_zumblezay_db(&mut conn)?;
+
+        assert!(has_index(&conn, "idx_events_camera_start_end")?);
+        assert!(has_table(&conn, "transcriptions")?);
+
+        Ok(())
+    }
 }
