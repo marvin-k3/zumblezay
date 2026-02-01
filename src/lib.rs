@@ -24,6 +24,7 @@ pub mod openai;
 pub mod process_events;
 pub mod prompt_context;
 pub mod prompts;
+pub mod schema_registry;
 pub mod storyboard;
 pub mod summary;
 #[cfg(test)]
@@ -356,6 +357,21 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
                 ON events(camera_id, event_start, event_end);
             "#,
         ),
+        M::up(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search
+                USING fts5(
+                    event_id UNINDEXED,
+                    content,
+                    tokenize = 'unicode61'
+                );
+
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            "#,
+        ),
     ]
 }
 
@@ -372,7 +388,9 @@ fn apply_zumblezay_migrations(conn: &mut Connection) -> Result<()> {
 #[instrument]
 pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
     info!("Initializing zumblezay database");
-    apply_zumblezay_migrations(conn)
+    apply_zumblezay_migrations(conn)?;
+    crate::transcripts::ensure_transcript_search_index(conn)?;
+    Ok(())
 }
 
 pub fn init_cache_db(conn: &mut Connection) -> Result<()> {
@@ -434,8 +452,10 @@ mod migration_tests {
 
         assert!(has_table(&conn, "events")?);
         assert!(has_table(&conn, "transcriptions")?);
+        assert!(has_table(&conn, "transcript_search")?);
         assert!(has_table(&conn, "daily_summaries")?);
         assert!(has_table(&conn, "corrupted_files")?);
+        assert!(has_table(&conn, "metadata")?);
         assert!(has_index(&conn, "idx_events_camera_start_end")?);
 
         Ok(())
@@ -456,6 +476,8 @@ mod migration_tests {
 
         assert!(has_index(&conn, "idx_events_camera_start_end")?);
         assert!(has_table(&conn, "transcriptions")?);
+        assert!(has_table(&conn, "transcript_search")?);
+        assert!(has_table(&conn, "metadata")?);
 
         Ok(())
     }
