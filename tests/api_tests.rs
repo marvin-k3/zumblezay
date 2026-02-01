@@ -162,10 +162,13 @@ async fn make_api_request(router: Router, uri: &str) -> (StatusCode, Vec<u8>) {
 }
 
 /// Helper function to validate API response and extract events
-fn validate_and_parse_events(
-    status: StatusCode,
-    body: &[u8],
-) -> Vec<serde_json::Value> {
+#[derive(Debug)]
+struct EventsPage {
+    events: Vec<serde_json::Value>,
+    next_cursor: Option<serde_json::Value>,
+}
+
+fn validate_and_parse_events(status: StatusCode, body: &[u8]) -> EventsPage {
     let body_str = String::from_utf8_lossy(body).to_string();
 
     assert_eq!(
@@ -176,14 +179,28 @@ fn validate_and_parse_events(
         body_str
     );
 
-    let events: Vec<serde_json::Value> = serde_json::from_slice(body).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
+    let events = payload["events"]
+        .as_array()
+        .expect("events payload to include events array")
+        .clone();
+    let next_cursor = payload.get("next_cursor").and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            Some(value.clone())
+        }
+    });
 
     debug!("Number of events returned: {}", events.len());
     for (i, event) in events.iter().enumerate() {
         debug!("Event {}: {:?}", i, event);
     }
 
-    events
+    EventsPage {
+        events,
+        next_cursor,
+    }
 }
 
 /// Helper function to extract event IDs from events
@@ -390,7 +407,8 @@ async fn test_events_api() {
         &format!("/api/events?date={}", fixed_date),
     )
     .await;
-    let events = validate_and_parse_events(status, &body);
+    let events_page = validate_and_parse_events(status, &body);
+    let events = &events_page.events;
 
     assert_eq!(events.len(), 3, "Expected 3 events for date {}", fixed_date);
     let event_ids = extract_event_ids(&events);
@@ -418,7 +436,8 @@ async fn test_events_api() {
         "/api/events?camera_id=camera1&date=2022-12-31",
     )
     .await;
-    let events = validate_and_parse_events(status, &body);
+    let events_page = validate_and_parse_events(status, &body);
+    let events = &events_page.events;
 
     // Verify camera-filtered events
     assert!(!events.is_empty());
@@ -438,7 +457,8 @@ async fn test_events_api() {
 
     let (status, body) =
         make_api_request(app_router.clone(), &time_query_url).await;
-    let events = validate_and_parse_events(status, &body);
+    let events_page = validate_and_parse_events(status, &body);
+    let events = &events_page.events;
     let event_ids = extract_event_ids(&events);
 
     assert!(event_ids.contains(&"test-event-1"));
@@ -460,7 +480,8 @@ async fn test_events_api() {
 
     let (status, body) =
         make_api_request(app_router.clone(), &time_query_url).await;
-    let events = validate_and_parse_events(status, &body);
+    let events_page = validate_and_parse_events(status, &body);
+    let events = &events_page.events;
 
     assert_eq!(
         events.len(),
@@ -471,6 +492,37 @@ async fn test_events_api() {
     let event_ids = extract_event_ids(&events);
 
     assert!(event_ids.contains(&"test-event-3"));
+
+    // Test cursor pagination
+    let (status, body) = make_api_request(
+        app_router.clone(),
+        "/api/events?date=2022-12-31&limit=2",
+    )
+    .await;
+    let events_page = validate_and_parse_events(status, &body);
+    let events = &events_page.events;
+    assert_eq!(events.len(), 2, "Expected 2 events for limit=2");
+    let first_page_ids = extract_event_ids(events);
+
+    let cursor = events_page.next_cursor.expect("expected next cursor");
+    let cursor_start = cursor["event_start"].as_f64().expect("cursor start");
+    let cursor_event_id = cursor["event_id"].as_str().expect("cursor id");
+
+    let (status, body) = make_api_request(
+        app_router.clone(),
+        &format!(
+            "/api/events?date=2022-12-31&limit=2&cursor_start={}&cursor_event_id={}",
+            cursor_start, cursor_event_id
+        ),
+    )
+    .await;
+    let next_page = validate_and_parse_events(status, &body);
+    let next_ids = extract_event_ids(&next_page.events);
+
+    assert!(
+        next_ids.iter().all(|id| !first_page_ids.contains(id)),
+        "Expected pagination to avoid overlapping event IDs"
+    );
 }
 
 #[tokio::test]
