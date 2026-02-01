@@ -247,6 +247,12 @@
                     </select>
                 </div>
                 <div class="col-md-3">
+                    <div class="form-check form-switch mt-4">
+                        <input class="form-check-input" type="checkbox" id="snippet-toggle" checked>
+                        <label class="form-check-label" for="snippet-toggle">Show excerpts</label>
+                    </div>
+                </div>
+                <div class="col-md-3">
                     <label for="date-start" class="form-label">Date Start</label>
                     <input type="date" class="form-control" id="date-start">
                 </div>
@@ -365,6 +371,7 @@
     let nextCursor = null;
     let loadedEventIds = new Set();
     let autoRefreshTimer = null;
+    let showSnippets = true;
 
     let currentFilters = {
         dateStart: null,
@@ -536,6 +543,7 @@
         const dateEndInput = document.getElementById('date-end');
         const searchForm = document.getElementById('search-form');
         const resetButton = document.getElementById('search-reset');
+        const snippetToggle = document.getElementById('snippet-toggle');
 
         const startDate = formatDate(addDays(today, -29));
         const endDate = formatDate(today);
@@ -553,12 +561,22 @@
             });
         }
 
+        if (snippetToggle) {
+            snippetToggle.addEventListener('change', () => {
+                showSnippets = snippetToggle.checked;
+                reRenderEvents();
+            });
+        }
+
         if (resetButton) {
             resetButton.addEventListener('click', () => {
                 document.getElementById('search-filter').value = '';
                 document.getElementById('camera-filter').value = '';
                 document.getElementById('time-start').value = '';
                 document.getElementById('time-end').value = '';
+                if (snippetToggle) {
+                    snippetToggle.checked = true;
+                }
                 if (dateStartInput) dateStartInput.value = startDate;
                 if (dateEndInput) dateEndInput.value = endDate;
                 currentFilters = {
@@ -569,6 +587,7 @@
                     timeEnd: '',
                     q: ''
                 };
+                showSnippets = true;
                 clearResults();
                 setListEmptyMessage('Run a search to see results.');
                 updateResultsMeta(0);
@@ -638,6 +657,17 @@
         loadedEventIds.clear();
         nextCursor = null;
         updateLoadMore();
+    }
+
+    function reRenderEvents() {
+        const listDiv = document.getElementById('event-list');
+        const items = listDiv.querySelectorAll('.event-item');
+        items.forEach(item => {
+            const snippet = item.querySelector('.event-snippet');
+            if (snippet) {
+                snippet.style.display = showSnippets ? 'block' : 'none';
+            }
+        });
     }
 
     function fetchEvents({ append }) {
@@ -715,7 +745,7 @@
             loadedEventIds.add(t.event_id);
             const duration = Math.max(Math.round(t.event_end - t.event_start), 1);
             const cameraLabel = t.camera_name || t.camera_id;
-            const snippet = t.snippet ? `<div class="small text-muted mt-1">${renderSnippet(t.snippet)}</div>` : '';
+            const snippet = t.snippet ? `<div class="event-snippet small text-muted mt-1" style="display:${showSnippets ? 'block' : 'none'}">${renderSnippet(t.snippet)}</div>` : '';
             return `
                 <div class="event-item p-2 border-bottom"
                      onclick="loadVideo('${t.event_id}')"
