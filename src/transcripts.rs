@@ -177,7 +177,7 @@ pub fn rebuild_transcript_search(
 
         let event_id: String = row.get(0)?;
         let raw_response = row.get_ref(1)?.as_str()?;
-        match serde_json::from_str::<Value>(&raw_response) {
+        match serde_json::from_str::<Value>(raw_response) {
             Ok(raw_json) => {
                 if let Some(content) = build_search_document(&raw_json) {
                     insert_stmt.execute(params![event_id, content])?;
