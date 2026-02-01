@@ -359,6 +359,12 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
         ),
         M::up(
             r#"
+            CREATE INDEX IF NOT EXISTS idx_events_start_event
+                ON events(event_start DESC, event_id DESC);
+            "#,
+        ),
+        M::up(
+            r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search
                 USING fts5(
                     event_id UNINDEXED,

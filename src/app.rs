@@ -391,38 +391,31 @@ async fn get_completed_events(
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let mut query: String = String::from(
-        "WITH filtered AS (
-            SELECT *
-            FROM events
-            WHERE event_start BETWEEN ? AND ?
-          )",
-    );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-        vec![Box::new(start_ts), Box::new(end_ts)];
+    let mut query: String = String::from("");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     let has_search = search_term.is_some();
     if has_search {
         query.push_str(
+            "WITH matching AS (
+                SELECT event_id
+                FROM transcript_search
+                WHERE transcript_search MATCH ?
+             ),
+             matching_snippets AS (
+                SELECT event_id,
+                       snippet(
+                        transcript_search,
+                        1,
+                        '[[H]]',
+                        '[[/H]]',
+                        '…',
+                        12
+                       ) AS snippet
+                FROM transcript_search
+                WHERE transcript_search MATCH ?
+             )
             ",
-          matching AS (
-            SELECT event_id
-            FROM transcript_search
-            WHERE transcript_search MATCH ?
-          ),
-          matching_snippets AS (
-            SELECT event_id,
-                   snippet(
-                    transcript_search,
-                    1,
-                    '[[H]]',
-                    '[[/H]]',
-                    '…',
-                    12
-                   ) AS snippet
-            FROM transcript_search
-            WHERE transcript_search MATCH ?
-          )",
         );
         if let Some(query_string) = search_term.as_ref() {
             params.push(Box::new(query_string.clone()));
@@ -450,7 +443,7 @@ async fn get_completed_events(
     }
     query.push_str(
         "
-          FROM filtered e1",
+          FROM events e1",
     );
     params.push(Box::new(transcription_type));
 
@@ -464,15 +457,21 @@ async fn get_completed_events(
 
     query.push_str(
         "
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM filtered e2
-            WHERE e2.camera_id = e1.camera_id
-              AND e2.event_start <= e1.event_start
-              AND e2.event_end >= e1.event_end
-              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
-          )",
+          WHERE e1.event_start BETWEEN ? AND ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM events e2
+              WHERE e2.camera_id = e1.camera_id
+                AND e2.event_start <= e1.event_start
+                AND e2.event_end >= e1.event_end
+                AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+                AND e2.event_start BETWEEN ? AND ?
+            )",
     );
+    params.push(Box::new(start_ts));
+    params.push(Box::new(end_ts));
+    params.push(Box::new(start_ts));
+    params.push(Box::new(end_ts));
     if let Some(camera) = filters.camera_id {
         query.push_str(" AND (e1.camera_id = ?)");
         params.push(Box::new(camera));
