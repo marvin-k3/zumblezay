@@ -425,10 +425,11 @@
 
     function initializeFilters() {
         const today = new Date();
+        const urlFilters = readFiltersFromUrl();
         if (mode === 'latest') {
-            initializeLatestFilters(today);
+            initializeLatestFilters(today, urlFilters);
         } else {
-            initializeSearchFilters(today);
+            initializeSearchFilters(today, urlFilters);
         }
 
         loadCameras();
@@ -436,12 +437,16 @@
         if (mode === 'latest') {
             refreshLatest();
         } else {
-            setListEmptyMessage('Run a search to see results.');
-            updateResultsMeta(0);
+            if (urlFilters && Object.keys(urlFilters).length > 0) {
+                runSearch();
+            } else {
+                setListEmptyMessage('Run a search to see results.');
+                updateResultsMeta(0);
+            }
         }
     }
 
-    function initializeLatestFilters(today) {
+    function initializeLatestFilters(today, urlFilters) {
         const rangeSelect = document.getElementById('range-preset');
         const customFields = document.getElementById('custom-range-fields');
         const dateStartInput = document.getElementById('date-start');
@@ -535,10 +540,49 @@
             updateAutoRefresh();
         }
 
-        applyRangePreset('today');
+        if (urlFilters?.date_start || urlFilters?.date_end) {
+            if (rangeSelect) {
+                rangeSelect.value = 'custom';
+            }
+            if (customFields) {
+                customFields.style.display = 'block';
+            }
+            if (dateStartInput && urlFilters.date_start) {
+                dateStartInput.value = urlFilters.date_start;
+            }
+            if (dateEndInput && urlFilters.date_end) {
+                dateEndInput.value = urlFilters.date_end;
+            }
+            currentFilters.dateStart = dateStartInput?.value || '';
+            currentFilters.dateEnd = dateEndInput?.value || '';
+        } else if (urlFilters?.range && rangeSelect) {
+            rangeSelect.value = urlFilters.range;
+            if (urlFilters.range === 'custom') {
+                if (customFields) {
+                    customFields.style.display = 'block';
+                }
+            } else {
+                if (customFields) {
+                    customFields.style.display = 'none';
+                }
+                applyRangePreset(urlFilters.range);
+            }
+        } else {
+            applyRangePreset('today');
+        }
+
+        if (urlFilters?.camera_id) {
+            document.getElementById('camera-filter').value = urlFilters.camera_id;
+        }
+        if (urlFilters?.time_start) {
+            document.getElementById('time-start').value = urlFilters.time_start;
+        }
+        if (urlFilters?.time_end) {
+            document.getElementById('time-end').value = urlFilters.time_end;
+        }
     }
 
-    function initializeSearchFilters(today) {
+    function initializeSearchFilters(today, urlFilters) {
         const dateStartInput = document.getElementById('date-start');
         const dateEndInput = document.getElementById('date-end');
         const searchForm = document.getElementById('search-form');
@@ -548,11 +592,15 @@
         const startDate = formatDate(addDays(today, -29));
         const endDate = formatDate(today);
 
-        if (dateStartInput) dateStartInput.value = startDate;
-        if (dateEndInput) dateEndInput.value = endDate;
+        if (dateStartInput) {
+            dateStartInput.value = urlFilters?.date_start || startDate;
+        }
+        if (dateEndInput) {
+            dateEndInput.value = urlFilters?.date_end || endDate;
+        }
 
-        currentFilters.dateStart = startDate;
-        currentFilters.dateEnd = endDate;
+        currentFilters.dateStart = dateStartInput?.value || startDate;
+        currentFilters.dateEnd = dateEndInput?.value || endDate;
 
         if (searchForm) {
             searchForm.addEventListener('submit', (event) => {
@@ -562,6 +610,10 @@
         }
 
         if (snippetToggle) {
+            if (urlFilters?.show_snippets === 'false') {
+                snippetToggle.checked = false;
+                showSnippets = false;
+            }
             snippetToggle.addEventListener('change', () => {
                 showSnippets = snippetToggle.checked;
                 reRenderEvents();
@@ -593,6 +645,19 @@
                 updateResultsMeta(0);
             });
         }
+
+        if (urlFilters?.q) {
+            document.getElementById('search-filter').value = urlFilters.q;
+        }
+        if (urlFilters?.camera_id) {
+            document.getElementById('camera-filter').value = urlFilters.camera_id;
+        }
+        if (urlFilters?.time_start) {
+            document.getElementById('time-start').value = urlFilters.time_start;
+        }
+        if (urlFilters?.time_end) {
+            document.getElementById('time-end').value = urlFilters.time_end;
+        }
     }
 
     function updateFiltersFromForm() {
@@ -608,12 +673,69 @@
 
     function refreshLatest() {
         updateFiltersFromForm();
+        updateUrlFromFilters();
         fetchEvents({ append: false });
     }
 
     function runSearch() {
         updateFiltersFromForm();
+        updateUrlFromFilters();
         fetchEvents({ append: false });
+    }
+
+    function readFiltersFromUrl() {
+        const url = new URL(window.location.href);
+        const params = url.searchParams;
+        const filters = {};
+        const keys = [
+            'date_start',
+            'date_end',
+            'camera_id',
+            'time_start',
+            'time_end',
+            'q',
+            'range',
+            'show_snippets'
+        ];
+        keys.forEach(key => {
+            if (params.has(key)) {
+                filters[key] = params.get(key);
+            }
+        });
+        return filters;
+    }
+
+    function updateUrlFromFilters() {
+        const url = new URL(window.location.href);
+        const params = url.searchParams;
+        const keepVideo = params.get('video');
+        params.forEach((_, key) => {
+            if (key !== 'video') {
+                params.delete(key);
+            }
+        });
+
+        if (currentFilters.dateStart) params.set('date_start', currentFilters.dateStart);
+        if (currentFilters.dateEnd) params.set('date_end', currentFilters.dateEnd);
+        if (currentFilters.camera_id) params.set('camera_id', currentFilters.camera_id);
+        if (currentFilters.timeStart) params.set('time_start', currentFilters.timeStart);
+        if (currentFilters.timeEnd) params.set('time_end', currentFilters.timeEnd);
+        if (currentFilters.q) params.set('q', currentFilters.q);
+
+        if (mode === 'latest') {
+            const rangeSelect = document.getElementById('range-preset');
+            if (rangeSelect && rangeSelect.value) {
+                params.set('range', rangeSelect.value);
+            }
+        } else {
+            params.set('show_snippets', showSnippets ? 'true' : 'false');
+        }
+
+        if (keepVideo) {
+            params.set('video', keepVideo);
+        }
+
+        window.history.replaceState({}, '', url);
     }
 
     function buildQueryParams(includeCursor) {
