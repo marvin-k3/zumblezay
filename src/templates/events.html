@@ -715,6 +715,7 @@
             loadedEventIds.add(t.event_id);
             const duration = Math.max(Math.round(t.event_end - t.event_start), 1);
             const cameraLabel = t.camera_name || t.camera_id;
+            const snippet = t.snippet ? `<div class="small text-muted mt-1">${renderSnippet(t.snippet)}</div>` : '';
             return `
                 <div class="event-item p-2 border-bottom"
                      onclick="loadVideo('${t.event_id}')"
@@ -728,6 +729,7 @@
                         ` : ''}
                     </div>
                     <div class="small text-muted">${formatTimestamp(t.event_start)} - ${duration} seconds</div>
+                    ${snippet}
                     <div class="event-preview">
                         <img>
                     </div>
@@ -744,6 +746,17 @@
 
     function formatTimestamp(timestamp) {
         return new Date(timestamp * 1000).toLocaleString();
+    }
+
+    function renderSnippet(snippet) {
+        if (!snippet) return '';
+        const escaped = snippet
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
+        return escaped
+            .replaceAll('[[H]]', '<mark>')
+            .replaceAll('[[/H]]', '</mark>');
     }
 
     function loadCameras() {

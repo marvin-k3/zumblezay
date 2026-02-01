@@ -205,6 +205,9 @@ test.describe('Events Dashboard', () => {
     await expect(eventList).toHaveCount(1);
     await expect(eventList.first()).toContainText(CAMERA_ID);
     await expect(eventList.first()).toContainText('Transcript available');
+    await expect(eventList.first().locator('mark').first()).toContainText(
+      SEARCH_TERM,
+    );
   });
 
   test('handles events without transcripts gracefully', async ({ page }) => {

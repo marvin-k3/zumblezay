@@ -409,9 +409,23 @@ async fn get_completed_events(
             SELECT event_id
             FROM transcript_search
             WHERE transcript_search MATCH ?
+          ),
+          matching_snippets AS (
+            SELECT event_id,
+                   snippet(
+                    transcript_search,
+                    1,
+                    '[[H]]',
+                    '[[/H]]',
+                    '…',
+                    12
+                   ) AS snippet
+            FROM transcript_search
+            WHERE transcript_search MATCH ?
           )",
         );
         if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
             params.push(Box::new(query_string.clone()));
         }
     }
@@ -427,7 +441,15 @@ async fn get_completed_events(
                     FROM transcriptions t
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
-                 ) AS has_transcript
+                 ) AS has_transcript",
+    );
+    if has_search {
+        query.push_str(", ms.snippet AS snippet");
+    } else {
+        query.push_str(", NULL AS snippet");
+    }
+    query.push_str(
+        "
           FROM filtered e1",
     );
     params.push(Box::new(transcription_type));
@@ -435,7 +457,8 @@ async fn get_completed_events(
     if has_search {
         query.push_str(
             "
-          JOIN matching m ON m.event_id = e1.event_id",
+          JOIN matching m ON m.event_id = e1.event_id
+          JOIN matching_snippets ms ON ms.event_id = e1.event_id",
         );
     }
 
@@ -500,6 +523,7 @@ async fn get_completed_events(
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
                 has_transcript: row.get(4)?,
+                snippet: if has_search { row.get(5)? } else { None },
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -765,6 +789,7 @@ struct TranscriptListItem {
     event_start: f64,
     event_end: f64,
     has_transcript: bool,
+    snippet: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
