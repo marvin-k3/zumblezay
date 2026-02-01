@@ -460,6 +460,8 @@ pub async fn get_transcripts_with_event_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema_registry::SchemaRegistry;
+    use rusqlite::OptionalExtension;
     // Remove unused imports
 
     // Helper function to set up a test database with events and transcriptions
@@ -585,6 +587,72 @@ mod tests {
         assert_eq!(
             saved_response, raw_response,
             "Saved transcript should match the original"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_save_transcript_updates_search_index(
+    ) -> Result<(), anyhow::Error> {
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        let conn = state.zumblezay_db.get()?;
+        let (event_id, event_start, event_end): (String, f64, f64) = conn
+            .query_row(
+                "SELECT event_id, event_start, event_end FROM events WHERE camera_id = 'camera1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        let event = Event {
+            id: event_id,
+            type_: "motion".to_string(),
+            camera_id: "camera1".to_string(),
+            camera_name: Some("Living Room".to_string()),
+            start: event_start,
+            end: event_end,
+            path: Some("/data/videos/test1.mp4".to_string()),
+        };
+
+        let raw_response = r#"{"text": "Search index should include this"}"#;
+        save_transcript(&state, &event, raw_response, 250).await?;
+
+        let indexed: Option<String> = conn
+            .query_row(
+                "SELECT content FROM transcript_search WHERE event_id = ?",
+                params![event.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        assert!(
+            indexed
+                .as_ref()
+                .map(|value| value.contains("Search index should include this"))
+                .unwrap_or(false),
+            "Expected transcript_search to include the transcript text"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transcript_search_metadata_is_current() -> Result<(), anyhow::Error>
+    {
+        let state = AppState::new_for_testing();
+        let mut conn = state.zumblezay_db.get()?;
+
+        ensure_transcript_search_index(&mut conn)?;
+
+        let registry = SchemaRegistry::new(&conn)?;
+        let state = registry.current_state(&TRANSCRIPT_SEARCH_ARTIFACT)?;
+
+        assert!(
+            state.as_ref().map(|current| current.version)
+                == Some(TRANSCRIPT_SEARCH_SCHEMA_VERSION as i64),
+            "Expected transcript search schema version to be current"
         );
 
         Ok(())
