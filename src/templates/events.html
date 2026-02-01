@@ -209,6 +209,20 @@
                     <button type="button" class="btn btn-primary" id="latest-refresh">Refresh</button>
                     <button type="button" class="btn btn-outline-secondary" id="latest-reset">Reset</button>
                 </div>
+                <div class="col-md-4">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="auto-refresh-toggle" checked>
+                            <label class="form-check-label" for="auto-refresh-toggle">Auto-refresh</label>
+                        </div>
+                        <select class="form-select w-auto" id="auto-refresh-interval">
+                            <option value="10">10s</option>
+                            <option value="15" selected>15s</option>
+                            <option value="30">30s</option>
+                            <option value="60">60s</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="col-12">
                     <div class="filter-hint" id="latest-hint">Showing the most recent events for the selected range.</div>
                 </div>
@@ -350,6 +364,7 @@
     let isLoading = false;
     let nextCursor = null;
     let loadedEventIds = new Set();
+    let autoRefreshTimer = null;
 
     let currentFilters = {
         dateStart: null,
@@ -424,6 +439,8 @@
         const customFields = document.getElementById('custom-range-fields');
         const dateStartInput = document.getElementById('date-start');
         const dateEndInput = document.getElementById('date-end');
+        const autoRefreshToggle = document.getElementById('auto-refresh-toggle');
+        const autoRefreshInterval = document.getElementById('auto-refresh-interval');
 
         function applyRangePreset(value) {
             if (!dateStartInput || !dateEndInput) return;
@@ -493,6 +510,22 @@
                 currentFilters.timeEnd = '';
                 refreshLatest();
             });
+        }
+
+        if (autoRefreshToggle && autoRefreshInterval) {
+            const updateAutoRefresh = () => {
+                if (autoRefreshTimer) {
+                    clearInterval(autoRefreshTimer);
+                    autoRefreshTimer = null;
+                }
+                if (autoRefreshToggle.checked) {
+                    const seconds = parseInt(autoRefreshInterval.value, 10);
+                    autoRefreshTimer = setInterval(refreshLatest, seconds * 1000);
+                }
+            };
+            autoRefreshToggle.addEventListener('change', updateAutoRefresh);
+            autoRefreshInterval.addEventListener('change', updateAutoRefresh);
+            updateAutoRefresh();
         }
 
         applyRangePreset('today');
