@@ -1,8 +1,8 @@
 # API Guide
 
-Zumblezay serves both HTML pages (`/`, `/events`, `/status`, `/summary`, `/transcript`) and JSON endpoints. Highlights:
+Zumblezay serves both HTML pages (`/events/latest`, `/events/search`, `/status`, `/summary`, `/transcript`) and JSON endpoints. Highlights:
 
-- `GET /api/events?date=YYYY-MM-DD&camera_id=cam1&time_start=HH:MM&time_end=HH:MM` — list events with filters.
+- `GET /api/events?date=YYYY-MM-DD` (legacy) or `date_start`/`date_end` plus `camera_id`, `time_start`, `time_end`, and search `q`. Supports pagination with `limit`, `cursor_start`, `cursor_event_id` and returns `{ events, next_cursor }`. Search results include `snippet` excerpts when `q` is present.
 - `GET /api/event/{event_id}` — combined event + transcript payload.
 - `GET /api/cameras` — camera list derived from cached names.
 - `GET /api/transcripts/json/{date}` and `/api/transcripts/csv/{date}` — export transcripts for a day.
@@ -16,6 +16,11 @@ Zumblezay serves both HTML pages (`/`, `/events`, `/status`, `/summary`, `/trans
 Fetch events for a specific camera and date:
 ```bash
 curl "http://127.0.0.1:3000/api/events?date=2024-03-20&camera_id=camera-1"
+```
+
+Search transcripts across a date range with pagination:
+```bash
+curl "http://127.0.0.1:3000/api/events?date_start=2024-03-01&date_end=2024-03-31&q=package&limit=200"
 ```
 
 Download captions for playback:

@@ -90,7 +90,7 @@ Daily summaries are cached in the `daily_summaries` table. The tests demonstrate
 ## Useful endpoints
 
 The integration tests cover the most important routes; refer to them as living examples of request/response behaviour:
-- `GET /api/events` with filters for `date`, `camera_id`, `time_start`, `time_end`.
+- `GET /api/events` with filters for `date` (legacy), `date_start`, `date_end`, `camera_id`, `time_start`, `time_end`, plus pagination via `limit`, `cursor_start`, `cursor_event_id`. Returns `{ events, next_cursor }` and includes `snippet` when searching.
 - `GET /api/cameras` after calling `cache_camera_names`.
 - `GET /api/transcripts/json/{date}` and `GET /api/transcripts/csv/{date}` for transcript exports.
 - `GET /api/event/{event_id}` for the combined event/transcription payload.

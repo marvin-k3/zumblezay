@@ -36,7 +36,7 @@ Initial schema creation lives in `init_events_db_for_testing`, `init_zumblezay_d
 
 ## HTTP & HTML Surfaces
 The router (`routes` in `src/app.rs`) splits into pages and API endpoints:
-- HTML dashboards: `/`, `/events`, `/status`, `/summary`, `/transcript`.
+- HTML dashboards: `/events/latest`, `/events/search` (with `/events` redirecting to Latest), plus `/status`, `/summary`, `/transcript`.
 - Health and status: `/health`, `/api/status`.
 - Event data: `/api/events`, `/api/event/{event_id}`, `/api/cameras`, `/video/{event_id}`, `/audio/{event_id}/wav`.
 - Transcripts: `/api/transcripts/{csv|json}/{date}`, `/api/captions/{event_id}`, `/api/storyboard/*`.
