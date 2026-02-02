@@ -342,6 +342,7 @@ async fn get_completed_events(
     State(state): State<Arc<AppState>>,
     Query(filters): Query<EventFilters>,
 ) -> Result<Json<EventPage>, (StatusCode, String)> {
+    let request_started = std::time::Instant::now();
     let camera_names: HashMap<String, String> =
         state.camera_name_cache.lock().await.clone();
     let conn = state
@@ -578,6 +579,7 @@ async fn get_completed_events(
     Ok(Json(EventPage {
         events: transcripts,
         next_cursor,
+        latency_ms: Some(request_started.elapsed().as_millis()),
     }))
 }
 
@@ -834,6 +836,7 @@ struct EventCursor {
 struct EventPage {
     events: Vec<TranscriptListItem>,
     next_cursor: Option<EventCursor>,
+    latency_ms: Option<u128>,
 }
 
 // Update the events page handlers
