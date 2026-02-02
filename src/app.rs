@@ -399,27 +399,48 @@ async fn get_completed_events(
     let query_limit = limit.saturating_add(1);
     if has_search {
         query.push_str(
-            "WITH matching AS (
-                SELECT ts.rowid AS ts_rowid, ts.event_id
-                FROM transcript_search ts
-                WHERE ts MATCH ?
-             ),
-             filtered AS (
-                SELECT e1.event_id,
-                       e1.camera_id,
-                       e1.event_start,
-                       e1.event_end,
-                       m.ts_rowid
-                FROM events e1
-                JOIN matching m ON m.event_id = e1.event_id
-                WHERE e1.event_start BETWEEN ? AND ?",
+            "SELECT e1.event_id,
+                    e1.camera_id,
+                    e1.event_start,
+                    e1.event_end,
+                    EXISTS(
+                       SELECT 1
+                       FROM transcriptions t
+                       WHERE t.event_id = e1.event_id
+                         AND t.transcription_type = ?
+                    ) AS has_transcript,
+                    (
+                        SELECT snippet(
+                            transcript_search,
+                            1,
+                            '[[H]]',
+                            '[[/H]]',
+                            '…',
+                            12
+                        )
+                        FROM transcript_search
+                        WHERE transcript_search.event_id = e1.event_id
+                          AND transcript_search MATCH ?
+                        LIMIT 1
+                    ) AS snippet
+             FROM events e1 INDEXED BY idx_events_start_event
+             WHERE e1.event_start BETWEEN ? AND ?
+               AND e1.event_id IN (
+                    SELECT ts.event_id
+                    FROM transcript_search ts
+                    WHERE transcript_search MATCH ?
+               )",
         );
 
+        params.push(Box::new(transcription_type));
         if let Some(query_string) = search_term.as_ref() {
             params.push(Box::new(query_string.clone()));
         }
         params.push(Box::new(start_ts));
         params.push(Box::new(end_ts));
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
 
         if let Some(camera) = filters.camera_id.clone() {
             query.push_str(" AND e1.camera_id = ?");
@@ -447,36 +468,9 @@ async fn get_completed_events(
             params.push(Box::new(cursor_event_id));
         }
 
-        query.push_str(
-            " ORDER BY e1.event_start DESC, e1.event_id DESC LIMIT ?",
-        );
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
+        query.push_str(" LIMIT ?");
         params.push(Box::new(query_limit as i64));
-
-        query.push_str(
-            ")
-            SELECT f.event_id,
-                   f.camera_id,
-                   f.event_start,
-                   f.event_end,
-                   EXISTS(
-                      SELECT 1
-                      FROM transcriptions t
-                      WHERE t.event_id = f.event_id
-                        AND t.transcription_type = ?
-                   ) AS has_transcript,
-                   snippet(
-                      ts,
-                      1,
-                      '[[H]]',
-                      '[[/H]]',
-                      '…',
-                      12
-                   ) AS snippet
-            FROM filtered f
-            JOIN transcript_search ts ON ts.rowid = f.ts_rowid
-            ORDER BY f.event_start DESC, f.event_id DESC",
-        );
-        params.push(Box::new(transcription_type));
     } else {
         query.push_str(
             "
