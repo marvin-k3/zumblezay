@@ -96,3 +96,52 @@ impl<'conn> SchemaRegistry<'conn> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaArtifact, SchemaRegistry};
+    use rusqlite::Connection;
+
+    #[test]
+    fn mark_current_and_needs_update_round_trip() -> anyhow::Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let registry = SchemaRegistry::new(&conn)?;
+        let artifact = SchemaArtifact {
+            key: "events_schema",
+            version: 2,
+        };
+
+        assert!(registry.needs_update(&artifact)?);
+
+        registry.mark_current(&artifact, Some("initial"))?;
+        assert!(!registry.needs_update(&artifact)?);
+
+        let state = registry.current_state(&artifact)?.unwrap();
+        assert_eq!(state.version, 2);
+        assert_eq!(state.note.as_deref(), Some("initial"));
+        assert!(state.last_updated_ms > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_legacy_integer_state() -> anyhow::Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let registry = SchemaRegistry::new(&conn)?;
+        let artifact = SchemaArtifact {
+            key: "legacy_schema",
+            version: 1,
+        };
+
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            [artifact.key, "7"],
+        )?;
+
+        let state = registry.current_state(&artifact)?.unwrap();
+        assert_eq!(state.version, 7);
+        assert_eq!(state.last_updated_ms, 0);
+        assert!(state.note.is_none());
+        Ok(())
+    }
+}

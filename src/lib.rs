@@ -488,3 +488,49 @@ mod migration_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod app_state_tests {
+    use super::{create_app_state, AppConfig};
+    use r2d2::Pool;
+    use r2d2_sqlite::SqliteConnectionManager;
+    use tempfile::NamedTempFile;
+
+    fn temp_pool() -> (Pool<SqliteConnectionManager>, NamedTempFile) {
+        let temp_file = NamedTempFile::new().expect("temp sqlite file");
+        let manager = SqliteConnectionManager::file(
+            temp_file.path().to_str().expect("temp path"),
+        );
+        let pool = Pool::new(manager).expect("pool");
+        (pool, temp_file)
+    }
+
+    #[test]
+    fn create_app_state_generates_signing_secret_when_missing() {
+        let (events_pool, _events_file) = temp_pool();
+        let (zumblezay_pool, _zumblezay_file) = temp_pool();
+        let (cache_pool, _cache_file) = temp_pool();
+
+        let config = AppConfig {
+            events_pool,
+            zumblezay_pool,
+            cache_pool,
+            whisper_url: "http://localhost:9000/asr".to_string(),
+            max_concurrent_tasks: 2,
+            openai_api_key: None,
+            openai_api_base: None,
+            runpod_api_key: None,
+            signing_secret: None,
+            transcription_service: "whisper-local".to_string(),
+            default_summary_model: "test-model".to_string(),
+            video_path_original_prefix: "/data".to_string(),
+            video_path_replacement_prefix: "/tmp".to_string(),
+            timezone_str: Some("America/Los_Angeles".to_string()),
+        };
+
+        let state = create_app_state(config);
+        assert!(!state.signing_secret.is_empty());
+        assert!(state.openai_client.is_none());
+        assert_eq!(state.timezone, chrono_tz::America::Los_Angeles);
+    }
+}

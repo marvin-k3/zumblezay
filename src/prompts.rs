@@ -70,3 +70,49 @@ Remember to include:
 
 Replace any personal names with generic references. Only include events that actually appear in the CSV, and do not invent details.
 "####;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON,
+    };
+
+    #[test]
+    fn summary_system_prompt_includes_required_categories() {
+        for category in [
+            "Routine Milestones",
+            "Meals & Snacks",
+            "Diaper/Potty",
+            "Nap Times",
+            "Interactive Engagement",
+            "Safety or Concerning Incidents",
+            "Disciplinary or Guidance Moments",
+        ] {
+            assert!(
+                SUMMARY_SYSTEM_PROMPT.contains(category),
+                "missing category '{category}'"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_user_prompt_includes_transcript_placeholder() {
+        assert!(SUMMARY_USER_PROMPT.contains("{transcript}"));
+        assert!(SUMMARY_USER_PROMPT.contains("CSV Data"));
+    }
+
+    #[test]
+    fn summary_user_prompt_json_includes_required_fields() {
+        for field in [
+            "\"timestamp\"",
+            "\"room_name\"",
+            "\"event_type\"",
+            "\"event_description\"",
+        ] {
+            assert!(
+                SUMMARY_USER_PROMPT_JSON.contains(field),
+                "missing field {field}"
+            );
+        }
+    }
+}
