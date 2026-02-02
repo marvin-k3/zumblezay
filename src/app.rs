@@ -983,7 +983,14 @@ async fn get_transcripts_csv(
     let (csv_content, _event_ids) =
         transcripts::get_formatted_transcripts_for_date(&state, &date)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("No events found for the date") {
+                    (StatusCode::NOT_FOUND, message)
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            })?;
 
     // Create the response with appropriate headers
     let headers = [

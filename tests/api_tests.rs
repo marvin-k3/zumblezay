@@ -780,6 +780,25 @@ async fn test_transcripts_csv_endpoint_returns_expected_rows() {
 }
 
 #[tokio::test]
+async fn test_transcripts_csv_endpoint_returns_404_when_empty() {
+    init_test_logging();
+    let (_app_state, app_router) = app();
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/transcripts/csv/2026-02-02")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_transcript_summary_endpoints_return_cached_content() {
     init_test_logging();
     let (app_state, app_router) = app();
