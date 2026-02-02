@@ -90,6 +90,40 @@ function eventItemByCamera(page: Page, cameraId: string) {
 }
 
 test.describe('Events Dashboard', () => {
+  test('renders results meta without latency when missing', async ({ page }) => {
+    await page.route('**/api/events?**', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue();
+        return;
+      }
+      const url = new URL(route.request().url());
+      if (url.pathname !== '/api/events') {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const body = await response.json();
+      const { latency_ms, ...rest } = body as { latency_ms?: number };
+      await route.fulfill({
+        response,
+        body: JSON.stringify(rest),
+      });
+    });
+
+    await page.goto('/events/search');
+    await page.waitForSelector('#camera-filter option[value="camera-1"]', {
+      state: 'attached',
+    });
+    await page.locator('#date-start').fill(EVENT_DATE);
+    await page.locator('#date-end').fill(EVENT_DATE);
+    await page.selectOption('#camera-filter', CAMERA_ID);
+    await page.click('#search-submit');
+
+    const resultsMeta = page.locator('#results-meta');
+    await expect(resultsMeta).toContainText('events shown');
+    await expect(resultsMeta).not.toContainText('ms');
+  });
+
   test('latest page loads seeded events for a custom range', async ({ page }) => {
     const eventList = await loadLatestPage(page, {
       dateStart: EVENT_DATE,
@@ -208,6 +242,8 @@ test.describe('Events Dashboard', () => {
     await expect(eventList.first().locator('mark').first()).toContainText(
       SEARCH_TERM,
     );
+    const resultsMeta = page.locator('#results-meta');
+    await expect(resultsMeta).toContainText('ms');
   });
 
   test('handles events without transcripts gracefully', async ({ page }) => {

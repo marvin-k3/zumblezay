@@ -166,6 +166,7 @@ async fn make_api_request(router: Router, uri: &str) -> (StatusCode, Vec<u8>) {
 struct EventsPage {
     events: Vec<serde_json::Value>,
     next_cursor: Option<serde_json::Value>,
+    latency_ms: Option<u64>,
 }
 
 fn validate_and_parse_events(status: StatusCode, body: &[u8]) -> EventsPage {
@@ -191,6 +192,7 @@ fn validate_and_parse_events(status: StatusCode, body: &[u8]) -> EventsPage {
             Some(value.clone())
         }
     });
+    let latency_ms = payload.get("latency_ms").and_then(|value| value.as_u64());
 
     debug!("Number of events returned: {}", events.len());
     for (i, event) in events.iter().enumerate() {
@@ -200,6 +202,7 @@ fn validate_and_parse_events(status: StatusCode, body: &[u8]) -> EventsPage {
     EventsPage {
         events,
         next_cursor,
+        latency_ms,
     }
 }
 
@@ -411,6 +414,14 @@ async fn test_events_api() {
     let events = &events_page.events;
 
     assert_eq!(events.len(), 3, "Expected 3 events for date {}", fixed_date);
+    assert!(
+        events_page.latency_ms.is_some(),
+        "Expected latency_ms to be present"
+    );
+    assert!(
+        events_page.latency_ms.unwrap_or_default() < 60_000,
+        "Expected latency_ms to be under 60s"
+    );
     let event_ids = extract_event_ids(&events);
 
     assert!(event_ids.contains(&"test-event-1"));
