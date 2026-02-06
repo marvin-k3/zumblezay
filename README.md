@@ -97,4 +97,8 @@ The integration tests cover the most important routes; refer to them as living e
 - `GET /api/captions/{event_id}` to stream WebVTT captions generated from the transcript JSON.
 - `GET /api/transcripts/summary/{date}` and related summary endpoints that either reuse cached summaries or call out to the configured AI provider.
 
+## Vision processing
+
+Vision work is coordinated by the Rust service and stored in SQLite. External workers claim jobs over HTTP, fetch video from `/video/{event_id}`, and submit results back to `/api/vision/result`. See `docs/src/vision-processing.md` and the worker at `scripts/vision_worker.py`.
+
 For additional examples open `tests/api_tests.rs`, where helper functions such as `insert_event_with_transcript` show the minimal inserts needed to mimic live data. Pair that with the module map in `docs/AI_AGENT_GUIDE.md` when asking tooling to extend the service.

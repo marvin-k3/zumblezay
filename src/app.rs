@@ -6,13 +6,14 @@ use crate::prompts::{SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON};
 use crate::summary;
 use crate::time_util;
 use crate::transcripts;
+use crate::vision;
 use crate::AppState;
 use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -1369,6 +1370,11 @@ async fn sync_missing_events(state: &AppState) -> Result<()> {
 
     info!("Synced {} missing events", rows_affected);
 
+    let vision_rows = vision::enqueue_missing_jobs(state, "yolo_boxes", None)?;
+    if vision_rows > 0 {
+        info!("Enqueued {} vision jobs for yolo_boxes", vision_rows);
+    }
+
     Ok(())
 }
 
@@ -1686,6 +1692,46 @@ async fn get_transcripts_json(
     })))
 }
 
+#[axum::debug_handler]
+async fn claim_vision_jobs(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<vision::ClaimJobsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let response = vision::claim_jobs(&state, &request)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(response))
+}
+
+#[axum::debug_handler]
+async fn submit_vision_result(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<vision::SubmitResultRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    vision::submit_result(&state, &request)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+#[axum::debug_handler]
+async fn submit_vision_failure(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<vision::SubmitFailureRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    vision::submit_failure(&state, &request)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+#[axum::debug_handler]
+async fn enqueue_vision_test_jobs(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<vision::EnqueueTestJobsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let response = vision::enqueue_test_jobs(&state, &request)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(response))
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
@@ -1735,6 +1781,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/api/transcripts/summary/{date}/type/{type_}/model/{model}/prompt/{prompt}",
             get(get_specific_summary),
         )
+        .route("/api/vision/claim", post(claim_vision_jobs))
+        .route("/api/vision/result", post(submit_vision_result))
+        .route("/api/vision/fail", post(submit_vision_failure))
+        .route("/api/vision/enqueue_test", post(enqueue_vision_test_jobs))
         .route("/api/captions/{event_id}", get(get_vtt_captions))
         .route(
             "/api/storyboard/image/{event_id}",

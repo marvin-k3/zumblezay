@@ -32,6 +32,7 @@ pub mod summary_test;
 pub mod time_util;
 pub mod transcription;
 pub mod transcripts;
+pub mod vision;
 
 pub mod test_utils;
 
@@ -376,6 +377,48 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            "#,
+        ),
+        M::up(
+            r#"
+            CREATE TABLE IF NOT EXISTS vision_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                analysis_type TEXT NOT NULL,
+                depends_on TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                locked_at INTEGER,
+                locked_by TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                next_retry_at INTEGER,
+                priority INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(event_id) REFERENCES events(event_id),
+                UNIQUE(event_id, analysis_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS vision_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                analysis_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                raw_response TEXT NOT NULL,
+                model TEXT,
+                version TEXT,
+                hash TEXT,
+                metadata TEXT,
+                FOREIGN KEY(event_id) REFERENCES events(event_id),
+                UNIQUE(event_id, analysis_type, model, version)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_vision_jobs_status
+                ON vision_jobs(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_vision_jobs_dependency
+                ON vision_jobs(depends_on, status);
+            CREATE INDEX IF NOT EXISTS idx_vision_results_event
+                ON vision_results(event_id, analysis_type);
             "#,
         ),
     ]

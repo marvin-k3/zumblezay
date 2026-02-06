@@ -10,6 +10,7 @@ Zumblezay serves both HTML pages (`/events/latest`, `/events/search`, `/status`,
 - `GET /api/transcripts/summary/{date}` — daily summary (cached per model/prompt).
 - `GET /api/storyboard/{event_id}/image` and `/api/storyboard/{event_id}/vtt` — storyboard artefacts.
 - `GET /api/status` / `GET /health` — lightweight health probes.
+- `POST /api/vision/claim`, `/api/vision/result`, `/api/vision/fail`, `/api/vision/enqueue_test` — vision worker queue endpoints (see Vision Processing).
 
 ## Curl samples
 

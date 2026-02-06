@@ -9,6 +9,7 @@ use pretty_assertions::assert_eq;
 use rusqlite::params;
 use serde_json::json;
 use std::env;
+use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -19,6 +20,7 @@ use tower::util::ServiceExt;
 use tracing::debug;
 use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
 use zumblezay::test_utils::init_test_logging;
+use zumblezay::vision;
 use zumblezay::AppState;
 
 /// Create a test app with just the health endpoint
@@ -138,6 +140,355 @@ async fn test_with_real_server() {
     assert_eq!(body, "OK");
 }
 
+#[tokio::test]
+async fn test_vision_queue_end_to_end_with_sample_video() {
+    init_test_logging();
+    use tokio::net::TcpListener;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let sample_dir = temp_dir.path().join("sample");
+    fs::create_dir_all(&sample_dir).expect("create sample dir");
+    let sample_path = sample_dir.join("10s-bars.mp4");
+    fs::copy("testdata/10s-bars.mp4", &sample_path).expect("copy sample video");
+
+    let (state, router) = app_with_custom_state(|state| {
+        state.video_path_original_prefix = "/data".to_string();
+        state.video_path_replacement_prefix =
+            temp_dir.path().to_string_lossy().to_string();
+    });
+
+    let conn = state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT INTO events (
+            event_id, created_at, event_start, event_end,
+            event_type, camera_id, video_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            "vision-e2e-1",
+            1713139200,
+            1713139200.0,
+            1713139210.0,
+            "motion",
+            "camera-1",
+            "/data/sample/10s-bars.mp4"
+        ],
+    )
+    .unwrap();
+
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!(
+                "Skipping test_vision_queue_end_to_end_with_sample_video because binding to a local port is not permitted: {}",
+                e
+            );
+            return;
+        }
+        Err(e) => panic!("Failed to bind TcpListener: {}", e),
+    };
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let enqueue_resp = client
+        .post(format!("http://{}/api/vision/enqueue_test", addr))
+        .json(&json!({
+            "date": "2024-04-15",
+            "limit": 1
+        }))
+        .send()
+        .await
+        .expect("enqueue request failed");
+    assert_eq!(enqueue_resp.status(), reqwest::StatusCode::OK);
+
+    let claim_resp = client
+        .post(format!("http://{}/api/vision/claim", addr))
+        .json(&json!({
+            "worker_id": "worker-e2e",
+            "max_jobs": 1,
+            "lease_seconds": 120
+        }))
+        .send()
+        .await
+        .expect("claim request failed");
+    assert_eq!(claim_resp.status(), reqwest::StatusCode::OK);
+    let claim_body: serde_json::Value =
+        claim_resp.json().await.expect("claim json");
+    let jobs = claim_body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    let job_id = jobs[0]["job_id"].as_i64().unwrap();
+
+    let ffprobe = std::process::Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=width,height")
+        .arg("-of")
+        .arg("default=nw=1")
+        .arg(format!("http://{}/video/{}", addr, "vision-e2e-1"))
+        .output();
+
+    match ffprobe {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "ffprobe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            eprintln!("Skipping ffprobe check; ffprobe not installed");
+        }
+        Err(e) => panic!("ffprobe error: {}", e),
+    }
+
+    let result_resp = client
+        .post(format!("http://{}/api/vision/result", addr))
+        .json(&json!({
+            "worker_id": "worker-e2e",
+            "job_id": job_id,
+            "event_id": "vision-e2e-1",
+            "analysis_type": "yolo_boxes",
+            "duration_ms": 1234,
+            "raw_response": { "frames": [] },
+            "model": "yolov8n",
+            "version": "1",
+            "hash": "test",
+            "metadata": { "crop": { "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4 } }
+        }))
+        .send()
+        .await
+        .expect("result request failed");
+    assert_eq!(result_resp.status(), reqwest::StatusCode::OK);
+
+    let result_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vision_results WHERE event_id = ?",
+            params!["vision-e2e-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(result_count, 1);
+}
+
+#[tokio::test]
+async fn test_vision_worker_runs_against_local_server() {
+    init_test_logging();
+    use tokio::net::TcpListener;
+
+    let python_path = PathBuf::from(".venv/bin/python");
+    assert!(
+        python_path.exists(),
+        "missing .venv/bin/python; set up uv venv for the worker test"
+    );
+    assert!(
+        PathBuf::from("yolov8n.pt").exists(),
+        "missing yolov8n.pt; download weights before running this test"
+    );
+    let ffmpeg_ok = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok();
+    let ffprobe_ok = std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_ok();
+    assert!(
+        ffmpeg_ok && ffprobe_ok,
+        "ffmpeg/ffprobe not installed; required for worker test"
+    );
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let sample_dir = temp_dir.path().join("sample");
+    fs::create_dir_all(&sample_dir).expect("create sample dir");
+    let sample_path = sample_dir.join("10s-bars.mp4");
+    fs::copy("testdata/10s-bars.mp4", &sample_path).expect("copy sample video");
+
+    let (state, router) = app_with_custom_state(|state| {
+        state.video_path_original_prefix = "/data".to_string();
+        state.video_path_replacement_prefix =
+            temp_dir.path().to_string_lossy().to_string();
+    });
+
+    let conn = state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT INTO events (
+            event_id, created_at, event_start, event_end,
+            event_type, camera_id, video_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            "vision-worker-1",
+            1713139200,
+            1713139200.0,
+            1713139210.0,
+            "motion",
+            "camera-1",
+            "/data/sample/10s-bars.mp4"
+        ],
+    )
+    .unwrap();
+
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            panic!("binding to a local port is not permitted: {}", e);
+        }
+        Err(e) => panic!("Failed to bind TcpListener: {}", e),
+    };
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let enqueue_resp = client
+        .post(format!("http://{}/api/vision/enqueue_test", addr))
+        .json(&json!({
+            "date": "2024-04-15",
+            "limit": 1
+        }))
+        .send()
+        .await
+        .expect("enqueue request failed");
+    assert_eq!(enqueue_resp.status(), reqwest::StatusCode::OK);
+
+    let output = std::process::Command::new(python_path)
+        .arg("scripts/vision_worker.py")
+        .arg("--base-url")
+        .arg(format!("http://{}", addr))
+        .arg("--worker-id")
+        .arg("worker-test")
+        .arg("--once")
+        .arg("--max-jobs")
+        .arg("1")
+        .arg("--model")
+        .arg("yolov8n.pt")
+        .arg("--base-fps")
+        .arg("1")
+        .arg("--max-fps")
+        .arg("1")
+        .output()
+        .expect("run worker");
+
+    assert!(
+        output.status.success(),
+        "worker failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let result_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vision_results WHERE event_id = ?",
+            params!["vision-worker-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(result_count, 1);
+}
+
+#[tokio::test]
+async fn test_vision_job_claim_and_submit_result() {
+    init_test_logging();
+    let (state, router) = app();
+
+    let conn = state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT INTO events (
+            event_id, created_at, event_start, event_end,
+            event_type, camera_id, video_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            "vision-event-1",
+            1700000000,
+            1700000000.0,
+            1700000010.0,
+            "motion",
+            "camera-1",
+            "/data/camera-1/vision-event-1.mp4",
+        ],
+    )
+    .unwrap();
+
+    let enqueued =
+        vision::enqueue_missing_jobs(&state, "yolo_boxes", None).unwrap();
+    assert_eq!(enqueued, 1);
+
+    let (status, body) = post_json(
+        router.clone(),
+        "/api/vision/claim",
+        json!({
+            "worker_id": "worker-1",
+            "max_jobs": 1,
+            "lease_seconds": 120
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let claim: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let jobs = claim["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["event_id"], "vision-event-1");
+    assert_eq!(jobs[0]["analysis_type"], "yolo_boxes");
+    assert_eq!(jobs[0]["video_url"], "/video/vision-event-1");
+
+    let job_id = jobs[0]["job_id"].as_i64().unwrap();
+
+    let (status, _body) = post_json(
+        router,
+        "/api/vision/result",
+        json!({
+            "worker_id": "worker-1",
+            "job_id": job_id,
+            "event_id": "vision-event-1",
+            "analysis_type": "yolo_boxes",
+            "duration_ms": 2500,
+            "raw_response": {
+                "frames": [
+                    {
+                        "t": 0.1,
+                        "boxes": [
+                            {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "score": 0.9, "class": "person"}
+                        ]
+                    }
+                ]
+            },
+            "model": "yolov8n",
+            "version": "1",
+            "hash": "abc123",
+            "metadata": {
+                "crop": {"x": 0.08, "y": 0.12, "w": 0.5, "h": 0.7}
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let result_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vision_results WHERE event_id = ? AND analysis_type = ?",
+            params!["vision-event-1", "yolo_boxes"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(result_count, 1);
+
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM vision_jobs WHERE id = ?",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "completed");
+}
+
 /// Helper function to make API requests and extract the response body
 async fn make_api_request(router: Router, uri: &str) -> (StatusCode, Vec<u8>) {
     let response = router
@@ -157,6 +508,36 @@ async fn make_api_request(router: Router, uri: &str) -> (StatusCode, Vec<u8>) {
 
     debug!("Response status: {:?}", status);
     debug!("Response body: {}", String::from_utf8_lossy(&body));
+
+    (status, body)
+}
+
+async fn post_json(
+    router: Router,
+    uri: &str,
+    payload: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
 
     (status, body)
 }

@@ -9,6 +9,7 @@ This project ships a single Axum service that ingests camera timelines, runs Whi
 - `src/process_events.rs` – background worker that fetches events, runs transcription, and writes transcripts.
 - `src/transcription.rs` – Whisper/RunPod client plus FFmpeg audio extraction.
 - `src/transcripts.rs` – helpers for persisting and formatting transcript data.
+- `src/vision.rs` – SQLite-backed vision job queue + worker API helpers.
 - `src/summary.rs` & `src/prompts.rs` – OpenAI-compatible summary generation and prompt templates.
 - `src/storyboard.rs` – generates cached VTT/image storyboard artifacts.
 - `src/prompt_context.rs` – in-memory signed cache for streaming prompt context.

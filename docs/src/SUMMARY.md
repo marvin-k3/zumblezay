@@ -5,6 +5,7 @@
 - [Core Concepts](concepts.md)
 - [Data & Storage](data-storage.md)
 - [API Guide](api-guide.md)
+- [Vision Processing](vision-processing.md)
 - [Operations & Configuration](operations.md)
 - [Testing & Development](testing.md)
 - [Troubleshooting](troubleshooting.md)

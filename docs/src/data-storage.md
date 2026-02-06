@@ -3,7 +3,7 @@
 Three SQLite databases are used; tests replace them with temporary files.
 
 - **Events DB** (`events_db`): read-only view of camera events seeded externally. Key table: `events`.
-- **Application DB** (`zumblezay_db`): transcriptions, summaries, and app state. Key tables: `events`, `transcriptions`, `daily_summaries`, `corrupted_files`.
+- **Application DB** (`zumblezay_db`): transcriptions, summaries, and app state. Key tables: `events`, `transcriptions`, `daily_summaries`, `corrupted_files`, `vision_jobs`, `vision_results`.
 - **Cache DB** (`cache_db`): storyboard artefact cache. Key table: `storyboard_cache`.
 
 Schemas are initialized in `init_events_db_for_testing`, `init_zumblezay_db`, and `init_cache_db` (see `src/lib.rs`). When adding a column, update both production and testing initializers.
