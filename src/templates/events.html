@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Events{% endblock %}
+{% block title %}{{ page_title }}{% endblock %}
 
 {% block extra_head %}
 <script type="module" src="https://cdn.jsdelivr.net/npm/media-chrome@1/+esm"></script>
@@ -11,11 +11,12 @@
         width: 100%;
     }
     .event-list {
-        max-height: 600px;
+        max-height: 640px;
         overflow-y: auto;
     }
     .event-item {
         cursor: pointer;
+        position: relative;
     }
     .event-item:hover {
         background-color: var(--bs-tertiary-bg);
@@ -40,12 +41,10 @@
         transform: translateX(-50%);
         margin-top: 8px;
     }
-    
     .event-preview img {
         position: absolute;
         max-width: none;
     }
-    
     .event-preview::after {
         content: '';
         position: absolute;
@@ -56,28 +55,30 @@
         border-right: 8px solid transparent;
         border-bottom: 8px solid var(--bs-border-color);
     }
-    
-    .event-item {
-        position: relative;
-    }
-    
     .filter-bar {
         background-color: var(--bs-secondary-bg);
         padding: 1rem;
         margin-bottom: 1rem;
         border-radius: 0.25rem;
+        border: 1px solid var(--bs-border-color);
     }
-    
     .time-range-inputs {
         display: flex;
-        gap: 1rem;
+        gap: 0.75rem;
         align-items: center;
     }
-    
     .time-range-inputs input {
-        width: 100px;
+        width: 120px;
     }
-    
+    .filter-hint {
+        font-size: 0.9rem;
+        color: var(--bs-secondary-color);
+    }
+    .results-meta {
+        font-size: 0.9rem;
+        color: var(--bs-secondary-color);
+    }
+
     /* Transcript styles */
     .transcript-container {
         margin-top: 1.5rem;
@@ -88,7 +89,6 @@
         padding: 1rem;
         background-color: var(--bs-body-bg);
     }
-    
     .transcript-segment {
         margin-bottom: 0.5rem;
         padding: 0.25rem 0;
@@ -97,13 +97,11 @@
         align-items: flex-start;
         gap: 0.75rem;
     }
-    
     .transcript-segment.active {
         background-color: var(--bs-primary-bg-subtle);
         border-radius: 0.25rem;
         padding: 0.25rem 0.5rem;
     }
-    
     .transcript-timestamp {
         color: var(--bs-primary);
         font-weight: 500;
@@ -112,22 +110,18 @@
         user-select: none;
         white-space: nowrap;
     }
-    
     .transcript-timestamp:hover {
         text-decoration: underline;
     }
-    
     .transcript-text {
         display: inline;
     }
-    
     .transcript-placeholder {
         color: var(--bs-secondary-color);
         font-style: italic;
         text-align: center;
         padding: 2rem 0;
     }
-    
     .transcript-thumbnail {
         width: 80px;
         height: 45px;
@@ -139,29 +133,24 @@
         border: 1px solid var(--bs-border-color);
         transition: all 0.3s ease;
     }
-    
     .transcript-thumbnail img {
         position: absolute;
         max-width: none;
-        transform: scale(0.5); /* Scale down the 160x90 image to fit in 80x45 container */
-        transform-origin: top left; /* Scale from the top-left corner */
+        transform: scale(0.5);
+        transform-origin: top left;
         transition: all 0.3s ease;
     }
-    
     .large-thumbnails .transcript-thumbnail {
         width: 160px;
         height: 90px;
         min-width: 160px;
     }
-    
     .large-thumbnails .transcript-thumbnail img {
-        transform: scale(1); /* No scaling needed at original size */
+        transform: scale(1);
     }
-    
     .transcript-content {
         flex: 1;
     }
-
     .transcript-indicator {
         display: inline-flex;
         width: 8px;
@@ -169,27 +158,46 @@
         border-radius: 50%;
         background-color: var(--bs-success);
     }
+    .empty-state {
+        text-align: center;
+        padding: 1.5rem;
+        color: var(--bs-secondary-color);
+    }
 </style>
 {% endblock %}
 
-{% block page_title %}Events{% endblock %}
+{% block page_title %}{{ page_title }}{% endblock %}
 
 {% block content %}
 <div class="row mb-4">
     <div class="col">
         <div class="filter-bar">
-            <form id="filter-form" class="row g-3">
-                <div class="col-md-3">
-                    <label for="date-filter" class="form-label">Date</label>
-                    <input type="date" class="form-control" id="date-filter">
+            {% if mode == "latest" %}
+            <form id="latest-filter-form" class="row g-3 align-items-end">
+                <div class="col-md-4">
+                    <label for="range-preset" class="form-label">Range</label>
+                    <select class="form-select" id="range-preset">
+                        <option value="today" selected>Today</option>
+                        <option value="7d">Last 7 days</option>
+                        <option value="30d">Last 30 days</option>
+                        <option value="90d">Last 90 days</option>
+                        <option value="custom">Custom</option>
+                    </select>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-4" id="custom-range-fields" style="display: none;">
+                    <label class="form-label">Custom dates</label>
+                    <div class="d-flex gap-2">
+                        <input type="date" class="form-control" id="date-start">
+                        <input type="date" class="form-control" id="date-end">
+                    </div>
+                </div>
+                <div class="col-md-4">
                     <label for="camera-filter" class="form-label">Camera</label>
                     <select class="form-select" id="camera-filter">
                         <option value="">All Cameras</option>
                     </select>
                 </div>
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <label class="form-label">Time Range</label>
                     <div class="time-range-inputs">
                         <input type="time" class="form-control" id="time-start">
@@ -197,10 +205,78 @@
                         <input type="time" class="form-control" id="time-end">
                     </div>
                 </div>
-                <div class="col-md-12">
-                    <button type="button" class="btn btn-secondary" id="reset-filters">Reset Filters</button>
+                <div class="col-md-4 d-flex gap-2">
+                    <button type="button" class="btn btn-primary" id="latest-refresh">Refresh</button>
+                    <button type="button" class="btn btn-outline-secondary" id="latest-reset">Reset</button>
+                </div>
+                <div class="col-md-4">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="auto-refresh-toggle" checked>
+                            <label class="form-check-label" for="auto-refresh-toggle">Auto-refresh</label>
+                        </div>
+                        <select class="form-select w-auto" id="auto-refresh-interval">
+                            <option value="10">10s</option>
+                            <option value="15" selected>15s</option>
+                            <option value="30">30s</option>
+                            <option value="60">60s</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="filter-hint" id="latest-hint">Showing the most recent events for the selected range.</div>
                 </div>
             </form>
+            {% else %}
+            <form id="search-form" class="row g-3 align-items-end">
+                <div class="col-md-6">
+                    <label for="search-filter" class="form-label">Keyword</label>
+                    <input type="text" class="form-control" id="search-filter" placeholder="Search transcripts...">
+                </div>
+                <div class="col-md-3">
+                    <label for="search-mode" class="form-label">Mode</label>
+                    <select class="form-select" id="search-mode">
+                        <option value="keyword" selected>Keyword</option>
+                        <option value="semantic" disabled>Semantic (coming soon)</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="camera-filter" class="form-label">Camera</label>
+                    <select class="form-select" id="camera-filter">
+                        <option value="">All Cameras</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <div class="form-check form-switch mt-4">
+                        <input class="form-check-input" type="checkbox" id="snippet-toggle" checked>
+                        <label class="form-check-label" for="snippet-toggle">Show excerpts</label>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <label for="date-start" class="form-label">Date Start</label>
+                    <input type="date" class="form-control" id="date-start">
+                </div>
+                <div class="col-md-3">
+                    <label for="date-end" class="form-label">Date End</label>
+                    <input type="date" class="form-control" id="date-end">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Time Range</label>
+                    <div class="time-range-inputs">
+                        <input type="time" class="form-control" id="time-start">
+                        <span>to</span>
+                        <input type="time" class="form-control" id="time-end">
+                    </div>
+                </div>
+                <div class="col-md-3 d-flex gap-2">
+                    <button type="submit" class="btn btn-primary" id="search-submit">Search</button>
+                    <button type="button" class="btn btn-outline-secondary" id="search-reset">Reset</button>
+                </div>
+                <div class="col-12">
+                    <div class="filter-hint" id="search-hint">Submit a keyword and date range to explore transcripts.</div>
+                </div>
+            </form>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -208,15 +284,21 @@
 <div class="row">
     <div class="col-md-4">
         <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Recent Events</h5>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="card-title mb-0">Event Results</h5>
+                    <div class="results-meta" id="results-meta"></div>
+                </div>
             </div>
             <div id="event-list" class="card-body event-list">
-                <p class="text-muted">Loading events...</p>
+                <div class="empty-state" id="event-list-empty">Loading events...</div>
+            </div>
+            <div class="card-footer bg-transparent" id="load-more-container" style="display: none;">
+                <button class="btn btn-outline-secondary w-100" id="load-more">Load older events</button>
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-8">
         <div class="card">
             <div class="card-header">
@@ -248,7 +330,6 @@
                         </media-control-bar>
                     </media-controller>
                 </div>
-                <!-- Add transcript container -->
                 <div class="card mt-3">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 class="card-title mb-0">Transcript</h5>
@@ -278,70 +359,453 @@
 
 {% block scripts %}
 <script>
+    const mode = "{{ mode }}";
+    const DEFAULT_LIMIT = 200;
     let currentEvent = null;
     const videoPlayer = document.getElementById('video-player');
     let transcriptData = [];
     let activeSegmentId = null;
     let autoScroll = true;
     let largeThumbnails = false;
+    let isLoading = false;
+    let nextCursor = null;
+    let loadedEventIds = new Set();
+    let autoRefreshTimer = null;
+    let showSnippets = true;
 
     let currentFilters = {
-        date: null,
+        dateStart: null,
+        dateEnd: null,
         camera_id: '',
         timeStart: '',
-        timeEnd: ''
+        timeEnd: '',
+        q: ''
     };
 
+    function formatDate(date) {
+        return date.toISOString().split('T')[0];
+    }
+
+    function addDays(baseDate, days) {
+        const copy = new Date(baseDate.getTime());
+        copy.setDate(copy.getDate() + days);
+        return copy;
+    }
+
+    function setListEmptyMessage(message) {
+        let empty = document.getElementById('event-list-empty');
+        if (!empty) {
+            empty = document.createElement('div');
+            empty.id = 'event-list-empty';
+            empty.className = 'empty-state';
+            document.getElementById('event-list').appendChild(empty);
+        }
+        empty.textContent = message;
+        empty.style.display = 'block';
+    }
+
+    function hideEmptyMessage() {
+        const empty = document.getElementById('event-list-empty');
+        if (empty) {
+            empty.style.display = 'none';
+        }
+    }
+
+    function updateResultsMeta(count, latencyMs) {
+        const meta = document.getElementById('results-meta');
+        if (!meta) return;
+        if (count === null) {
+            meta.textContent = '';
+            return;
+        }
+        const total = loadedEventIds.size;
+        const showing = count === 0 ? total : total;
+        let text = `${showing} events shown`;
+        if (typeof latencyMs === 'number') {
+            text += ` • ${latencyMs} ms`;
+        }
+        meta.textContent = text;
+    }
+
     function initializeFilters() {
-        // Set default date to today
         const today = new Date();
-        document.getElementById('date-filter').value = today.toLocaleDateString('en-CA'); // 'en-CA' gives YYYY-MM-DD format
-        currentFilters.date = today.toLocaleDateString('en-CA');
+        const urlFilters = readFiltersFromUrl();
+        if (mode === 'latest') {
+            initializeLatestFilters(today, urlFilters);
+        } else {
+            initializeSearchFilters(today, urlFilters);
+        }
 
-        // Add event listeners
-        document.getElementById('date-filter').addEventListener('change', updateFilters);
-        document.getElementById('camera-filter').addEventListener('change', updateFilters);
-        document.getElementById('time-start').addEventListener('change', updateFilters);
-        document.getElementById('time-end').addEventListener('change', updateFilters);
-
-        // Load camera list
         loadCameras();
 
-        // Initial update
-        updateFilters();
+        if (mode === 'latest') {
+            refreshLatest();
+        } else {
+            if (urlFilters && Object.keys(urlFilters).length > 0) {
+                runSearch();
+            } else {
+                setListEmptyMessage('Run a search to see results.');
+                updateResultsMeta(0);
+            }
+        }
     }
 
-    function updateFilters() {
+    function initializeLatestFilters(today, urlFilters) {
+        const rangeSelect = document.getElementById('range-preset');
+        const customFields = document.getElementById('custom-range-fields');
+        const dateStartInput = document.getElementById('date-start');
+        const dateEndInput = document.getElementById('date-end');
+        const autoRefreshToggle = document.getElementById('auto-refresh-toggle');
+        const autoRefreshInterval = document.getElementById('auto-refresh-interval');
+
+        function applyRangePreset(value) {
+            if (!dateStartInput || !dateEndInput) return;
+            const end = formatDate(today);
+            let start = end;
+            if (value === '7d') {
+                start = formatDate(addDays(today, -6));
+            } else if (value === '30d') {
+                start = formatDate(addDays(today, -29));
+            } else if (value === '90d') {
+                start = formatDate(addDays(today, -89));
+            } else if (value === 'today') {
+                start = end;
+            }
+
+            dateStartInput.value = start;
+            dateEndInput.value = end;
+            currentFilters.dateStart = start;
+            currentFilters.dateEnd = end;
+        }
+
+        if (rangeSelect) {
+            rangeSelect.addEventListener('change', () => {
+                if (rangeSelect.value === 'custom') {
+                    if (customFields) {
+                        customFields.style.display = 'block';
+                    }
+                } else {
+                    if (customFields) {
+                        customFields.style.display = 'none';
+                    }
+                    applyRangePreset(rangeSelect.value);
+                    refreshLatest();
+                }
+            });
+        }
+
+        if (dateStartInput && dateEndInput) {
+            dateStartInput.addEventListener('change', refreshLatest);
+            dateEndInput.addEventListener('change', refreshLatest);
+        }
+
+        document.getElementById('camera-filter').addEventListener('change', refreshLatest);
+        document.getElementById('time-start').addEventListener('change', refreshLatest);
+        document.getElementById('time-end').addEventListener('change', refreshLatest);
+
+        const refreshButton = document.getElementById('latest-refresh');
+        if (refreshButton) {
+            refreshButton.addEventListener('click', refreshLatest);
+        }
+
+        const resetButton = document.getElementById('latest-reset');
+        if (resetButton) {
+            resetButton.addEventListener('click', () => {
+                if (rangeSelect) {
+                    rangeSelect.value = 'today';
+                }
+                if (customFields) {
+                    customFields.style.display = 'none';
+                }
+                applyRangePreset('today');
+                document.getElementById('camera-filter').value = '';
+                document.getElementById('time-start').value = '';
+                document.getElementById('time-end').value = '';
+                currentFilters.camera_id = '';
+                currentFilters.timeStart = '';
+                currentFilters.timeEnd = '';
+                refreshLatest();
+            });
+        }
+
+        if (autoRefreshToggle && autoRefreshInterval) {
+            const updateAutoRefresh = () => {
+                if (autoRefreshTimer) {
+                    clearInterval(autoRefreshTimer);
+                    autoRefreshTimer = null;
+                }
+                if (autoRefreshToggle.checked) {
+                    const seconds = parseInt(autoRefreshInterval.value, 10);
+                    autoRefreshTimer = setInterval(refreshLatest, seconds * 1000);
+                }
+            };
+            autoRefreshToggle.addEventListener('change', updateAutoRefresh);
+            autoRefreshInterval.addEventListener('change', updateAutoRefresh);
+            updateAutoRefresh();
+        }
+
+        if (urlFilters?.date_start || urlFilters?.date_end) {
+            if (rangeSelect) {
+                rangeSelect.value = 'custom';
+            }
+            if (customFields) {
+                customFields.style.display = 'block';
+            }
+            if (dateStartInput && urlFilters.date_start) {
+                dateStartInput.value = urlFilters.date_start;
+            }
+            if (dateEndInput && urlFilters.date_end) {
+                dateEndInput.value = urlFilters.date_end;
+            }
+            currentFilters.dateStart = dateStartInput?.value || '';
+            currentFilters.dateEnd = dateEndInput?.value || '';
+        } else if (urlFilters?.range && rangeSelect) {
+            rangeSelect.value = urlFilters.range;
+            if (urlFilters.range === 'custom') {
+                if (customFields) {
+                    customFields.style.display = 'block';
+                }
+            } else {
+                if (customFields) {
+                    customFields.style.display = 'none';
+                }
+                applyRangePreset(urlFilters.range);
+            }
+        } else {
+            applyRangePreset('today');
+        }
+
+        if (urlFilters?.camera_id) {
+            document.getElementById('camera-filter').value = urlFilters.camera_id;
+        }
+        if (urlFilters?.time_start) {
+            document.getElementById('time-start').value = urlFilters.time_start;
+        }
+        if (urlFilters?.time_end) {
+            document.getElementById('time-end').value = urlFilters.time_end;
+        }
+    }
+
+    function initializeSearchFilters(today, urlFilters) {
+        const dateStartInput = document.getElementById('date-start');
+        const dateEndInput = document.getElementById('date-end');
+        const searchForm = document.getElementById('search-form');
+        const resetButton = document.getElementById('search-reset');
+        const snippetToggle = document.getElementById('snippet-toggle');
+
+        const startDate = formatDate(addDays(today, -29));
+        const endDate = formatDate(today);
+
+        if (dateStartInput) {
+            dateStartInput.value = urlFilters?.date_start || startDate;
+        }
+        if (dateEndInput) {
+            dateEndInput.value = urlFilters?.date_end || endDate;
+        }
+
+        currentFilters.dateStart = dateStartInput?.value || startDate;
+        currentFilters.dateEnd = dateEndInput?.value || endDate;
+
+        if (searchForm) {
+            searchForm.addEventListener('submit', (event) => {
+                event.preventDefault();
+                runSearch();
+            });
+        }
+
+        if (snippetToggle) {
+            if (urlFilters?.show_snippets === 'false') {
+                snippetToggle.checked = false;
+                showSnippets = false;
+            }
+            snippetToggle.addEventListener('change', () => {
+                showSnippets = snippetToggle.checked;
+                reRenderEvents();
+            });
+        }
+
+        if (resetButton) {
+            resetButton.addEventListener('click', () => {
+                document.getElementById('search-filter').value = '';
+                document.getElementById('camera-filter').value = '';
+                document.getElementById('time-start').value = '';
+                document.getElementById('time-end').value = '';
+                if (snippetToggle) {
+                    snippetToggle.checked = true;
+                }
+                if (dateStartInput) dateStartInput.value = startDate;
+                if (dateEndInput) dateEndInput.value = endDate;
+                currentFilters = {
+                    dateStart: startDate,
+                    dateEnd: endDate,
+                    camera_id: '',
+                    timeStart: '',
+                    timeEnd: '',
+                    q: ''
+                };
+                showSnippets = true;
+                clearResults();
+                setListEmptyMessage('Run a search to see results.');
+                updateResultsMeta(0);
+            });
+        }
+
+        if (urlFilters?.q) {
+            document.getElementById('search-filter').value = urlFilters.q;
+        }
+        if (urlFilters?.camera_id) {
+            document.getElementById('camera-filter').value = urlFilters.camera_id;
+        }
+        if (urlFilters?.time_start) {
+            document.getElementById('time-start').value = urlFilters.time_start;
+        }
+        if (urlFilters?.time_end) {
+            document.getElementById('time-end').value = urlFilters.time_end;
+        }
+    }
+
+    function updateFiltersFromForm() {
         currentFilters = {
-            date: document.getElementById('date-filter').value,
-            camera_id: document.getElementById('camera-filter').value,
-            timeStart: document.getElementById('time-start').value,
-            timeEnd: document.getElementById('time-end').value
+            dateStart: document.getElementById('date-start')?.value || '',
+            dateEnd: document.getElementById('date-end')?.value || '',
+            camera_id: document.getElementById('camera-filter')?.value || '',
+            timeStart: document.getElementById('time-start')?.value || '',
+            timeEnd: document.getElementById('time-end')?.value || '',
+            q: document.getElementById('search-filter')?.value || ''
         };
-        updateEvents();
     }
 
-    function formatTimestamp(timestamp) {
-        return new Date(timestamp * 1000).toLocaleString();
+    function refreshLatest() {
+        updateFiltersFromForm();
+        updateUrlFromFilters();
+        fetchEvents({ append: false });
     }
 
-    function updateEvents() {
-        // Build query parameters
+    function runSearch() {
+        updateFiltersFromForm();
+        updateUrlFromFilters();
+        fetchEvents({ append: false });
+    }
+
+    function readFiltersFromUrl() {
+        const url = new URL(window.location.href);
+        const params = url.searchParams;
+        const filters = {};
+        const keys = [
+            'date_start',
+            'date_end',
+            'camera_id',
+            'time_start',
+            'time_end',
+            'q',
+            'range',
+            'show_snippets'
+        ];
+        keys.forEach(key => {
+            if (params.has(key)) {
+                filters[key] = params.get(key);
+            }
+        });
+        return filters;
+    }
+
+    function updateUrlFromFilters() {
+        const url = new URL(window.location.href);
+        const params = url.searchParams;
+        const keepVideo = params.get('video');
+        params.forEach((_, key) => {
+            if (key !== 'video') {
+                params.delete(key);
+            }
+        });
+
+        if (currentFilters.dateStart) params.set('date_start', currentFilters.dateStart);
+        if (currentFilters.dateEnd) params.set('date_end', currentFilters.dateEnd);
+        if (currentFilters.camera_id) params.set('camera_id', currentFilters.camera_id);
+        if (currentFilters.timeStart) params.set('time_start', currentFilters.timeStart);
+        if (currentFilters.timeEnd) params.set('time_end', currentFilters.timeEnd);
+        if (currentFilters.q) params.set('q', currentFilters.q);
+
+        if (mode === 'latest') {
+            const rangeSelect = document.getElementById('range-preset');
+            if (rangeSelect && rangeSelect.value) {
+                params.set('range', rangeSelect.value);
+            }
+        } else {
+            params.set('show_snippets', showSnippets ? 'true' : 'false');
+        }
+
+        if (keepVideo) {
+            params.set('video', keepVideo);
+        }
+
+        window.history.replaceState({}, '', url);
+    }
+
+    function buildQueryParams(includeCursor) {
         const params = new URLSearchParams();
-        if (currentFilters.date) {
-            params.append('date', currentFilters.date);
+        if (currentFilters.dateStart) {
+            params.append('date_start', currentFilters.dateStart);
+        }
+        if (currentFilters.dateEnd) {
+            params.append('date_end', currentFilters.dateEnd);
         }
         if (currentFilters.camera_id) {
             params.append('camera_id', currentFilters.camera_id);
         }
-        if (currentFilters.timeStart) {
-            params.append('time_start', currentFilters.timeStart);
+        const normalizedTimeStart = normalizeTimeValue(currentFilters.timeStart);
+        const normalizedTimeEnd = normalizeTimeValue(currentFilters.timeEnd);
+        if (normalizedTimeStart) {
+            params.append('time_start', normalizedTimeStart);
         }
-        if (currentFilters.timeEnd) {
-            params.append('time_end', currentFilters.timeEnd);
+        if (normalizedTimeEnd) {
+            params.append('time_end', normalizedTimeEnd);
+        }
+        if (currentFilters.q) {
+            params.append('q', currentFilters.q);
+        }
+        params.append('limit', DEFAULT_LIMIT.toString());
+        if (includeCursor && nextCursor) {
+            params.append('cursor_start', nextCursor.event_start.toString());
+            params.append('cursor_event_id', nextCursor.event_id);
+        }
+        return params;
+    }
+
+    function normalizeTimeValue(value) {
+        if (!value) return '';
+        return value.length === 5 ? `${value}:00` : value;
+    }
+
+    function clearResults() {
+        const listDiv = document.getElementById('event-list');
+        listDiv.innerHTML = '';
+        loadedEventIds.clear();
+        nextCursor = null;
+        updateLoadMore();
+    }
+
+    function reRenderEvents() {
+        const listDiv = document.getElementById('event-list');
+        const items = listDiv.querySelectorAll('.event-item');
+        items.forEach(item => {
+            const snippet = item.querySelector('.event-snippet');
+            if (snippet) {
+                snippet.style.display = showSnippets ? 'block' : 'none';
+            }
+        });
+    }
+
+    function fetchEvents({ append }) {
+        if (isLoading) return;
+        isLoading = true;
+        const listDiv = document.getElementById('event-list');
+        if (!append) {
+            clearResults();
+            setListEmptyMessage('Loading events...');
         }
 
-        // Make API call with filters
+        const params = buildQueryParams(append);
         fetch(`/api/events?${params.toString()}`, {
             headers: { 'Accept': 'application/json' }
         })
@@ -352,41 +816,103 @@
             return response.json();
         })
         .then(data => {
-            if (!Array.isArray(data)) {
-                console.warn('Expected array of events, got:', typeof data);
-                data = [];
-            }
-            
-            const listDiv = document.getElementById('event-list');
-            if (data.length === 0) {
-                listDiv.innerHTML = '<p class="text-muted">No events available</p>';
-                return;
+            if (!data || !Array.isArray(data.events)) {
+                console.warn('Expected events page payload, got:', data);
+                data = { events: [], next_cursor: null };
             }
 
-            listDiv.innerHTML = data.map(t => `
-                <div class="event-item p-2 border-bottom" 
+            if (!append) {
+                listDiv.innerHTML = '';
+            }
+
+            const events = data.events;
+            if (events.length === 0 && loadedEventIds.size === 0) {
+                setListEmptyMessage('No events found for these filters.');
+            } else {
+                hideEmptyMessage();
+                renderEvents(events, append);
+            }
+
+            nextCursor = data.next_cursor;
+            updateLoadMore();
+            updateResultsMeta(events.length, data.latency_ms);
+        })
+        .catch(error => {
+            console.error('Error fetching events:', error);
+            listDiv.innerHTML = '<p class="text-danger">Error loading events. Please try refreshing the page.</p>';
+            updateLoadMore();
+        })
+        .finally(() => {
+            isLoading = false;
+        });
+    }
+
+    function updateLoadMore() {
+        const container = document.getElementById('load-more-container');
+        const button = document.getElementById('load-more');
+        if (!container || !button) return;
+        if (nextCursor) {
+            container.style.display = 'block';
+            button.disabled = false;
+        } else {
+            container.style.display = 'none';
+            button.disabled = true;
+        }
+    }
+
+    function renderEvents(events, append) {
+        const listDiv = document.getElementById('event-list');
+        const filteredEvents = events.filter(event => !loadedEventIds.has(event.event_id));
+        if (filteredEvents.length === 0) {
+            return;
+        }
+
+        const html = filteredEvents.map(t => {
+            loadedEventIds.add(t.event_id);
+            const duration = Math.max(Math.round(t.event_end - t.event_start), 1);
+            const cameraLabel = t.camera_name || t.camera_id;
+            const snippet = t.snippet ? `<div class="event-snippet small text-muted mt-1" style="display:${showSnippets ? 'block' : 'none'}">${renderSnippet(t.snippet)}</div>` : '';
+            return `
+                <div class="event-item p-2 border-bottom"
                      onclick="loadVideo('${t.event_id}')"
-                     onmouseenter="startPreview('${t.event_id}', this, ${t.event_end - t.event_start})"
+                     onmouseenter="startPreview('${t.event_id}', this, ${duration})"
                      onmouseleave="stopPreview(this)">
                     <div class="fw-bold d-flex align-items-center gap-2">
-                        <span>${t.camera_name || t.camera_id}</span>
+                        <span>${cameraLabel}</span>
                         ${t.has_transcript ? `
                             <span class="transcript-indicator" title="Transcript available" aria-hidden="true"></span>
                             <span class="visually-hidden">Transcript available</span>
                         ` : ''}
                     </div>
-                    <div class="small text-muted">${formatTimestamp(t.event_start)} - ${Math.max(Math.round(t.event_end - t.event_start), 1)} seconds</div>
+                    <div class="small text-muted">${formatTimestamp(t.event_start)} - ${duration} seconds</div>
+                    ${snippet}
                     <div class="event-preview">
                         <img>
                     </div>
                 </div>
-            `).join('');
-        })
-        .catch(error => {
-            console.error('Error fetching events:', error);
-            const listDiv = document.getElementById('event-list');
-            listDiv.innerHTML = '<p class="text-danger">Error loading events. Please try refreshing the page.</p>';
-        });
+            `;
+        }).join('');
+
+        if (append) {
+            listDiv.insertAdjacentHTML('beforeend', html);
+        } else {
+            listDiv.innerHTML = html;
+        }
+    }
+
+    function formatTimestamp(timestamp) {
+        return new Date(timestamp * 1000).toLocaleString();
+    }
+
+    function renderSnippet(snippet) {
+        if (!snippet) return '';
+        const escaped = snippet
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
+        return escaped
+            .replaceAll('[[H]]', '<mark>')
+            .replaceAll('[[/H]]', '</mark>');
     }
 
     function loadCameras() {
@@ -404,7 +930,6 @@
                 console.warn('Expected array of cameras, got:', data);
                 return;
             }
-            
             updateCameraDropdown(data.cameras);
         })
         .catch(error => {
@@ -415,21 +940,18 @@
     function updateCameraDropdown(cameras) {
         const select = document.getElementById('camera-filter');
         const currentValue = select.value;
-        
-        // Clear existing options except "All Cameras"
+
         while (select.options.length > 1) {
             select.remove(1);
         }
 
-        // Add new options
         cameras
-            .sort((a, b) => a.name.localeCompare(b.name)) // Sort by display name
+            .sort((a, b) => a.name.localeCompare(b.name))
             .forEach(camera => {
                 const option = new Option(camera.name, camera.id);
                 select.add(option);
             });
 
-        // Restore previous selection if it still exists
         if (currentValue) {
             const cameraExists = cameras.some(camera => camera.id === currentValue);
             if (cameraExists) {
@@ -439,23 +961,19 @@
     }
 
     function loadVideo(eventId) {
-        // Validate eventId format - only allow alphanumeric characters and hyphens
         if (!eventId || typeof eventId !== 'string' || !/^[a-zA-Z0-9-]+$/.test(eventId)) {
             console.error('Invalid event ID format');
             return;
         }
-        // Update URL without reloading the page
         const newUrl = new URL(window.location);
         newUrl.searchParams.set('video', eventId);
         window.history.pushState({}, '', newUrl);
 
-        // Reset the transcript container
         const transcriptContainer = document.getElementById('transcript-container');
         transcriptContainer.innerHTML = '<div class="p-3 text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading transcript...</div>';
         transcriptData = [];
         activeSegmentId = null;
 
-        // Remove existing event listeners
         videoPlayer.removeEventListener('timeupdate', updateActiveTranscriptSegment);
 
         fetch(`/api/event/${encodeURIComponent(eventId)}`)
@@ -472,26 +990,19 @@
 
             currentEvent = data;
             const title = document.getElementById('video-title');
-            
-            // First remove all tracks and reset video
             videoPlayer.pause();
-            
-            // Remove all tracks first
+
             const tracks = videoPlayer.getElementsByTagName('track');
             while (tracks.length > 0) {
                 tracks[0].parentNode.removeChild(tracks[0]);
             }
-            
-            // Clear video source and force reload
+
             videoPlayer.removeAttribute('src');
             videoPlayer.load();
-            
-            // Wait for video reset before adding new content
+
             setTimeout(() => {
-                // Set new video source
                 videoPlayer.src = `/video/${encodeURIComponent(eventId)}`;
-                
-                // Add caption track if transcription exists
+
                 if (data.has_transcript) {
                     const captionTrack = document.createElement('track');
                     captionTrack.kind = 'captions';
@@ -499,22 +1010,19 @@
                     captionTrack.src = `/api/captions/${encodeURIComponent(eventId)}`;
                     captionTrack.default = true;
                     videoPlayer.appendChild(captionTrack);
-                    
-                    // Load the transcript
+
                     loadTranscript(eventId);
                 } else {
-                    // No transcript available
                     transcriptContainer.innerHTML = '<div class="transcript-placeholder">No transcript available for this video</div>';
                 }
 
-                // Add storyboard track
                 const storyboardTrack = document.createElement('track');
                 storyboardTrack.kind = 'metadata';
                 storyboardTrack.label = 'thumbnails';
                 storyboardTrack.src = `/api/storyboard/vtt/${encodeURIComponent(eventId)}`;
                 storyboardTrack.default = true;
                 videoPlayer.appendChild(storyboardTrack);
-                
+
                 let titleText = `${data.camera_name || data.camera_id} - ${formatTimestamp(data.event_start)}`;
                 if (!data.has_transcript) {
                     titleText += ' (Transcription pending)';
@@ -525,52 +1033,45 @@
         .catch(error => {
             console.error('Error loading event:', error);
             document.getElementById('video-title').textContent = 'Error loading video';
-            // Remove video parameter from URL on error
             const newUrl = new URL(window.location);
             newUrl.searchParams.delete('video');
             window.history.pushState({}, '', newUrl);
-            
-            // Clear transcript
             transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
         });
     }
 
-    // Handle browser back/forward buttons
     window.addEventListener('popstate', function() {
         const urlParams = new URLSearchParams(window.location.search);
         const videoId = urlParams.get('video');
         if (videoId) {
             loadVideo(videoId);
         } else {
-            // Clear video if no video parameter
             videoPlayer.src = '';
             document.getElementById('video-title').textContent = 'Select an event';
             currentEvent = null;
         }
     });
 
-    // Update immediately and then every 5 seconds
-    updateEvents();
-    setInterval(updateEvents, 5000);
+    document.getElementById('load-more')?.addEventListener('click', () => {
+        if (nextCursor) {
+            fetchEvents({ append: true });
+        }
+    });
 
-    // Add these new functions for preview handling
     let currentPreviewInterval = null;
     let previewVttData = {};
 
     async function startPreview(eventId, element, duration) {
         const preview = element.querySelector('.event-preview');
         const previewImg = preview.querySelector('img');
-        
-        // Show preview and set initial image immediately
+
         preview.style.display = 'block';
         previewImg.src = `/api/storyboard/image/${eventId}`;
-        
-        // Clear any existing interval
+
         if (currentPreviewInterval) {
             clearInterval(currentPreviewInterval);
         }
 
-        // Start loading VTT data if not already cached
         if (!previewVttData[eventId]) {
             try {
                 const response = await fetch(`/api/storyboard/vtt/${eventId}`);
@@ -585,15 +1086,14 @@
         let currentTime = 0;
         const fps = 4;
 
-        // Start animation loop immediately after VTT data is available
         currentPreviewInterval = setInterval(() => {
             currentTime = (currentTime + 1) % Math.ceil(duration);
-            const frame = previewVttData[eventId].find(f => 
+            const frame = previewVttData[eventId].find(f =>
                 currentTime >= f.startTime && currentTime <= f.endTime
             );
-            
+
             if (frame) {
-                const [x, y, width, height] = frame.position;
+                const [x, y] = frame.position;
                 previewImg.style.left = `-${x}px`;
                 previewImg.style.top = `-${y}px`;
             }
@@ -603,7 +1103,7 @@
     function stopPreview(element) {
         const preview = element.querySelector('.event-preview');
         preview.style.display = 'none';
-        
+
         if (currentPreviewInterval) {
             clearInterval(currentPreviewInterval);
             currentPreviewInterval = null;
@@ -633,34 +1133,15 @@
         return frames;
     }
 
-    function resetFilters() {
-        // Reset filter values to default
-        const today = new Date().toISOString().split('T')[0];
-        document.getElementById('date-filter').value = today;
-        document.getElementById('camera-filter').value = '';
-        document.getElementById('time-start').value = '';
-        document.getElementById('time-end').value = '';
-        currentFilters = {
-            date: today,
-            camera_id: '',
-            timeStart: '',
-            timeEnd: ''
-        };
-        updateEvents(); // Refresh events with reset filters
-    }
-
-    document.getElementById('reset-filters').addEventListener('click', resetFilters);
-
     function formatTimeDisplay(seconds) {
         const hours = Math.floor(seconds / 3600);
         const minutes = Math.floor((seconds % 3600) / 60);
         const secs = Math.floor(seconds % 60);
-        
+
         if (hours > 0) {
             return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-        } else {
-            return `${minutes}:${secs.toString().padStart(2, '0')}`;
         }
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
     }
 
     function loadTranscript(eventId) {
@@ -674,10 +1155,7 @@
         .then(vttContent => {
             transcriptData = parseTranscriptVTT(vttContent);
             renderTranscript();
-            
-            // Add timeupdate event listener to highlight current segment
             videoPlayer.addEventListener('timeupdate', updateActiveTranscriptSegment);
-            
         })
         .catch(error => {
             console.error('Error loading transcript:', error);
@@ -691,27 +1169,23 @@
         const segments = [];
         let currentSegment = null;
 
-        // Skip WebVTT header
         let i = 0;
         while (i < lines.length && !lines[i].includes('-->')) {
             i++;
         }
 
-        // Parse cues
         for (; i < lines.length; i++) {
             const line = lines[i].trim();
-            
+
             if (line.includes('-->')) {
-                // This is a timestamp line
                 const [start, end] = line.split('-->').map(t => {
-                    // Parse timestamp like "00:00:01.000"
                     const parts = t.trim().split(':');
-                    const seconds = parseFloat(parts[parts.length-1]);
-                    const minutes = parseInt(parts[parts.length-2]);
+                    const seconds = parseFloat(parts[parts.length - 1]);
+                    const minutes = parseInt(parts[parts.length - 2]);
                     const hours = parts.length > 2 ? parseInt(parts[0]) : 0;
                     return hours * 3600 + minutes * 60 + seconds;
                 });
-                
+
                 currentSegment = {
                     id: `segment-${segments.length}`,
                     start,
@@ -719,16 +1193,13 @@
                     text: ''
                 };
             } else if (line !== '' && currentSegment) {
-                // This is a text line
                 currentSegment.text += (currentSegment.text ? ' ' : '') + line;
             } else if (line === '' && currentSegment && currentSegment.text) {
-                // End of segment
                 segments.push(currentSegment);
                 currentSegment = null;
             }
         }
 
-        // Add the last segment if it exists
         if (currentSegment && currentSegment.text) {
             segments.push(currentSegment);
         }
@@ -738,12 +1209,12 @@
 
     function renderTranscript() {
         const transcriptContainer = document.getElementById('transcript-container');
-        
+
         if (transcriptData.length === 0) {
             transcriptContainer.innerHTML = '<div class="transcript-placeholder">No transcript available</div>';
             return;
         }
-        
+
         const html = transcriptData.map(segment => `
             <div id="${segment.id}" class="transcript-segment">
                 <div class="transcript-thumbnail" onclick="seekToTime(${segment.start})">
@@ -757,17 +1228,14 @@
                 </div>
             </div>
         `).join('');
-        
+
         transcriptContainer.innerHTML = html;
-        
-        // Initialize thumbnails
         updateThumbnailPositions();
     }
 
     function updateThumbnailPositions() {
         if (!transcriptData.length || !currentEvent) return;
-        
-        // Load storyboard VTT data if not already loaded
+
         if (!previewVttData[currentEvent.event_id]) {
             fetch(`/api/storyboard/vtt/${currentEvent.event_id}`)
             .then(response => response.text())
@@ -785,24 +1253,21 @@
 
     function positionThumbnailImages() {
         if (!currentEvent || !previewVttData[currentEvent.event_id]) return;
-        
+
         const vttData = previewVttData[currentEvent.event_id];
         const thumbnailImages = document.querySelectorAll('.transcript-thumbnail img');
-        
+
         thumbnailImages.forEach(img => {
             const segmentTime = parseFloat(img.dataset.segmentTime);
             const frame = findFrameForTime(vttData, segmentTime);
-            
+
             if (frame) {
-                // The original storyboard image has thumbs of 160x90px
-                const [x, y, width, height] = frame.position;
-                
+                const [x, y] = frame.position;
+
                 if (largeThumbnails) {
-                    // Use original size for large thumbnails
                     img.style.left = `-${x}px`;
                     img.style.top = `-${y}px`;
                 } else {
-                    // Scale down for small thumbnails
                     img.style.left = `-${x / 2}px`;
                     img.style.top = `-${y / 2}px`;
                 }
@@ -811,7 +1276,7 @@
     }
 
     function findFrameForTime(vttData, time) {
-        return vttData.find(frame => time >= frame.startTime && time <= frame.endTime) || 
+        return vttData.find(frame => time >= frame.startTime && time <= frame.endTime) ||
                (time > vttData[vttData.length - 1]?.endTime ? vttData[vttData.length - 1] : vttData[0]);
     }
 
@@ -824,50 +1289,43 @@
 
     function updateActiveTranscriptSegment() {
         if (!videoPlayer || transcriptData.length === 0) return;
-        
+
         const currentTime = videoPlayer.currentTime;
         let activeSegment = null;
-        
-        // Find the current segment
+
         for (const segment of transcriptData) {
             if (currentTime >= segment.start && currentTime <= segment.end) {
                 activeSegment = segment;
                 break;
             }
         }
-        
-        // If no segment found but we're after the last segment's end time,
-        // consider the last segment as active
+
         if (!activeSegment && currentTime > transcriptData[transcriptData.length - 1].end) {
             activeSegment = transcriptData[transcriptData.length - 1];
         }
-        
-        // If no segment is active or it's the same as before, do nothing
+
         if (!activeSegment || (activeSegmentId && activeSegment.id === activeSegmentId)) {
             return;
         }
-        
-        // Remove active class from previous segment
+
         if (activeSegmentId) {
             const prevElement = document.getElementById(activeSegmentId);
             if (prevElement) {
                 prevElement.classList.remove('active');
             }
         }
-        
-        // Add active class to current segment
+
         const currentElement = document.getElementById(activeSegment.id);
         if (currentElement) {
             currentElement.classList.add('active');
             activeSegmentId = activeSegment.id;
-            
-            // Auto-scroll to active segment if enabled
+
             if (autoScroll) {
                 const container = document.getElementById('transcript-container');
                 const elementTop = currentElement.offsetTop;
                 const containerHeight = container.clientHeight;
                 const scrollPosition = elementTop - (containerHeight / 2);
-                
+
                 container.scrollTo({
                     top: scrollPosition,
                     behavior: 'smooth'
@@ -876,19 +1334,17 @@
         }
     }
 
-    // Toggle auto-scrolling and thumbnail size
     document.addEventListener('DOMContentLoaded', function() {
         const autoScrollToggle = document.getElementById('auto-scroll-toggle');
         autoScrollToggle.addEventListener('change', function() {
             autoScroll = this.checked;
         });
-        
-        // Add thumbnail size toggle functionality
+
         const thumbnailSizeToggle = document.getElementById('thumbnail-size-toggle');
         thumbnailSizeToggle.addEventListener('click', function() {
             largeThumbnails = !largeThumbnails;
             const container = document.getElementById('transcript-container');
-            
+
             if (largeThumbnails) {
                 container.classList.add('large-thumbnails');
                 this.innerHTML = '<i class="bi bi-arrows-angle-contract"></i>';
@@ -896,22 +1352,18 @@
                 container.classList.remove('large-thumbnails');
                 this.innerHTML = '<i class="bi bi-arrows-angle-expand"></i>';
             }
-            
-            // Update positions of thumbnails based on new size
+
             positionThumbnailImages();
         });
-        
-        // Add loadedmetadata event listener to the video player
+
         videoPlayer.addEventListener('loadedmetadata', function() {
             if (currentEvent && transcriptData.length > 0) {
                 updateThumbnailPositions();
             }
         });
-        
-        // Initialize filters when page loads
+
         initializeFilters();
-        
-        // Check if there's a video ID in the URL
+
         const urlParams = new URLSearchParams(window.location.search);
         const videoId = urlParams.get('video');
         if (videoId) {
@@ -919,7 +1371,6 @@
         }
     });
 
-    // This function needs to be global to be called from the HTML
     window.seekToTime = seekToTime;
 </script>
-{% endblock %} 
+{% endblock %}

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use zumblezay::app;
+use zumblezay::transcripts;
 use zumblezay::AppState;
 
 struct SeedEvent {
@@ -270,6 +271,7 @@ fn insert_transcript(
         "segments": segments
     });
 
+    let raw_response_string = raw_response.to_string();
     conn.execute(
         "INSERT INTO transcriptions (
             event_id,
@@ -290,10 +292,17 @@ fn insert_transcript(
             state.transcription_service.as_str(),
             format!("{}/{}", state.whisper_url.as_str(), event_id),
             5000,
-            raw_response.to_string(),
+            raw_response_string,
         ],
     )
     .context("failed to insert transcription")?;
+
+    transcripts::update_transcript_search_from_str(
+        &conn,
+        event_id,
+        &raw_response_string,
+    )
+    .context("failed to update transcript search index")?;
 
     Ok(())
 }

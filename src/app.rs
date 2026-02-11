@@ -15,6 +15,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::Utc;
 use clap::Parser;
 use fs2::FileExt as Fs2FileExt;
 use r2d2::Pool;
@@ -307,16 +308,41 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 struct EventFilters {
     date: Option<String>,
+    date_start: Option<String>,
+    date_end: Option<String>,
     camera_id: Option<String>,
     time_start: Option<String>,
     time_end: Option<String>,
+    q: Option<String>,
+    cursor_start: Option<f64>,
+    cursor_event_id: Option<String>,
+    limit: Option<usize>,
+}
+
+fn prepare_search_match(term: &str) -> String {
+    let tokens: Vec<String> = term
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            let escaped = token.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        })
+        .collect();
+
+    if tokens.is_empty() {
+        let escaped = term.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    } else {
+        tokens.join(" AND ")
+    }
 }
 
 #[axum::debug_handler]
 async fn get_completed_events(
     State(state): State<Arc<AppState>>,
     Query(filters): Query<EventFilters>,
-) -> Result<Json<Vec<TranscriptListItem>>, (StatusCode, String)> {
+) -> Result<Json<EventPage>, (StatusCode, String)> {
+    let request_started = std::time::Instant::now();
     let camera_names: HashMap<String, String> =
         state.camera_name_cache.lock().await.clone();
     let conn = state
@@ -324,28 +350,131 @@ async fn get_completed_events(
         .get()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let date = filters.date.ok_or((
-        StatusCode::BAD_REQUEST,
-        "Date filter is required".to_string(),
-    ))?;
+    let (date_start, date_end) =
+        if filters.date_start.is_some() || filters.date_end.is_some() {
+            let start = filters
+                .date_start
+                .clone()
+                .or_else(|| filters.date_end.clone())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "Date start or end is required".to_string(),
+                ))?;
+            let end = filters.date_end.clone().unwrap_or_else(|| start.clone());
+            (start, end)
+        } else if let Some(date) = filters.date.clone() {
+            (date.clone(), date)
+        } else {
+            let today = Utc::now()
+                .with_timezone(&state.timezone)
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string();
+            (today.clone(), today)
+        };
 
     let transcription_type = state.transcription_service.clone();
 
+    let search_term = filters
+        .q
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(prepare_search_match);
+
     let (start_ts, end_ts) =
-        time_util::parse_local_date_to_utc_range_with_time(
-            &date,
+        time_util::parse_local_date_range_to_utc_range_with_time(
+            &date_start,
+            &date_end,
             &filters.time_start,
             &filters.time_end,
             state.timezone,
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let mut query: String = String::from(
-        "WITH filtered AS (
-            SELECT *
-            FROM events
-            WHERE event_start BETWEEN ? AND ?
-          )
+    let mut query: String = String::from("");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    let has_search = search_term.is_some();
+    let limit = filters.limit.unwrap_or(200).clamp(1, 500);
+    let query_limit = limit.saturating_add(1);
+    if has_search {
+        query.push_str(
+            "SELECT e1.event_id,
+                    e1.camera_id,
+                    e1.event_start,
+                    e1.event_end,
+                    EXISTS(
+                       SELECT 1
+                       FROM transcriptions t
+                       WHERE t.event_id = e1.event_id
+                         AND t.transcription_type = ?
+                    ) AS has_transcript,
+                    (
+                        SELECT snippet(
+                            transcript_search,
+                            1,
+                            '[[H]]',
+                            '[[/H]]',
+                            '…',
+                            12
+                        )
+                        FROM transcript_search
+                        WHERE transcript_search.event_id = e1.event_id
+                          AND transcript_search MATCH ?
+                        LIMIT 1
+                    ) AS snippet
+             FROM events e1 INDEXED BY idx_events_start_event
+             WHERE e1.event_start BETWEEN ? AND ?
+               AND e1.event_id IN (
+                    SELECT ts.event_id
+                    FROM transcript_search ts
+                    WHERE transcript_search MATCH ?
+               )",
+        );
+
+        params.push(Box::new(transcription_type));
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
+
+        if let Some(camera) = filters.camera_id.clone() {
+            query.push_str(" AND e1.camera_id = ?");
+            params.push(Box::new(camera));
+        }
+
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
+        query.push_str(" LIMIT ?");
+        params.push(Box::new(query_limit as i64));
+    } else {
+        query.push_str(
+            "
           SELECT e1.event_id,
                  e1.camera_id,
                  e1.event_start,
@@ -355,26 +484,59 @@ async fn get_completed_events(
                     FROM transcriptions t
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
-                 ) AS has_transcript
-          FROM filtered e1
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM filtered e2
-            WHERE e2.camera_id = e1.camera_id
-              AND e2.event_start <= e1.event_start
-              AND e2.event_end >= e1.event_end
-              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
-          )",
-    );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    params.push(Box::new(start_ts));
-    params.push(Box::new(end_ts));
-    params.push(Box::new(transcription_type));
-    if let Some(camera) = filters.camera_id {
-        query.push_str(" AND (camera_id = ?)");
-        params.push(Box::new(camera));
+                 ) AS has_transcript,
+                 NULL AS snippet
+          FROM events e1
+          WHERE e1.event_start BETWEEN ? AND ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM events e2
+              WHERE e2.camera_id = e1.camera_id
+                AND e2.event_start <= e1.event_start
+                AND e2.event_end >= e1.event_end
+                AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+                AND e2.event_start BETWEEN ? AND ?
+            )",
+        );
+        params.push(Box::new(transcription_type));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
     }
-    query.push_str(" ORDER BY event_start DESC");
+    if !has_search {
+        if let Some(camera) = filters.camera_id {
+            query.push_str(" AND (e1.camera_id = ?)");
+            params.push(Box::new(camera));
+        }
+    }
+    if !has_search {
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+    }
+    if !has_search {
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
+
+        query.push_str(" LIMIT ?");
+        params.push(Box::new(query_limit as i64));
+    }
 
     let mut stmt = conn
         .prepare(&query)
@@ -394,14 +556,31 @@ async fn get_completed_events(
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
                 has_transcript: row.get(4)?,
+                snippet: if has_search { row.get(5)? } else { None },
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let transcripts: Result<Vec<_>, _> = transcripts.collect();
-    Ok(Json(transcripts.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?))
+    let mut transcripts = transcripts
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut next_cursor = None;
+    if transcripts.len() > limit {
+        transcripts.pop();
+        if let Some(last) = transcripts.last() {
+            next_cursor = Some(EventCursor {
+                event_start: last.event_start,
+                event_id: last.event_id.clone(),
+            });
+        }
+    }
+
+    Ok(Json(EventPage {
+        events: transcripts,
+        next_cursor,
+        latency_ms: Some(request_started.elapsed().as_millis()),
+    }))
 }
 
 #[axum::debug_handler]
@@ -644,21 +823,58 @@ struct TranscriptListItem {
     event_start: f64,
     event_end: f64,
     has_transcript: bool,
+    snippet: Option<String>,
 }
 
-// Update the events page handler
+#[derive(Debug, Serialize)]
+struct EventCursor {
+    event_start: f64,
+    event_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EventPage {
+    events: Vec<TranscriptListItem>,
+    next_cursor: Option<EventCursor>,
+    latency_ms: Option<u128>,
+}
+
+// Update the events page handlers
 #[axum::debug_handler]
-async fn events_page() -> Html<String> {
+async fn events_latest_page() -> Html<String> {
     let templates = TEMPLATES.get().unwrap();
     let mut context = TeraContext::new();
     context.insert("build_info", &get_build_info());
-    context.insert("request_path", &"/events");
+    context.insert("request_path", &"/events/latest");
+    context.insert("page_title", &"Latest Events");
+    context.insert("mode", &"latest");
 
     let rendered = templates
         .render("events.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
     Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn events_search_page() -> Html<String> {
+    let templates = TEMPLATES.get().unwrap();
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/events/search");
+    context.insert("page_title", &"Search Events");
+    context.insert("mode", &"search");
+
+    let rendered = templates
+        .render("events.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn events_redirect() -> impl IntoResponse {
+    axum::response::Redirect::to("/events/latest")
 }
 
 fn create_app_lock() -> Result<File> {
@@ -767,7 +983,14 @@ async fn get_transcripts_csv(
     let (csv_content, _event_ids) =
         transcripts::get_formatted_transcripts_for_date(&state, &date)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("No events found for the date") {
+                    (StatusCode::NOT_FOUND, message)
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            })?;
 
     // Create the response with appropriate headers
     let headers = [
@@ -1480,8 +1703,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .compress_when(predicate);
 
     Router::new()
-        .route("/", get(events_page))
-        .route("/events", get(events_page))
+        .route("/", get(events_latest_page))
+        .route("/events", get(events_redirect))
+        .route("/events/latest", get(events_latest_page))
+        .route("/events/search", get(events_search_page))
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))

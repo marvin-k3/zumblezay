@@ -12,29 +12,45 @@ const EVENT_WITHOUT_TRANSCRIPT_ID = 'event-beta';
 const CAMERA_WITHOUT_TRANSCRIPT = 'camera-2';
 const ALT_EVENT_ID = 'event-gamma';
 const ALT_CAMERA_ID = 'camera-3';
+const SEARCH_TERM = 'package';
 
 type LoadOptions = {
-  date?: string;
+  dateStart?: string;
+  dateEnd?: string;
   cameraId?: string | null;
+  query?: string;
 };
 
-async function loadEventsPage(
+async function loadSearchPage(
   page: Page,
-  { date = EVENT_DATE, cameraId = CAMERA_ID }: LoadOptions = {},
+  {
+    dateStart = EVENT_DATE,
+    dateEnd = EVENT_DATE,
+    cameraId = CAMERA_ID,
+    query = '',
+  }: LoadOptions = {},
 ) {
-  await page.goto('/events');
+  await page.goto('/events/search');
 
   await page.waitForSelector('#camera-filter option[value="camera-1"]', {
     state: 'attached',
   });
 
-  const dateFilter = page.locator('#date-filter');
-  await dateFilter.fill(date);
-  await dateFilter.dispatchEvent('change');
+  await page.locator('#date-start').fill(dateStart);
+  await page.locator('#date-end').fill(dateEnd);
 
-  await expect(
-    page.locator('#event-list'),
-  ).not.toContainText('Loading events...');
+  if (query) {
+    await page.locator('#search-filter').fill(query);
+  } else {
+    await page.locator('#search-filter').fill('');
+  }
+
+  if (cameraId !== null) {
+    await page.selectOption('#camera-filter', cameraId ?? '');
+  }
+
+  await page.click('#search-submit');
+  await expect(page.locator('#event-list')).not.toContainText('Loading events...');
 
   const eventList = page.locator('.event-item');
 
@@ -43,10 +59,30 @@ async function loadEventsPage(
       .locator('.event-item', { hasText: cameraId })
       .first();
     await expect(eventItem).toBeVisible();
-    return { eventItem, eventList, dateFilter };
+    return { eventItem, eventList };
   }
 
-  return { eventList, dateFilter };
+  return { eventList };
+}
+
+async function loadLatestPage(
+  page: Page,
+  { dateStart = EVENT_DATE, dateEnd = EVENT_DATE }: LoadOptions = {},
+) {
+  await page.goto('/events/latest');
+
+  await page.waitForSelector('#camera-filter option[value="camera-1"]', {
+    state: 'attached',
+  });
+
+  await page.selectOption('#range-preset', 'custom');
+  await page.locator('#date-start').fill(dateStart);
+  await page.locator('#date-end').fill(dateEnd);
+  await page.click('#latest-refresh');
+
+  await expect(page.locator('#event-list')).not.toContainText('Loading events...');
+
+  return page.locator('.event-item');
 }
 
 function eventItemByCamera(page: Page, cameraId: string) {
@@ -54,8 +90,53 @@ function eventItemByCamera(page: Page, cameraId: string) {
 }
 
 test.describe('Events Dashboard', () => {
+  test('renders results meta without latency when missing', async ({ page }) => {
+    await page.route('**/api/events?**', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue();
+        return;
+      }
+      const url = new URL(route.request().url());
+      if (url.pathname !== '/api/events') {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const body = await response.json();
+      const { latency_ms, ...rest } = body as { latency_ms?: number };
+      await route.fulfill({
+        response,
+        body: JSON.stringify(rest),
+      });
+    });
+
+    await page.goto('/events/search');
+    await page.waitForSelector('#camera-filter option[value="camera-1"]', {
+      state: 'attached',
+    });
+    await page.locator('#date-start').fill(EVENT_DATE);
+    await page.locator('#date-end').fill(EVENT_DATE);
+    await page.selectOption('#camera-filter', CAMERA_ID);
+    await page.click('#search-submit');
+
+    const resultsMeta = page.locator('#results-meta');
+    await expect(resultsMeta).toContainText('events shown');
+    await expect(resultsMeta).not.toContainText('ms');
+  });
+
+  test('latest page loads seeded events for a custom range', async ({ page }) => {
+    const eventList = await loadLatestPage(page, {
+      dateStart: EVENT_DATE,
+      dateEnd: EVENT_DATE,
+    });
+
+    await expect(eventList).toHaveCount(2);
+    await expect(page.locator('#event-list')).toContainText(CAMERA_ID);
+    await expect(page.locator('#event-list')).toContainText(CAMERA_WITHOUT_TRANSCRIPT);
+  });
+
   test('loads seeded event and displays transcript', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page);
+    const { eventItem } = await loadSearchPage(page);
 
     await eventItem.click();
 
@@ -66,8 +147,8 @@ test.describe('Events Dashboard', () => {
     await expect(page.locator('body')).toContainText('Transcript');
   });
 
-  test('shows transcript availability indicator on recent events', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page);
+  test('shows transcript availability indicator on events', async ({ page }) => {
+    const { eventItem } = await loadSearchPage(page);
 
     const transcriptIndicator = eventItem.locator('.transcript-indicator');
     await expect(transcriptIndicator).toBeVisible();
@@ -75,7 +156,7 @@ test.describe('Events Dashboard', () => {
   });
 
   test('sets video and caption tracks when selecting an event', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page);
+    const { eventItem } = await loadSearchPage(page);
 
     await eventItem.click();
 
@@ -94,52 +175,79 @@ test.describe('Events Dashboard', () => {
   });
 
   test('filters events by camera, time, and resets filters', async ({ page }) => {
-    const { eventList, dateFilter } = await loadEventsPage(page, {
-      cameraId: null,
-    });
+    await loadSearchPage(page, { cameraId: null });
 
+    const eventList = page.locator('.event-item');
     await expect(eventList).toHaveCount(2);
 
+    await page.locator('#date-start').fill(EVENT_DATE);
+    await page.locator('#date-end').fill(EVENT_DATE);
+    await page.locator('#search-filter').fill('');
     await page.selectOption('#camera-filter', CAMERA_WITHOUT_TRANSCRIPT);
+    await page.click('#search-submit');
     await expect(eventList).toHaveCount(1);
     await expect(eventList.first()).toContainText(CAMERA_WITHOUT_TRANSCRIPT);
 
     await page.selectOption('#camera-filter', '');
+    await page.click('#search-submit');
     await expect(eventList).toHaveCount(2);
 
     const timeStart = page.locator('#time-start');
     const timeEnd = page.locator('#time-end');
-    await timeStart.fill('12:00:00');
-    await timeStart.dispatchEvent('change');
-    await timeEnd.fill('23:59:59');
-    await timeEnd.dispatchEvent('change');
+    await timeStart.fill('12:00');
+    await timeEnd.fill('23:59');
+    await page.click('#search-submit');
 
     await expect(eventList).toHaveCount(1);
     await expect(eventList.first()).toContainText(CAMERA_WITHOUT_TRANSCRIPT);
 
     await timeStart.fill('');
-    await timeStart.dispatchEvent('change');
     await timeEnd.fill('');
-    await timeEnd.dispatchEvent('change');
+    await page.click('#search-submit');
     await expect(eventList).toHaveCount(2);
 
-    await dateFilter.fill(ALT_EVENT_DATE);
-    await dateFilter.dispatchEvent('change');
+    await page.locator('#date-start').fill(ALT_EVENT_DATE);
+    await page.locator('#date-end').fill(ALT_EVENT_DATE);
+    await page.click('#search-submit');
     await expect(eventList).toHaveCount(1);
     await expect(eventList.first()).toContainText(ALT_CAMERA_ID);
 
-    await page.click('#reset-filters');
-    const today = new Date().toLocaleDateString('en-CA');
-    await expect(dateFilter).toHaveValue(today);
+    await page.click('#search-reset');
+    const today = new Date();
+    const endDate = today.toISOString().split('T')[0];
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - 29);
+    const startValue = startDate.toISOString().split('T')[0];
+
+    await expect(page.locator('#date-start')).toHaveValue(startValue);
+    await expect(page.locator('#date-end')).toHaveValue(endDate);
     await expect(page.locator('#camera-filter')).toHaveValue('');
     await expect(page.locator('#time-start')).toHaveValue('');
     await expect(page.locator('#time-end')).toHaveValue('');
-    await expect(eventList).toHaveCount(0);
-    await expect(page.locator('#event-list')).toContainText('No events available');
+    await expect(page.locator('#search-filter')).toHaveValue('');
+    await expect(page.locator('#event-list')).toContainText(
+      'Run a search to see results.',
+    );
+  });
+
+  test('filters events by transcript search', async ({ page }) => {
+    const { eventList } = await loadSearchPage(page, {
+      cameraId: null,
+      query: SEARCH_TERM,
+    });
+
+    await expect(eventList).toHaveCount(1);
+    await expect(eventList.first()).toContainText(CAMERA_ID);
+    await expect(eventList.first()).toContainText('Transcript available');
+    await expect(eventList.first().locator('mark').first()).toContainText(
+      SEARCH_TERM,
+    );
+    const resultsMeta = page.locator('#results-meta');
+    await expect(resultsMeta).toContainText('ms');
   });
 
   test('handles events without transcripts gracefully', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page, {
+    const { eventItem } = await loadSearchPage(page, {
       cameraId: CAMERA_WITHOUT_TRANSCRIPT,
     });
 
@@ -157,7 +265,7 @@ test.describe('Events Dashboard', () => {
   });
 
   test('shows and hides storyboard preview on hover', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page);
+    const { eventItem } = await loadSearchPage(page);
 
     const preview = eventItem.locator('.event-preview');
     await expect(preview).toBeHidden();
@@ -174,7 +282,7 @@ test.describe('Events Dashboard', () => {
   });
 
   test('deep links directly to an event', async ({ page }) => {
-    await page.goto(`/events?video=${EVENT_ID}`);
+    await page.goto(`/events/latest?video=${EVENT_ID}`);
 
     const videoPlayer = page.locator('#video-player');
     await expect(videoPlayer).toHaveAttribute(
@@ -185,67 +293,5 @@ test.describe('Events Dashboard', () => {
     const transcriptSegment = page.locator('.transcript-segment').first();
     await expect(transcriptSegment).toContainText(TRANSCRIPT_SNIPPET);
     await expect(page.locator('#video-title')).toContainText(CAMERA_ID);
-  });
-
-  test('transcript controls respond to user interaction', async ({ page }) => {
-    const { eventItem } = await loadEventsPage(page);
-
-    await eventItem.click();
-
-    const autoScrollToggle = page.locator('#auto-scroll-toggle');
-    await autoScrollToggle.uncheck();
-    await expect(autoScrollToggle).not.toBeChecked();
-
-    const thumbnailToggle = page.locator('#thumbnail-size-toggle');
-    const transcriptContainer = page.locator('#transcript-container');
-    await thumbnailToggle.click();
-    await expect(transcriptContainer).toHaveClass(/large-thumbnails/);
-
-    await page.evaluate(() => {
-      const global = window as unknown as Record<string, unknown>;
-      const original = global.seekToTime as ((time: number) => void) | undefined;
-      const calls: number[] = [];
-      global.__seekInvocations = calls;
-      global.seekToTime = ((time: number) => {
-        calls.push(time);
-        if (typeof original === 'function') {
-          original.call(global, time);
-        }
-      }) as unknown;
-    });
-
-    const timestamps = page.locator('.transcript-timestamp');
-    await expect(timestamps).toHaveCount(2);
-    const timestamp = timestamps.nth(1);
-    const onclickAttr = (await timestamp.getAttribute('onclick')) ?? '';
-    const match = onclickAttr.match(/seekToTime\(([\d.]+)\)/);
-    expect(match).not.toBeNull();
-    const targetTime = match ? parseFloat(match[1]) : 0;
-
-    await timestamp.click();
-    const seekInvocations = await page.evaluate(() => {
-      const global = window as unknown as Record<string, unknown>;
-      return (global.__seekInvocations as number[]) ?? [];
-    });
-    expect(seekInvocations).toContain(targetTime);
-
-    await thumbnailToggle.click();
-    await expect(transcriptContainer).not.toHaveClass(/large-thumbnails/);
-    await autoScrollToggle.check();
-    await expect(autoScrollToggle).toBeChecked();
-  });
-
-  test('renders transcript for alternate event when date changes', async ({ page }) => {
-    const { dateFilter } = await loadEventsPage(page, {
-      date: ALT_EVENT_DATE,
-      cameraId: ALT_CAMERA_ID,
-    });
-
-    const eventItem = eventItemByCamera(page, ALT_CAMERA_ID);
-    await eventItem.click();
-
-    const transcriptSegment = page.locator('.transcript-segment').first();
-    await expect(transcriptSegment).toContainText(ALT_TRANSCRIPT_SNIPPET);
-    await expect(dateFilter).toHaveValue(ALT_EVENT_DATE);
   });
 });

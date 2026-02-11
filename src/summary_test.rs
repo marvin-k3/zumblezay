@@ -6,6 +6,7 @@ mod tests {
         get_daily_summary, save_daily_summary,
     };
     use crate::AppState;
+    use rusqlite::params;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -206,6 +207,53 @@ mod tests {
 
         assert_eq!(summary.content, "Updated content");
         assert_eq!(summary.duration_ms, 200);
+    }
+
+    #[tokio::test]
+    async fn test_get_daily_summary_returns_latest_when_unfiltered() {
+        let state = AppState::new_for_testing();
+        let conn = state.zumblezay_db.get().expect("db connection");
+
+        conn.execute(
+            "INSERT INTO daily_summaries
+             (date, created_at, model, prompt_name, summary_type, content, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "2023-02-01",
+                100,
+                "model-a",
+                "prompt-a",
+                "text",
+                "Older summary",
+                10
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO daily_summaries
+             (date, created_at, model, prompt_name, summary_type, content, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                "2023-02-01",
+                200,
+                "model-b",
+                "prompt-b",
+                "text",
+                "Newest summary",
+                20
+            ],
+        )
+        .unwrap();
+
+        let summary =
+            get_daily_summary(&state, "2023-02-01", None, None, "text")
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(summary.content, "Newest summary");
+        assert_eq!(summary.model, "model-b");
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ playwright-report/
 Thumbs.db
 
 .env
+run.local.sh
 models/
 events.db
 transcripts.db*

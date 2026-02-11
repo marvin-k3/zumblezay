@@ -12,6 +12,7 @@ Here are the guidelines:
    - Diaper/Potty (includes any mention of diapers, wipes, diaper pails, even if not an explicit diaper change)
    - Nap Times
    - Interactive Engagement (e.g., singing songs, playing games)
+   - Funny Moments (humorous remarks, jokes, or playful interactions)
    - Safety or Concerning Incidents
    - Disciplinary or Guidance Moments
 
@@ -51,10 +52,11 @@ pub const SUMMARY_USER_PROMPT: &str = r####"
 Please read the following CSV transcript lines and produce a markdown summary of notable events for the day.
 
 Remember to:
-- Categorize events by the specified categories (Routine Milestones, Meals & Snacks, Diaper/Potty, Nap Times, Interactive Engagement, Safety or Concerning Incidents, Disciplinary or Guidance Moments).
-- Use bullet points, keep them concise, and include timestamps but exclude room names.
-- Replace personal names with generic references (e.g., “the nanny,” “the child,” “the mother,” “the father,” “another adult”).
-- If there are no events for a given category, you may omit that category.
+- Categorize events by the specified categories (Routine Milestones, Meals & Snacks, Diaper/Potty, Nap Times, Interactive Engagement, Funny Moments, Safety or Concerning Incidents, Disciplinary or Guidance Moments).
+   - Include Funny Moments if any humorous remarks, jokes, or playful interactions occurred.
+   - Use bullet points, keep them concise, and include timestamps but exclude room names.
+   - Replace personal names with generic references (e.g., “the nanny,” “the child,” “the mother,” “the father,” “another adult”).
+   - If there are no events for a given category, you may omit that category.
 
 **CSV Data**:
 {transcript}"####;
@@ -65,8 +67,55 @@ Now produce a structured JSON list of the notable events from the same CSV.
 Remember to include:
 - "timestamp"
 - "room_name"
-- "event_type" (Routine Milestones, Meals & Snacks, Diaper/Potty, Nap Times, Interactive Engagement, Safety or Concerning Incidents, Disciplinary or Guidance Moments)
+- "event_type" (Routine Milestones, Meals & Snacks, Diaper/Potty, Nap Times, Interactive Engagement, Funny Moments, Safety or Concerning Incidents, Disciplinary or Guidance Moments)
 - "event_description"
 
 Replace any personal names with generic references. Only include events that actually appear in the CSV, and do not invent details.
 "####;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_PROMPT, SUMMARY_USER_PROMPT_JSON,
+    };
+
+    #[test]
+    fn summary_system_prompt_includes_required_categories() {
+        for category in [
+            "Routine Milestones",
+            "Meals & Snacks",
+            "Diaper/Potty",
+            "Nap Times",
+            "Interactive Engagement",
+            "Funny Moments",
+            "Safety or Concerning Incidents",
+            "Disciplinary or Guidance Moments",
+        ] {
+            assert!(
+                SUMMARY_SYSTEM_PROMPT.contains(category),
+                "missing category '{category}'"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_user_prompt_includes_transcript_placeholder() {
+        assert!(SUMMARY_USER_PROMPT.contains("{transcript}"));
+        assert!(SUMMARY_USER_PROMPT.contains("CSV Data"));
+    }
+
+    #[test]
+    fn summary_user_prompt_json_includes_required_fields() {
+        for field in [
+            "\"timestamp\"",
+            "\"room_name\"",
+            "\"event_type\"",
+            "\"event_description\"",
+        ] {
+            assert!(
+                SUMMARY_USER_PROMPT_JSON.contains(field),
+                "missing field {field}"
+            );
+        }
+    }
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Local-only arguments for run.sh. Copy to run.local.sh and edit as needed.
+
+RUN_BIN="zumblezay_server"
+
+RUN_ARGS=(
+  --enable-sync=false
+  --enable-transcription=false
+  --port=3011
+  --timezone=America/Los_Angeles
+  --video-path-replacement-prefix=/unifi-data
+  --events-db=data/events-YYYYMMDD.db
+  --zumblezay-db=data/zumblezay-YYYYMMDD.db
+  --cache-db=data/cache.db
+  --whisper-url=http://ai-host:9000/asr
+  --openai-api-key=replace-with-local-key
+  --openai-api-base=http://ai-host:4000/v1
+)

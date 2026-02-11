@@ -1,0 +1,10 @@
+[book]
+title = "Zumblezay Docs"
+description = "User and operator documentation for the Zumblezay Axum service."
+authors = ["Zumblezay maintainers"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"

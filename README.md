@@ -6,6 +6,11 @@ Zumblezay is an Axum-based service that collects camera events, transcripts, and
 - The primary binary is `zumblezay_server`; it wires databases, background workers, and the HTTP surface defined in `src/app.rs`.
 - Three SQLite databases are in play: a read-only events source, the application database (`zumblezay.db`), and a cache database for storyboard artefacts.
 
+## Documentation
+
+- User/operator docs live in the mdBook under `docs/` (`book.toml` + `docs/src`). Serve locally with `mdbook serve docs --open` or build with `mdbook build docs` (install via `cargo install mdbook` if needed).
+- The mdBook covers getting started, API usage, data model, operations, testing, and troubleshooting. The AI Agent Guide stays as the contributor map.
+
 ## Quick start
 
 ```bash
@@ -85,7 +90,7 @@ Daily summaries are cached in the `daily_summaries` table. The tests demonstrate
 ## Useful endpoints
 
 The integration tests cover the most important routes; refer to them as living examples of request/response behaviour:
-- `GET /api/events` with filters for `date`, `camera_id`, `time_start`, `time_end`.
+- `GET /api/events` with filters for `date` (legacy), `date_start`, `date_end`, `camera_id`, `time_start`, `time_end`, plus pagination via `limit`, `cursor_start`, `cursor_event_id`. Returns `{ events, next_cursor }` and includes `snippet` when searching.
 - `GET /api/cameras` after calling `cache_camera_names`.
 - `GET /api/transcripts/json/{date}` and `GET /api/transcripts/csv/{date}` for transcript exports.
 - `GET /api/event/{event_id}` for the combined event/transcription payload.
