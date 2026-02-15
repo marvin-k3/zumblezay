@@ -2,7 +2,7 @@ ARG GIT_BRANCH=unknown
 ARG IMAGE_TAG=unknown
 ARG GIT_SHA=unknown
 
-FROM rust:1.85-slim AS builder
+FROM rust:1.91-slim AS builder
 
 ARG GIT_BRANCH
 ARG IMAGE_TAG

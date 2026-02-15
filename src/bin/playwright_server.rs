@@ -1,17 +1,23 @@
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use axum::Router;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::{NaiveDate, NaiveTime, TimeZone};
 use clap::Parser;
 use rusqlite::params;
+use serde_json::json;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio::time::{sleep, Duration as TokioDuration};
 use zumblezay::app;
+use zumblezay::bedrock::{
+    BedrockClientTrait, BedrockCompletionResponse, BedrockUsage,
+};
 use zumblezay::transcripts;
 use zumblezay::AppState;
 
@@ -67,7 +73,10 @@ async fn main() -> Result<()> {
     initialize_logging();
     let args = Args::parse();
 
-    let mut state = AppState::new_for_testing();
+    let bedrock_client: Arc<dyn BedrockClientTrait> =
+        Arc::new(PlaywrightBedrockClient);
+    let mut state =
+        AppState::new_for_testing_with_clients(None, Some(bedrock_client));
     let video_root = prepare_video_assets(SEED_EVENTS)?;
     state.video_path_replacement_prefix = video_root
         .to_str()
@@ -95,6 +104,78 @@ async fn main() -> Result<()> {
         .context("server shutdown with error")?;
 
     Ok(())
+}
+
+struct PlaywrightBedrockClient;
+
+#[async_trait]
+impl BedrockClientTrait for PlaywrightBedrockClient {
+    async fn complete_text(
+        &self,
+        _model_id: &str,
+        system_prompt: &str,
+        _user_prompt: &str,
+        _max_tokens: i32,
+    ) -> Result<BedrockCompletionResponse> {
+        if system_prompt.contains("investigation planner") {
+            return Ok(BedrockCompletionResponse {
+                content: r#"{
+                    "search_queries": ["package", "porch"],
+                    "time_window_start_utc": "2024-01-01T00:00:00Z",
+                    "time_window_end_utc": "2026-12-31T23:59:59Z",
+                    "tool_calls": ["get_current_time"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 25,
+                    output_tokens: 12,
+                },
+                request_id: Some("playwright-plan".to_string()),
+            });
+        }
+
+        Ok(BedrockCompletionResponse {
+            content: json!({
+                "answer": "### Findings\nThe visitor left a **package** on the porch.",
+                "evidence_event_ids": ["event-alpha"]
+            })
+            .to_string(),
+            usage: BedrockUsage {
+                input_tokens: 40,
+                output_tokens: 20,
+            },
+            request_id: Some("playwright-answer".to_string()),
+        })
+    }
+
+    async fn complete_text_streaming(
+        &self,
+        _model_id: &str,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _max_tokens: i32,
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<BedrockCompletionResponse> {
+        let chunks = [
+            "{\"answer\":\"### Findings\\n",
+            "The visitor left a **package** on the porch.\",",
+            "\"evidence_event_ids\":[\"event-alpha\"]}",
+        ];
+        let mut content = String::new();
+        for chunk in chunks {
+            sleep(TokioDuration::from_millis(45)).await;
+            on_delta(chunk.to_string());
+            content.push_str(chunk);
+        }
+        Ok(BedrockCompletionResponse {
+            content,
+            usage: BedrockUsage {
+                input_tokens: 42,
+                output_tokens: 24,
+            },
+            request_id: Some("playwright-stream-answer".to_string()),
+        })
+    }
 }
 
 fn initialize_logging() {

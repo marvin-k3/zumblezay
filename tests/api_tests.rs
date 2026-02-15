@@ -17,6 +17,10 @@ use tokio::time;
 use tokio_util::bytes;
 use tower::util::ServiceExt;
 use tracing::debug;
+use zumblezay::bedrock::{
+    BedrockCompletionResponse, BedrockUsage, FakeBedrockClient,
+};
+use zumblezay::investigation::INVESTIGATION_SPEND_CATEGORY;
 use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
 use zumblezay::test_utils::init_test_logging;
 use zumblezay::AppState;
@@ -45,6 +49,17 @@ fn app_with_openai_client(
 ) -> (Arc<AppState>, Router) {
     let app_state = Arc::new(AppState::new_for_testing_with_openai_client(
         Some(openai_client),
+    ));
+    let routes = zumblezay::app::routes(app_state.clone());
+    (app_state, routes)
+}
+
+fn app_with_bedrock_client(
+    bedrock_client: Arc<dyn zumblezay::bedrock::BedrockClientTrait>,
+) -> (Arc<AppState>, Router) {
+    let app_state = Arc::new(AppState::new_for_testing_with_clients(
+        None,
+        Some(bedrock_client),
     ));
     let routes = zumblezay::app::routes(app_state.clone());
     (app_state, routes)
@@ -422,7 +437,7 @@ async fn test_events_api() {
         events_page.latency_ms.unwrap_or_default() < 60_000,
         "Expected latency_ms to be under 60s"
     );
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-2"));
@@ -454,7 +469,7 @@ async fn test_events_api() {
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| e["camera_id"] == "camera1"));
     assert_eq!(events.len(), 2);
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-3"));
@@ -470,7 +485,7 @@ async fn test_events_api() {
         make_api_request(app_router.clone(), &time_query_url).await;
     let events_page = validate_and_parse_events(status, &body);
     let events = &events_page.events;
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-2"));
@@ -500,7 +515,7 @@ async fn test_events_api() {
         "Expected 1 event in time range 10:00:00 to 23:59:00, got {}",
         events.len()
     );
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-3"));
 
@@ -695,8 +710,11 @@ async fn test_transcripts_json_endpoint_returns_expected_entries() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!("unexpected body: {}", String::from_utf8_lossy(&body));
+    }
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(payload["date"], "2024-03-15");
@@ -1174,8 +1192,14 @@ async fn test_status_api_reflects_runtime_metrics() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected body: {}",
+        String::from_utf8_lossy(&body)
+    );
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(payload["last_processed_time"].as_f64().unwrap(), 12345.5);
@@ -1228,8 +1252,11 @@ async fn test_models_api() {
         .unwrap();
 
     // Verify status and parse response
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!("unexpected body: {}", String::from_utf8_lossy(&body));
+    }
     let models_response: ModelsResponse =
         serde_json::from_slice(&body).unwrap();
 
@@ -1299,8 +1326,11 @@ async fn test_prompt_context_api() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!("unexpected body: {}", String::from_utf8_lossy(&body));
+    }
     assert_eq!(&body[..], b"test-data");
 }
 
@@ -1432,4 +1462,270 @@ async fn test_prompt_context_api_hmac_missing() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_investigate_endpoint_returns_answer_and_evidence() {
+    init_test_logging();
+    let bedrock_client = Arc::new(
+        FakeBedrockClient::new()
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "search_queries": ["child lunch yesterday", "child had lunch"],
+                    "time_window_start_utc": "2020-01-01T00:00:00Z",
+                    "time_window_end_utc": "2030-01-01T00:00:00Z",
+                    "tool_calls": ["get_current_time"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 120,
+                    output_tokens: 45,
+                },
+                request_id: Some("req-plan".to_string()),
+            })
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "answer": "The child appears to have lunch in event lunch-1.",
+                    "evidence_event_ids": ["lunch-1"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 160,
+                    output_tokens: 70,
+                },
+                request_id: Some("req-answer".to_string()),
+            }),
+    );
+    let (app_state, app_router) = app_with_custom_state(|state| {
+        state.bedrock_client = Some(bedrock_client);
+        state.investigation_model =
+            "unpriced.model-for-fail-closed-test".to_string();
+    });
+
+    let model_id = app_state.investigation_model.clone();
+    let conn = app_state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![model_id, 0.003, 0.015, Utc::now().timestamp()],
+    )
+    .unwrap();
+
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-1",
+        "2024-03-15",
+        "12:15:00",
+        "kitchen-cam",
+        "The child had lunch with noodles and fruit.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params!["lunch-1", "The child had lunch with noodles and fruit."],
+    )
+    .unwrap();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"question": "when did the child have lunch yesterday"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!("unexpected body: {}", String::from_utf8_lossy(&body));
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        payload["answer"].as_str().unwrap().contains("lunch"),
+        "unexpected answer: {}",
+        payload["answer"]
+    );
+    assert_eq!(payload["evidence"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["evidence"][0]["event_id"].as_str().unwrap(),
+        "lunch-1"
+    );
+    assert_eq!(
+        payload["usage"]["category"].as_str().unwrap(),
+        INVESTIGATION_SPEND_CATEGORY
+    );
+
+    let spend_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM bedrock_spend_ledger WHERE category = ?",
+            params![INVESTIGATION_SPEND_CATEGORY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(spend_rows, 2, "expected planner + answer ledger rows");
+}
+
+#[tokio::test]
+async fn test_investigate_endpoint_fails_closed_when_spend_logging_fails() {
+    init_test_logging();
+    let bedrock_client = Arc::new(
+        FakeBedrockClient::new().with_response(BedrockCompletionResponse {
+            content: r#"{
+                "search_queries": ["nanny hit child"],
+                "time_window_start_utc": "2020-01-01T00:00:00Z",
+                "time_window_end_utc": "2030-01-01T00:00:00Z",
+                "tool_calls": ["get_current_time"]
+            }"#
+            .to_string(),
+            usage: BedrockUsage {
+                input_tokens: 50,
+                output_tokens: 20,
+            },
+            request_id: Some("req-plan".to_string()),
+        }),
+    );
+    let (app_state, app_router) = app_with_custom_state(|state| {
+        state.bedrock_client = Some(bedrock_client);
+        state.investigation_model =
+            "unpriced.model-for-fail-closed-test".to_string();
+    });
+
+    insert_event_with_transcript(
+        &app_state,
+        "safety-1",
+        "2024-03-15",
+        "18:20:00",
+        "nursery-cam",
+        "Nanny and child are talking near the crib.",
+    );
+    let conn = app_state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params!["safety-1", "Nanny and child are talking near the crib."],
+    )
+    .unwrap();
+
+    // The model is intentionally unpriced, so spend logging must fail closed.
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"question": "did the nanny hit the child last month"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_investigate_stream_endpoint_emits_stream_events() {
+    init_test_logging();
+    let bedrock_client = Arc::new(
+        FakeBedrockClient::new()
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "search_queries": ["child lunch"],
+                    "time_window_start_utc": "2020-01-01T00:00:00Z",
+                    "time_window_end_utc": "2030-01-01T00:00:00Z",
+                    "tool_calls": ["get_current_time"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 40,
+                    output_tokens: 20,
+                },
+                request_id: Some("req-plan".to_string()),
+            })
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "answer": "Evidence indicates lunch happened in the kitchen.",
+                    "evidence_event_ids": ["lunch-stream-1"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 50,
+                    output_tokens: 25,
+                },
+                request_id: Some("req-answer".to_string()),
+            }),
+    );
+    let (app_state, app_router) = app_with_bedrock_client(bedrock_client);
+    let model_id = app_state.investigation_model.clone();
+    let conn = app_state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![model_id, 0.003, 0.015, Utc::now().timestamp()],
+    )
+    .unwrap();
+
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-stream-1",
+        "2024-03-15",
+        "12:15:00",
+        "kitchen-cam",
+        "The child had lunch in the kitchen.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params!["lunch-stream-1", "The child had lunch in the kitchen."],
+    )
+    .unwrap();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate/stream")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"question":"when did the child have lunch"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("event: answer_delta"),
+        "missing answer delta event: {}",
+        text
+    );
+    assert!(
+        text.contains("event: tool_use"),
+        "missing tool_use event: {}",
+        text
+    );
+    assert!(
+        text.contains("event: search_plan"),
+        "missing search_plan event: {}",
+        text
+    );
+    assert!(text.contains("event: done"), "missing done event: {}", text);
 }
