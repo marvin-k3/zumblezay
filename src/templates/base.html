@@ -18,13 +18,19 @@
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav">
                     <li class="nav-item">
-                        <a class="nav-link {% if request_path == '/events' %}active{% endif %}" href="/events">Events</a>
+                        <a class="nav-link {% if request_path == '/events/latest' %}active{% endif %}" href="/events/latest">Latest</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request_path == '/events/search' %}active{% endif %}" href="/events/search">Search</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if request_path == '/summary' %}active{% endif %}" href="/summary">Summary</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if request_path == '/transcript' %}active{% endif %}" href="/transcript">Transcript</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request_path == '/investigate' %}active{% endif %}" href="/investigate">Investigate</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if request_path == '/status' %}active{% endif %}" href="/status">System Status</a>

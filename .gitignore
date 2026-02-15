@@ -26,3 +26,4 @@ models/
 events.db
 transcripts.db*
 output/
+yolov8n.pt

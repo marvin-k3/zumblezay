@@ -1,13 +1,20 @@
+use crate::schema_registry::{SchemaArtifact, SchemaRegistry};
 use crate::time_util;
 use crate::AppState;
 use crate::Event;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
+
+pub const TRANSCRIPT_SEARCH_SCHEMA_VERSION: i32 = 1;
+const TRANSCRIPT_SEARCH_ARTIFACT: SchemaArtifact = SchemaArtifact {
+    key: "schema::transcript_search",
+    version: TRANSCRIPT_SEARCH_SCHEMA_VERSION as i64,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Transcript {
@@ -31,6 +38,170 @@ pub struct TranscriptEntry {
     pub camera: String,
     pub text: String,
     pub event_id: String,
+}
+
+fn collect_search_text(raw_json: &Value) -> Vec<String> {
+    let mut parts = Vec::new();
+
+    if let Some(text) = raw_json.get("text").and_then(Value::as_str) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_owned());
+        }
+    }
+
+    if let Some(segments) = raw_json.get("segments").and_then(Value::as_array) {
+        for segment in segments {
+            if let Some(segment_text) =
+                segment.get("text").and_then(Value::as_str)
+            {
+                let trimmed = segment_text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_owned());
+                }
+            }
+        }
+    }
+
+    parts
+}
+
+fn build_search_document(raw_json: &Value) -> Option<String> {
+    let parts = collect_search_text(raw_json);
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+pub fn mark_transcript_search_index_current(
+    conn: &mut Connection,
+    note: Option<&str>,
+) -> Result<()> {
+    let registry = SchemaRegistry::new(conn)?;
+    registry.mark_current(&TRANSCRIPT_SEARCH_ARTIFACT, note)
+}
+
+pub fn ensure_transcript_search_index(conn: &mut Connection) -> Result<()> {
+    let needs_rebuild = {
+        let registry = SchemaRegistry::new(conn)?;
+        registry.needs_update(&TRANSCRIPT_SEARCH_ARTIFACT)?
+    };
+
+    if !needs_rebuild {
+        return Ok(());
+    }
+
+    info!(
+        "Transcript search index missing or outdated (need version {}), rebuilding",
+        TRANSCRIPT_SEARCH_SCHEMA_VERSION
+    );
+
+    let stats = rebuild_transcript_search(conn)?;
+    info!(
+        "Transcript search rebuild complete: processed {} transcripts ({} indexed, {} empty docs, {} parse failures)",
+        stats.total_rows, stats.indexed_rows, stats.empty_documents, stats.parse_failures
+    );
+
+    let registry = SchemaRegistry::new(conn)?;
+    registry.mark_current(
+        &TRANSCRIPT_SEARCH_ARTIFACT,
+        Some(&format!(
+            "indexed={}, empty={}, parse_failures={}",
+            stats.indexed_rows, stats.empty_documents, stats.parse_failures
+        )),
+    )
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RebuildStats {
+    pub total_rows: usize,
+    pub indexed_rows: usize,
+    pub empty_documents: usize,
+    pub parse_failures: usize,
+}
+
+pub fn update_transcript_search(
+    conn: &Connection,
+    event_id: &str,
+    raw_json: &Value,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM transcript_search WHERE event_id = ?",
+        params![event_id],
+    )?;
+
+    if let Some(content) = build_search_document(raw_json) {
+        conn.execute(
+            "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+            params![event_id, content],
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn update_transcript_search_from_str(
+    conn: &Connection,
+    event_id: &str,
+    raw_response: &str,
+) -> Result<()> {
+    let raw_json: Value =
+        serde_json::from_str(raw_response).context(format!(
+            "Failed to parse raw_response JSON while indexing transcript {}",
+            event_id
+        ))?;
+    update_transcript_search(conn, event_id, &raw_json)
+}
+
+pub fn rebuild_transcript_search(
+    conn: &mut Connection,
+) -> Result<RebuildStats> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM transcript_search", [])?;
+
+    let mut select_stmt = tx.prepare(
+        "SELECT event_id, raw_response
+         FROM transcriptions",
+    )?;
+    let mut insert_stmt = tx.prepare(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+    )?;
+
+    let mut rows = select_stmt.query([])?;
+    let mut stats = RebuildStats::default();
+
+    while let Some(row) = rows.next()? {
+        stats.total_rows += 1;
+
+        let event_id: String = row.get(0)?;
+        let raw_response = row.get_ref(1)?.as_str()?;
+        match serde_json::from_str::<Value>(raw_response) {
+            Ok(raw_json) => {
+                if let Some(content) = build_search_document(&raw_json) {
+                    insert_stmt.execute(params![event_id, content])?;
+                    stats.indexed_rows += 1;
+                } else {
+                    stats.empty_documents += 1;
+                }
+            }
+            Err(err) => {
+                stats.parse_failures += 1;
+                warn!(
+                    "Skipping transcript {} during search index rebuild: {}",
+                    event_id, err
+                );
+            }
+        }
+    }
+
+    drop(rows);
+    drop(insert_stmt);
+    drop(select_stmt);
+    tx.commit()?;
+
+    Ok(stats)
 }
 
 #[instrument(skip(state, raw_response), err)]
@@ -57,6 +228,15 @@ pub async fn save_transcript(
             raw_response,
         ],
     )?;
+
+    if let Err(err) =
+        update_transcript_search_from_str(&conn, &event.id, raw_response)
+    {
+        warn!(
+            "Failed to update transcript search index for {}: {}",
+            event.id, err
+        );
+    }
 
     Ok(())
 }
@@ -280,6 +460,8 @@ pub async fn get_transcripts_with_event_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema_registry::SchemaRegistry;
+    use rusqlite::OptionalExtension;
     // Remove unused imports
 
     // Helper function to set up a test database with events and transcriptions
@@ -405,6 +587,72 @@ mod tests {
         assert_eq!(
             saved_response, raw_response,
             "Saved transcript should match the original"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_save_transcript_updates_search_index(
+    ) -> Result<(), anyhow::Error> {
+        let state = AppState::new_for_testing();
+        setup_test_db(&state).await?;
+
+        let conn = state.zumblezay_db.get()?;
+        let (event_id, event_start, event_end): (String, f64, f64) = conn
+            .query_row(
+                "SELECT event_id, event_start, event_end FROM events WHERE camera_id = 'camera1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        let event = Event {
+            id: event_id,
+            type_: "motion".to_string(),
+            camera_id: "camera1".to_string(),
+            camera_name: Some("Living Room".to_string()),
+            start: event_start,
+            end: event_end,
+            path: Some("/data/videos/test1.mp4".to_string()),
+        };
+
+        let raw_response = r#"{"text": "Search index should include this"}"#;
+        save_transcript(&state, &event, raw_response, 250).await?;
+
+        let indexed: Option<String> = conn
+            .query_row(
+                "SELECT content FROM transcript_search WHERE event_id = ?",
+                params![event.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        assert!(
+            indexed
+                .as_ref()
+                .map(|value| value.contains("Search index should include this"))
+                .unwrap_or(false),
+            "Expected transcript_search to include the transcript text"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transcript_search_metadata_is_current() -> Result<(), anyhow::Error>
+    {
+        let state = AppState::new_for_testing();
+        let mut conn = state.zumblezay_db.get()?;
+
+        ensure_transcript_search_index(&mut conn)?;
+
+        let registry = SchemaRegistry::new(&conn)?;
+        let state = registry.current_state(&TRANSCRIPT_SEARCH_ARTIFACT)?;
+
+        assert!(
+            state.as_ref().map(|current| current.version)
+                == Some(TRANSCRIPT_SEARCH_SCHEMA_VERSION as i64),
+            "Expected transcript search schema version to be current"
         );
 
         Ok(())

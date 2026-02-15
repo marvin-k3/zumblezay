@@ -423,3 +423,63 @@ async fn get_local_whisper_transcript(
     let duration_ms = start_time.elapsed().as_millis() as i64;
     Ok((response_text, duration_ms))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::get_transcript;
+    use crate::{AppState, Event};
+
+    fn make_event(path: Option<&str>) -> Event {
+        Event {
+            id: "event-1".to_string(),
+            type_: "motion".to_string(),
+            camera_id: "cam-1".to_string(),
+            camera_name: None,
+            start: 0.0,
+            end: 1.0,
+            path: path.map(|p| p.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn runpod_requires_api_key() {
+        let mut state = AppState::new_for_testing();
+        state.transcription_service = "runpod".to_string();
+        state.runpod_api_key = None;
+
+        let event = make_event(Some("/data/missing.mp4"));
+        let err = get_transcript(&event, &state).await.unwrap_err();
+        assert!(
+            err.to_string().contains("RunPod API key not configured"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_transcription_service_is_rejected() {
+        let mut state = AppState::new_for_testing();
+        state.transcription_service = "mystery".to_string();
+
+        let event = make_event(Some("/data/missing.mp4"));
+        let err = get_transcript(&event, &state).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown transcription service"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn whisper_local_errors_on_missing_file() {
+        let state = AppState::new_for_testing();
+        let event = make_event(Some("/data/does-not-exist.mp4"));
+
+        let err = get_transcript(&event, &state).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Video file does not exist"),
+            "unexpected error: {}",
+            err
+        );
+    }
+}

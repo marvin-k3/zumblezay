@@ -30,14 +30,24 @@ pub fn parse_local_date_to_utc_range_with_time(
     end_time: &Option<String>,
     timezone: Tz,
 ) -> Result<(f64, f64), anyhow::Error> {
+    let normalized_start = normalize_time_input(start_time);
+    let normalized_end = normalize_time_input(end_time);
     let naive_start = NaiveDateTime::parse_from_str(
-        &format!("{} {}", date, start_time.as_deref().unwrap_or("00:00:00")),
+        &format!(
+            "{} {}",
+            date,
+            normalized_start.as_deref().unwrap_or("00:00:00")
+        ),
         "%Y-%m-%d %H:%M:%S",
     )
     .map_err(|e| anyhow::anyhow!("Failed to parse start date: {}", e))?;
 
     let naive_end = NaiveDateTime::parse_from_str(
-        &format!("{} {}", date, end_time.as_deref().unwrap_or("23:59:59")),
+        &format!(
+            "{} {}",
+            date,
+            normalized_end.as_deref().unwrap_or("23:59:59")
+        ),
         "%Y-%m-%d %H:%M:%S",
     )
     .map_err(|e| anyhow::anyhow!("Failed to parse end date: {}", e))?;
@@ -60,6 +70,64 @@ pub fn parse_local_date_to_utc_range_with_time(
 
     // Convert to Unix timestamp for the database query
     Ok((utc_start.timestamp() as f64, utc_end.timestamp() as f64))
+}
+
+pub fn parse_local_date_range_to_utc_range_with_time(
+    start_date: &str,
+    end_date: &str,
+    start_time: &Option<String>,
+    end_time: &Option<String>,
+    timezone: Tz,
+) -> Result<(f64, f64), anyhow::Error> {
+    let normalized_start = normalize_time_input(start_time);
+    let normalized_end = normalize_time_input(end_time);
+    let naive_start = NaiveDateTime::parse_from_str(
+        &format!(
+            "{} {}",
+            start_date,
+            normalized_start.as_deref().unwrap_or("00:00:00")
+        ),
+        "%Y-%m-%d %H:%M:%S",
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to parse start date: {}", e))?;
+
+    let naive_end = NaiveDateTime::parse_from_str(
+        &format!(
+            "{} {}",
+            end_date,
+            normalized_end.as_deref().unwrap_or("23:59:59")
+        ),
+        "%Y-%m-%d %H:%M:%S",
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to parse end date: {}", e))?;
+
+    let local_start = timezone
+        .from_local_datetime(&naive_start)
+        .single()
+        .ok_or_else(|| {
+            anyhow::anyhow!("Failed to convert local date to UTC")
+        })?;
+    let utc_start = local_start.with_timezone(&Utc);
+
+    let local_end = timezone
+        .from_local_datetime(&naive_end)
+        .single()
+        .ok_or_else(|| {
+            anyhow::anyhow!("Failed to convert local date to UTC")
+        })?;
+    let utc_end = local_end.with_timezone(&Utc);
+
+    Ok((utc_start.timestamp() as f64, utc_end.timestamp() as f64))
+}
+
+fn normalize_time_input(value: &Option<String>) -> Option<String> {
+    value.as_ref().map(|time| {
+        if time.len() == 5 {
+            format!("{}:00", time)
+        } else {
+            time.clone()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -88,6 +156,17 @@ mod tests {
         let (start, end) = result.unwrap();
         assert_eq!(start, 1657229462.0); // Expected Unix timestamp for start
         assert_eq!(end, 1657258323.0); // Expected Unix timestamp for end
+
+        // Accept HH:MM time inputs
+        let start_time_short = Some("07:01".to_string());
+        let end_time_short = Some("15:02".to_string());
+        let result = parse_local_date_to_utc_range_with_time(
+            valid_date,
+            &start_time_short,
+            &end_time_short,
+            la_tz,
+        );
+        assert!(result.is_ok());
 
         // Test with invalid date
         let invalid_date = "invalid-date";
@@ -125,6 +204,32 @@ mod tests {
         let (start, end) = result.unwrap();
         assert_eq!(start, 1657229462.0); // Expected Unix timestamp for start
         assert_eq!(end, 1657290599.0); // Expected Unix timestamp for end with default time
+    }
+
+    #[tokio::test]
+    async fn test_parse_local_date_range_to_utc_range_with_time() {
+        let la_tz = chrono_tz::Australia::Adelaide;
+
+        let start_date = "2024-05-01";
+        let end_date = "2024-05-02";
+
+        let result = parse_local_date_range_to_utc_range_with_time(
+            start_date, end_date, &None, &None, la_tz,
+        );
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert!(start < end);
+
+        let result = parse_local_date_range_to_utc_range_with_time(
+            start_date,
+            end_date,
+            &Some("08:00:00".to_string()),
+            &Some("17:00:00".to_string()),
+            la_tz,
+        );
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert!(start < end);
     }
 
     #[tokio::test]

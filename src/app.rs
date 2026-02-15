@@ -1,4 +1,8 @@
 use super::storyboard;
+use crate::bedrock_spend::{
+    fetch_bedrock_pricing_from_aws, upsert_bedrock_pricing,
+};
+use crate::investigation::{self, InvestigationRequest};
 use crate::process_events;
 use crate::prompt_context;
 use crate::prompt_context::PromptContextError;
@@ -11,10 +15,14 @@ use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        Html, IntoResponse,
+    },
+    routing::{get, post},
     Json, Router,
 };
+use chrono::Utc;
 use clap::Parser;
 use fs2::FileExt as Fs2FileExt;
 use r2d2::Pool;
@@ -24,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::env;
 use std::fs::File;
 use std::io::SeekFrom;
@@ -35,7 +44,9 @@ use std::time::Duration;
 use tera::{Context as TeraContext, Tera};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::io::ReaderStream;
 use tower_http::compression::predicate::{
     NotForContentType, Predicate, SizeAbove,
@@ -250,6 +261,11 @@ fn init_templates() -> Tera {
         include_str!("templates/transcript.html"),
     )
     .unwrap();
+    tera.add_raw_template(
+        "investigate.html",
+        include_str!("templates/investigate.html"),
+    )
+    .unwrap();
     tera
 }
 
@@ -307,16 +323,41 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 struct EventFilters {
     date: Option<String>,
+    date_start: Option<String>,
+    date_end: Option<String>,
     camera_id: Option<String>,
     time_start: Option<String>,
     time_end: Option<String>,
+    q: Option<String>,
+    cursor_start: Option<f64>,
+    cursor_event_id: Option<String>,
+    limit: Option<usize>,
+}
+
+fn prepare_search_match(term: &str) -> String {
+    let tokens: Vec<String> = term
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            let escaped = token.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        })
+        .collect();
+
+    if tokens.is_empty() {
+        let escaped = term.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    } else {
+        tokens.join(" AND ")
+    }
 }
 
 #[axum::debug_handler]
 async fn get_completed_events(
     State(state): State<Arc<AppState>>,
     Query(filters): Query<EventFilters>,
-) -> Result<Json<Vec<TranscriptListItem>>, (StatusCode, String)> {
+) -> Result<Json<EventPage>, (StatusCode, String)> {
+    let request_started = std::time::Instant::now();
     let camera_names: HashMap<String, String> =
         state.camera_name_cache.lock().await.clone();
     let conn = state
@@ -324,28 +365,124 @@ async fn get_completed_events(
         .get()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let date = filters.date.ok_or((
-        StatusCode::BAD_REQUEST,
-        "Date filter is required".to_string(),
-    ))?;
+    let (date_start, date_end) =
+        if filters.date_start.is_some() || filters.date_end.is_some() {
+            let start = filters
+                .date_start
+                .clone()
+                .or_else(|| filters.date_end.clone())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "Date start or end is required".to_string(),
+                ))?;
+            let end = filters.date_end.clone().unwrap_or_else(|| start.clone());
+            (start, end)
+        } else if let Some(date) = filters.date.clone() {
+            (date.clone(), date)
+        } else {
+            let today = Utc::now()
+                .with_timezone(&state.timezone)
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string();
+            (today.clone(), today)
+        };
 
     let transcription_type = state.transcription_service.clone();
 
+    let search_term = filters
+        .q
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(prepare_search_match);
+
     let (start_ts, end_ts) =
-        time_util::parse_local_date_to_utc_range_with_time(
-            &date,
+        time_util::parse_local_date_range_to_utc_range_with_time(
+            &date_start,
+            &date_end,
             &filters.time_start,
             &filters.time_end,
             state.timezone,
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let mut query: String = String::from(
-        "WITH filtered AS (
-            SELECT *
-            FROM events
-            WHERE event_start BETWEEN ? AND ?
-          )
+    let mut query: String = String::from("");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    let has_search = search_term.is_some();
+    let limit = filters.limit.unwrap_or(200).clamp(1, 500);
+    let query_limit = limit.saturating_add(1);
+    if has_search {
+        query.push_str(
+            "WITH hits AS (
+                 SELECT ts.event_id,
+                        snippet(
+                            transcript_search,
+                            1,
+                            '[[H]]',
+                            '[[/H]]',
+                            '…',
+                            12
+                        ) AS snippet
+                 FROM transcript_search ts
+                 WHERE transcript_search MATCH ?
+             )
+             SELECT e1.event_id,
+                    e1.camera_id,
+                    e1.event_start,
+                    e1.event_end,
+                    EXISTS(
+                       SELECT 1
+                       FROM transcriptions t
+                       WHERE t.event_id = e1.event_id
+                         AND t.transcription_type = ?
+                    ) AS has_transcript,
+                    h.snippet AS snippet
+             FROM hits h
+             JOIN events e1 ON e1.event_id = h.event_id
+             WHERE e1.event_start BETWEEN ? AND ?",
+        );
+
+        if let Some(query_string) = search_term.as_ref() {
+            params.push(Box::new(query_string.clone()));
+        }
+        params.push(Box::new(transcription_type));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
+
+        if let Some(camera) = filters.camera_id.clone() {
+            query.push_str(" AND e1.camera_id = ?");
+            params.push(Box::new(camera));
+        }
+
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
+        query.push_str(" LIMIT ?");
+        params.push(Box::new(query_limit as i64));
+    } else {
+        query.push_str(
+            "
           SELECT e1.event_id,
                  e1.camera_id,
                  e1.event_start,
@@ -355,30 +492,69 @@ async fn get_completed_events(
                     FROM transcriptions t
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
-                 ) AS has_transcript
-          FROM filtered e1
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM filtered e2
-            WHERE e2.camera_id = e1.camera_id
-              AND e2.event_start <= e1.event_start
-              AND e2.event_end >= e1.event_end
-              AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
-          )",
-    );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    params.push(Box::new(start_ts));
-    params.push(Box::new(end_ts));
-    params.push(Box::new(transcription_type));
-    if let Some(camera) = filters.camera_id {
-        query.push_str(" AND (camera_id = ?)");
-        params.push(Box::new(camera));
+                 ) AS has_transcript,
+                 NULL AS snippet
+          FROM events e1
+          WHERE e1.event_start BETWEEN ? AND ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM events e2
+              WHERE e2.camera_id = e1.camera_id
+                AND e2.event_start <= e1.event_start
+                AND e2.event_end >= e1.event_end
+                AND (e2.event_start < e1.event_start OR e2.event_end > e1.event_end)
+                AND e2.event_start BETWEEN ? AND ?
+            )",
+        );
+        params.push(Box::new(transcription_type));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
+        params.push(Box::new(start_ts));
+        params.push(Box::new(end_ts));
     }
-    query.push_str(" ORDER BY event_start DESC");
+    if !has_search {
+        if let Some(camera) = filters.camera_id {
+            query.push_str(" AND (e1.camera_id = ?)");
+            params.push(Box::new(camera));
+        }
+    }
+    if !has_search {
+        let cursor_start = filters.cursor_start;
+        let cursor_event_id = filters.cursor_event_id.clone();
+        if cursor_start.is_some() ^ cursor_event_id.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cursor_start and cursor_event_id must be provided together"
+                    .to_string(),
+            ));
+        }
+        if let (Some(cursor_start), Some(cursor_event_id)) =
+            (cursor_start, cursor_event_id)
+        {
+            query.push_str(
+                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
+            );
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_start));
+            params.push(Box::new(cursor_event_id));
+        }
+    }
+    if !has_search {
+        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
 
-    let mut stmt = conn
-        .prepare(&query)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        query.push_str(" LIMIT ?");
+        params.push(Box::new(query_limit as i64));
+    }
+
+    let mut stmt = conn.prepare(&query).map_err(|e| {
+        error!(
+            error = %e,
+            has_search,
+            query = %query,
+            "Failed to prepare /api/events SQL query"
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|p| p.as_ref()).collect();
@@ -394,14 +570,46 @@ async fn get_completed_events(
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
                 has_transcript: row.get(4)?,
+                snippet: if has_search { row.get(5)? } else { None },
             })
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            error!(
+                error = %e,
+                has_search,
+                query = %query,
+                "Failed to execute /api/events SQL query"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
 
     let transcripts: Result<Vec<_>, _> = transcripts.collect();
-    Ok(Json(transcripts.map_err(|e| {
+    let mut transcripts = transcripts.map_err(|e| {
+        error!(
+            error = %e,
+            has_search,
+            query = %query,
+            "Failed to read /api/events SQL rows"
+        );
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?))
+    })?;
+
+    let mut next_cursor = None;
+    if transcripts.len() > limit {
+        transcripts.pop();
+        if let Some(last) = transcripts.last() {
+            next_cursor = Some(EventCursor {
+                event_start: last.event_start,
+                event_id: last.event_id.clone(),
+            });
+        }
+    }
+
+    Ok(Json(EventPage {
+        events: transcripts,
+        next_cursor,
+        latency_ms: Some(request_started.elapsed().as_millis()),
+    }))
 }
 
 #[axum::debug_handler]
@@ -644,21 +852,58 @@ struct TranscriptListItem {
     event_start: f64,
     event_end: f64,
     has_transcript: bool,
+    snippet: Option<String>,
 }
 
-// Update the events page handler
+#[derive(Debug, Serialize)]
+struct EventCursor {
+    event_start: f64,
+    event_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EventPage {
+    events: Vec<TranscriptListItem>,
+    next_cursor: Option<EventCursor>,
+    latency_ms: Option<u128>,
+}
+
+// Update the events page handlers
 #[axum::debug_handler]
-async fn events_page() -> Html<String> {
+async fn events_latest_page() -> Html<String> {
     let templates = TEMPLATES.get().unwrap();
     let mut context = TeraContext::new();
     context.insert("build_info", &get_build_info());
-    context.insert("request_path", &"/events");
+    context.insert("request_path", &"/events/latest");
+    context.insert("page_title", &"Latest Events");
+    context.insert("mode", &"latest");
 
     let rendered = templates
         .render("events.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
     Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn events_search_page() -> Html<String> {
+    let templates = TEMPLATES.get().unwrap();
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/events/search");
+    context.insert("page_title", &"Search Events");
+    context.insert("mode", &"search");
+
+    let rendered = templates
+        .render("events.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn events_redirect() -> impl IntoResponse {
+    axum::response::Redirect::to("/events/latest")
 }
 
 fn create_app_lock() -> Result<File> {
@@ -724,6 +969,10 @@ struct Args {
     #[arg(long, env = "OPENAI_API_BASE")]
     openai_api_base: Option<String>,
 
+    /// Optional Bedrock region override
+    #[arg(long, env = "AWS_REGION")]
+    bedrock_region: Option<String>,
+
     /// RunPod API key for transcription
     #[arg(long, env = "RUNPOD_API_KEY")]
     runpod_api_key: Option<String>,
@@ -743,6 +992,14 @@ struct Args {
     /// Default model to use for summary generation
     #[arg(long, default_value = "anthropic-claude-haiku")]
     default_summary_model: String,
+
+    /// Model ID used for investigation calls to Bedrock
+    #[arg(
+        long,
+        env = "BEDROCK_INVESTIGATION_MODEL",
+        default_value = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    )]
+    investigation_model: String,
 
     /// Original path prefix to replace in video paths
     #[arg(long, default_value = "/data")]
@@ -767,7 +1024,14 @@ async fn get_transcripts_csv(
     let (csv_content, _event_ids) =
         transcripts::get_formatted_transcripts_for_date(&state, &date)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("No events found for the date") {
+                    (StatusCode::NOT_FOUND, message)
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            })?;
 
     // Create the response with appropriate headers
     let headers = [
@@ -1445,6 +1709,21 @@ async fn transcript_page(State(state): State<Arc<AppState>>) -> Html<String> {
     Html(rendered)
 }
 
+#[axum::debug_handler]
+async fn investigate_page() -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/investigate");
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("investigate.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
 // Add a new API endpoint for transcripts with event IDs
 #[axum::debug_handler]
 async fn get_transcripts_json(
@@ -1463,12 +1742,123 @@ async fn get_transcripts_json(
     })))
 }
 
+#[axum::debug_handler]
+async fn investigate_videos(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvestigationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let response = investigation::investigate_question(&state, request)
+        .await
+        .map_err(|error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    })?;
+    Ok(Json(response))
+}
+
+#[axum::debug_handler]
+async fn investigate_videos_stream(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvestigationRequest>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let (tx, rx) = mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
+
+    tokio::spawn(async move {
+        if tx
+            .send(Ok(SseEvent::default().event("status").data("planning")))
+            .is_err()
+        {
+            return;
+        }
+
+        let worker_tx = tx.clone();
+        let mut worker = tokio::spawn(async move {
+            let mut stream_delta = {
+                let tx = worker_tx.clone();
+                move |delta: String| {
+                    let payload = serde_json::to_string(&serde_json::json!({
+                        "delta": delta
+                    }))
+                    .unwrap_or_else(|_| "{\"delta\":\"\"}".to_string());
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("answer_delta")
+                        .data(payload)));
+                }
+            };
+            let mut stream_search_plan = {
+                let tx = worker_tx.clone();
+                move |plan: investigation::SearchPlanEvent| {
+                    let payload =
+                        serde_json::to_string(&plan).unwrap_or_else(|_| {
+                            "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
+                        });
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("search_plan")
+                        .data(payload)));
+                }
+            };
+            let mut stream_tool_use = {
+                let tx = worker_tx.clone();
+                move |event: investigation::ToolUseEvent| {
+                    let payload =
+                        serde_json::to_string(&event).unwrap_or_else(|_| {
+                            "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
+                        });
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("tool_use")
+                        .data(payload)));
+                }
+            };
+
+            match investigation::investigate_question_streaming(
+                &state,
+                request,
+                &mut stream_search_plan,
+                &mut stream_tool_use,
+                &mut stream_delta,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let payload = serde_json::to_string(&response)
+                        .unwrap_or_else(|_| {
+                            "{\"error\":\"serialization\"}".to_string()
+                        });
+                    let _ = worker_tx.send(Ok(SseEvent::default()
+                        .event("done")
+                        .data(payload)));
+                }
+                Err(error) => {
+                    let _ = worker_tx.send(Ok(SseEvent::default()
+                        .event("error")
+                        .data(error.to_string())));
+                }
+            }
+        });
+
+        tokio::select! {
+            _ = tx.closed() => {
+                worker.abort();
+                let _ = worker.await;
+            }
+            _ = &mut worker => {}
+        }
+    });
+
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    )
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
         .and(NotForContentType::GRPC)
         // still don't compress images
         .and(NotForContentType::IMAGES)
+        // don't compress SSE; compression can buffer and break progressive updates
+        .and(NotForContentType::const_new("text/event-stream"))
         // also don't compress JSON
         .and(NotForContentType::const_new("video/mp4"));
 
@@ -1480,12 +1870,15 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .compress_when(predicate);
 
     Router::new()
-        .route("/", get(events_page))
-        .route("/events", get(events_page))
+        .route("/", get(events_latest_page))
+        .route("/events", get(events_redirect))
+        .route("/events/latest", get(events_latest_page))
+        .route("/events/search", get(events_search_page))
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))
         .route("/transcript", get(transcript_page))
+        .route("/investigate", get(investigate_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route("/api/models", get(get_available_models))
@@ -1494,6 +1887,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
         .route("/api/transcripts/json/{date}", get(get_transcripts_json))
+        .route("/api/investigate", post(investigate_videos))
+        .route("/api/investigate/stream", post(investigate_videos_stream))
         .route(
             "/api/transcripts/summary/{date}",
             get(get_transcripts_summary),
@@ -1521,6 +1916,35 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .layer(compression_layer)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn refresh_investigation_pricing_once(
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    let model_id = state.investigation_model.clone();
+    let region = state.bedrock_region.clone();
+
+    let Some(rate) =
+        fetch_bedrock_pricing_from_aws(&model_id, region.as_deref()).await?
+    else {
+        info!(
+            model_id = model_id,
+            region = region.as_deref().unwrap_or("us-east-1"),
+            "No Bedrock pricing entry found from AWS price list for model"
+        );
+        return Ok(());
+    };
+
+    let conn = state.zumblezay_db.get()?;
+    upsert_bedrock_pricing(&conn, &model_id, rate)?;
+    info!(
+        model_id = model_id,
+        region = region.as_deref().unwrap_or("us-east-1"),
+        input_cost_per_1k_usd = rate.input_cost_per_1k_usd,
+        output_cost_per_1k_usd = rate.output_cost_per_1k_usd,
+        "Refreshed Bedrock model pricing from AWS Price List API"
+    );
+    Ok(())
 }
 
 pub async fn serve() -> Result<()> {
@@ -1604,10 +2028,12 @@ pub async fn serve() -> Result<()> {
         max_concurrent_tasks: args.max_concurrent_tasks,
         openai_api_key: args.openai_api_key,
         openai_api_base: args.openai_api_base,
+        bedrock_region: args.bedrock_region,
         runpod_api_key: args.runpod_api_key,
         signing_secret: args.signing_secret,
         transcription_service: args.transcription_service,
         default_summary_model: args.default_summary_model,
+        investigation_model: args.investigation_model,
         video_path_original_prefix: args.video_path_original_prefix,
         video_path_replacement_prefix: args.video_path_replacement_prefix,
         timezone_str: args.timezone,
@@ -1657,6 +2083,25 @@ pub async fn serve() -> Result<()> {
         None
     };
 
+    // Refresh Bedrock model pricing shortly after startup so spend logging
+    // can use up-to-date rates without waiting for first-request fallback.
+    let pricing_refresh_handle = {
+        let pricing_state = state.clone();
+        let mut pricing_shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            tokio::select! {
+                _ = time::sleep(Duration::from_secs(60)) => {
+                    if let Err(error) = refresh_investigation_pricing_once(pricing_state).await {
+                        warn!("Bedrock pricing refresh task failed: {}", error);
+                    }
+                }
+                _ = pricing_shutdown_rx.recv() => {
+                    info!("Skipping delayed pricing refresh due to shutdown");
+                }
+            }
+        }))
+    };
+
     // Initialize templates
     ensure_templates();
 
@@ -1680,9 +2125,11 @@ pub async fn serve() -> Result<()> {
     }
 
     // Wait for both handles with timeout
-    for (task_name, handle) in
-        [("sync", sync_handle), ("processing", processing_handle)]
-    {
+    for (task_name, handle) in [
+        ("sync", sync_handle),
+        ("processing", processing_handle),
+        ("pricing-refresh", pricing_refresh_handle),
+    ] {
         if let Some(handle) = handle {
             match tokio::time::timeout(Duration::from_secs(30), handle).await {
                 Ok(_) => info!("Background {} completed gracefully", task_name),
