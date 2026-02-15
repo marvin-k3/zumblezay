@@ -2,6 +2,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 const PORT = process.env.PLAYWRIGHT_TEST_PORT ?? '4173';
 const HOST = process.env.PLAYWRIGHT_TEST_HOST ?? '127.0.0.1';
+const WEB_SERVER_TIMEOUT = Number(process.env.PLAYWRIGHT_WEB_SERVER_TIMEOUT ?? '300000');
+const WEB_SERVER_COMMAND =
+  process.env.PLAYWRIGHT_WEB_SERVER_COMMAND ??
+  `cargo run --quiet --bin playwright_server -- --host ${HOST} --port ${PORT}`;
 
 export default defineConfig({
   testDir: 'playwright-tests',
@@ -19,10 +23,10 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: `cargo run --quiet --bin playwright_server -- --host ${HOST} --port ${PORT}`,
+    command: WEB_SERVER_COMMAND,
     url: `http://${HOST}:${PORT}`,
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: WEB_SERVER_TIMEOUT,
     stdout: 'pipe',
     stderr: 'pipe',
   },

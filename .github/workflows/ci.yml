@@ -66,8 +66,14 @@ jobs:
 
     - uses: Swatinem/rust-cache@v2
 
+    - name: Build Playwright server
+      run: cargo build --quiet --bin playwright_server
+
     - name: Run Playwright UI tests
       run: npm run test:ui
+      env:
+        PLAYWRIGHT_WEB_SERVER_COMMAND: ./target/debug/playwright_server --host 127.0.0.1 --port 4173
+        PLAYWRIGHT_WEB_SERVER_TIMEOUT: 300000
 
   coverage:
     runs-on: ubuntu-latest
