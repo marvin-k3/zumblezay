@@ -378,6 +378,14 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
             );
             "#,
         ),
+        // Repair step for older deployments where the migration ledger
+        // may be ahead of actual schema objects.
+        M::up(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_events_start_event
+                ON events(event_start DESC, event_id DESC);
+            "#,
+        ),
     ]
 }
 

@@ -538,9 +538,15 @@ async fn get_completed_events(
         params.push(Box::new(query_limit as i64));
     }
 
-    let mut stmt = conn
-        .prepare(&query)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut stmt = conn.prepare(&query).map_err(|e| {
+        error!(
+            error = %e,
+            has_search,
+            query = %query,
+            "Failed to prepare /api/events SQL query"
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|p| p.as_ref()).collect();
@@ -559,11 +565,26 @@ async fn get_completed_events(
                 snippet: if has_search { row.get(5)? } else { None },
             })
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            error!(
+                error = %e,
+                has_search,
+                query = %query,
+                "Failed to execute /api/events SQL query"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
 
     let transcripts: Result<Vec<_>, _> = transcripts.collect();
-    let mut transcripts = transcripts
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut transcripts = transcripts.map_err(|e| {
+        error!(
+            error = %e,
+            has_search,
+            query = %query,
+            "Failed to read /api/events SQL rows"
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
     let mut next_cursor = None;
     if transcripts.len() > limit {
