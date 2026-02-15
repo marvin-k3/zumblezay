@@ -38,6 +38,15 @@ jobs:
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: Smoke test Docker image startup
+        run: |
+          docker build \
+            -t zumblezay-smoke:${{ github.sha }} \
+            --build-arg IMAGE_TAG=${{ steps.meta.outputs.version || github.ref_name || github.sha }} \
+            --build-arg GIT_BRANCH=${{ github.ref_name }} \
+            --build-arg GIT_SHA=${{ github.sha }} \
+            .
+          docker run --rm zumblezay-smoke:${{ github.sha }} --help
       # This step uses the `docker/build-push-action` action to build the image, based on your repository's `Dockerfile`. If the build succeeds, it pushes the image to GitHub Packages.
       # It uses the `context` parameter to define the build's context as the set of files located in the specified path. For more information, see [Usage](https://github.com/docker/build-push-action#usage) in the README of the `docker/build-push-action` repository.
       # It uses the `tags` and `labels` parameters to tag and label the image with the output from the "meta" step.

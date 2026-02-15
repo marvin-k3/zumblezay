@@ -1,8 +1,10 @@
 ARG GIT_BRANCH=unknown
 ARG IMAGE_TAG=unknown
 ARG GIT_SHA=unknown
+ARG RUST_VERSION=1.91
+ARG DEBIAN_CODENAME=bookworm
 
-FROM rust:1.91-slim AS builder
+FROM rust:${RUST_VERSION}-${DEBIAN_CODENAME} AS builder
 
 ARG GIT_BRANCH
 ARG IMAGE_TAG
@@ -42,7 +44,7 @@ COPY testdata/ testdata/
 RUN touch src/lib.rs src/server_main.rs && cargo build --release --bin zumblezay_server
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:${DEBIAN_CODENAME}-slim
 ARG GIT_BRANCH
 ARG IMAGE_TAG
 ARG GIT_SHA
