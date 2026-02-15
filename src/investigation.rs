@@ -1,5 +1,8 @@
 use crate::bedrock::{BedrockClientTrait, BedrockUsage};
-use crate::bedrock_spend::{record_bedrock_spend, SpendLogRequest};
+use crate::bedrock_spend::{
+    fetch_bedrock_pricing_from_aws, is_missing_pricing_error,
+    record_bedrock_spend, upsert_bedrock_pricing, SpendLogRequest,
+};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
@@ -911,16 +914,31 @@ async fn invoke_and_log_bedrock(
         .await?;
 
     let conn = state.zumblezay_db.get()?;
-    let estimated_cost_usd = record_bedrock_spend(
-        &conn,
-        SpendLogRequest {
-            category: INVESTIGATION_SPEND_CATEGORY,
-            operation,
-            model_id,
-            request_id: completion.request_id.as_deref(),
-            usage: completion.usage.clone(),
-        },
-    )?;
+    let spend_request = SpendLogRequest {
+        category: INVESTIGATION_SPEND_CATEGORY,
+        operation,
+        model_id,
+        request_id: completion.request_id.as_deref(),
+        usage: completion.usage.clone(),
+    };
+    let estimated_cost_usd =
+        match record_bedrock_spend(&conn, spend_request.clone()) {
+            Ok(value) => value,
+            Err(error) if is_missing_pricing_error(&error) => {
+                if let Some(rate) = fetch_bedrock_pricing_from_aws(
+                    model_id,
+                    state.bedrock_region.as_deref(),
+                )
+                .await?
+                {
+                    upsert_bedrock_pricing(&conn, model_id, rate)?;
+                    record_bedrock_spend(&conn, spend_request)?
+                } else {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
     Ok(LoggedCompletion {
         usage: completion.usage,
@@ -950,16 +968,31 @@ async fn invoke_and_log_bedrock_streaming(
         .await?;
 
     let conn = state.zumblezay_db.get()?;
-    let estimated_cost_usd = record_bedrock_spend(
-        &conn,
-        SpendLogRequest {
-            category: INVESTIGATION_SPEND_CATEGORY,
-            operation,
-            model_id,
-            request_id: completion.request_id.as_deref(),
-            usage: completion.usage.clone(),
-        },
-    )?;
+    let spend_request = SpendLogRequest {
+        category: INVESTIGATION_SPEND_CATEGORY,
+        operation,
+        model_id,
+        request_id: completion.request_id.as_deref(),
+        usage: completion.usage.clone(),
+    };
+    let estimated_cost_usd =
+        match record_bedrock_spend(&conn, spend_request.clone()) {
+            Ok(value) => value,
+            Err(error) if is_missing_pricing_error(&error) => {
+                if let Some(rate) = fetch_bedrock_pricing_from_aws(
+                    model_id,
+                    state.bedrock_region.as_deref(),
+                )
+                .await?
+                {
+                    upsert_bedrock_pricing(&conn, model_id, rate)?;
+                    record_bedrock_spend(&conn, spend_request)?
+                } else {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
     Ok(LoggedCompletion {
         usage: completion.usage,

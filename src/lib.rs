@@ -88,6 +88,7 @@ pub struct AppState {
     pub semaphore: Arc<tokio::sync::Semaphore>,
     pub openai_client: Option<Arc<dyn OpenAIClientTrait>>,
     pub bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+    pub bedrock_region: Option<String>,
     pub runpod_api_key: Option<String>,
     pub transcription_service: String,
     pub camera_name_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -191,6 +192,7 @@ impl AppState {
             openai_client,
             bedrock_client: bedrock_client
                 .or_else(|| Some(create_bedrock_client(None))),
+            bedrock_region: None,
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),
             camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -290,6 +292,8 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key)
     });
 
+    let bedrock_region = config.bedrock_region.clone();
+
     Arc::new(AppState {
         events_db: config.events_pool,
         zumblezay_db: config.zumblezay_pool,
@@ -303,6 +307,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         )),
         openai_client,
         bedrock_client: Some(create_bedrock_client(config.bedrock_region)),
+        bedrock_region,
         runpod_api_key: config.runpod_api_key,
         transcription_service: config.transcription_service,
         camera_name_cache: Arc::new(Mutex::new(HashMap::new())),

@@ -1,4 +1,7 @@
 use super::storyboard;
+use crate::bedrock_spend::{
+    fetch_bedrock_pricing_from_aws, upsert_bedrock_pricing,
+};
 use crate::investigation::{self, InvestigationRequest};
 use crate::process_events;
 use crate::prompt_context;
@@ -1915,6 +1918,35 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+async fn refresh_investigation_pricing_once(
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    let model_id = state.investigation_model.clone();
+    let region = state.bedrock_region.clone();
+
+    let Some(rate) =
+        fetch_bedrock_pricing_from_aws(&model_id, region.as_deref()).await?
+    else {
+        info!(
+            model_id = model_id,
+            region = region.as_deref().unwrap_or("us-east-1"),
+            "No Bedrock pricing entry found from AWS price list for model"
+        );
+        return Ok(());
+    };
+
+    let conn = state.zumblezay_db.get()?;
+    upsert_bedrock_pricing(&conn, &model_id, rate)?;
+    info!(
+        model_id = model_id,
+        region = region.as_deref().unwrap_or("us-east-1"),
+        input_cost_per_1k_usd = rate.input_cost_per_1k_usd,
+        output_cost_per_1k_usd = rate.output_cost_per_1k_usd,
+        "Refreshed Bedrock model pricing from AWS Price List API"
+    );
+    Ok(())
+}
+
 pub async fn serve() -> Result<()> {
     // Initialize logging with tracing
     let subscriber = Registry::default()
@@ -2051,6 +2083,25 @@ pub async fn serve() -> Result<()> {
         None
     };
 
+    // Refresh Bedrock model pricing shortly after startup so spend logging
+    // can use up-to-date rates without waiting for first-request fallback.
+    let pricing_refresh_handle = {
+        let pricing_state = state.clone();
+        let mut pricing_shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            tokio::select! {
+                _ = time::sleep(Duration::from_secs(60)) => {
+                    if let Err(error) = refresh_investigation_pricing_once(pricing_state).await {
+                        warn!("Bedrock pricing refresh task failed: {}", error);
+                    }
+                }
+                _ = pricing_shutdown_rx.recv() => {
+                    info!("Skipping delayed pricing refresh due to shutdown");
+                }
+            }
+        }))
+    };
+
     // Initialize templates
     ensure_templates();
 
@@ -2074,9 +2125,11 @@ pub async fn serve() -> Result<()> {
     }
 
     // Wait for both handles with timeout
-    for (task_name, handle) in
-        [("sync", sync_handle), ("processing", processing_handle)]
-    {
+    for (task_name, handle) in [
+        ("sync", sync_handle),
+        ("processing", processing_handle),
+        ("pricing-refresh", pricing_refresh_handle),
+    ] {
         if let Some(handle) = handle {
             match tokio::time::timeout(Duration::from_secs(30), handle).await {
                 Ok(_) => info!("Background {} completed gracefully", task_name),
