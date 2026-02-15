@@ -3,6 +3,7 @@
 # Data directory
 /data/
 /data2/
+docs/book/
 
 # Node / Playwright artifacts
 node_modules/
