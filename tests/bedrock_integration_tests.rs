@@ -154,12 +154,7 @@ async fn test_live_bedrock_investigation_streaming_integration() {
             output_cost_per_1k_usd,
             updated_at
         ) VALUES (?, ?, ?, ?)",
-        params![
-            "anthropic.claude-sonnet-4-5-20250929-v1:0",
-            0.003,
-            0.015,
-            chrono::Utc::now().timestamp()
-        ],
+        params![model_id, 0.003, 0.015, chrono::Utc::now().timestamp()],
     )
     .unwrap();
 

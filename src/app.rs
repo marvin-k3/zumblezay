@@ -1760,67 +1760,84 @@ async fn investigate_videos_stream(
     let (tx, rx) = mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
 
     tokio::spawn(async move {
-        let _ =
-            tx.send(Ok(SseEvent::default().event("status").data("planning")));
-
-        let mut stream_delta = {
-            let tx = tx.clone();
-            move |delta: String| {
-                let payload = serde_json::to_string(&serde_json::json!({
-                    "delta": delta
-                }))
-                .unwrap_or_else(|_| "{\"delta\":\"\"}".to_string());
-                let _ = tx.send(Ok(SseEvent::default()
-                    .event("answer_delta")
-                    .data(payload)));
-            }
-        };
-        let mut stream_search_plan = {
-            let tx = tx.clone();
-            move |plan: investigation::SearchPlanEvent| {
-                let payload = serde_json::to_string(&plan).unwrap_or_else(|_| {
-                    "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
-                });
-                let _ = tx.send(Ok(SseEvent::default()
-                    .event("search_plan")
-                    .data(payload)));
-            }
-        };
-        let mut stream_tool_use = {
-            let tx = tx.clone();
-            move |event: investigation::ToolUseEvent| {
-                let payload =
-                    serde_json::to_string(&event).unwrap_or_else(|_| {
-                        "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
-                    });
-                let _ = tx.send(Ok(SseEvent::default()
-                    .event("tool_use")
-                    .data(payload)));
-            }
-        };
-
-        match investigation::investigate_question_streaming(
-            &state,
-            request,
-            &mut stream_search_plan,
-            &mut stream_tool_use,
-            &mut stream_delta,
-        )
-        .await
+        if tx
+            .send(Ok(SseEvent::default().event("status").data("planning")))
+            .is_err()
         {
-            Ok(response) => {
-                let payload =
-                    serde_json::to_string(&response).unwrap_or_else(|_| {
-                        "{\"error\":\"serialization\"}".to_string()
-                    });
-                let _ = tx
-                    .send(Ok(SseEvent::default().event("done").data(payload)));
+            return;
+        }
+
+        let worker_tx = tx.clone();
+        let mut worker = tokio::spawn(async move {
+            let mut stream_delta = {
+                let tx = worker_tx.clone();
+                move |delta: String| {
+                    let payload = serde_json::to_string(&serde_json::json!({
+                        "delta": delta
+                    }))
+                    .unwrap_or_else(|_| "{\"delta\":\"\"}".to_string());
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("answer_delta")
+                        .data(payload)));
+                }
+            };
+            let mut stream_search_plan = {
+                let tx = worker_tx.clone();
+                move |plan: investigation::SearchPlanEvent| {
+                    let payload =
+                        serde_json::to_string(&plan).unwrap_or_else(|_| {
+                            "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
+                        });
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("search_plan")
+                        .data(payload)));
+                }
+            };
+            let mut stream_tool_use = {
+                let tx = worker_tx.clone();
+                move |event: investigation::ToolUseEvent| {
+                    let payload =
+                        serde_json::to_string(&event).unwrap_or_else(|_| {
+                            "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
+                        });
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("tool_use")
+                        .data(payload)));
+                }
+            };
+
+            match investigation::investigate_question_streaming(
+                &state,
+                request,
+                &mut stream_search_plan,
+                &mut stream_tool_use,
+                &mut stream_delta,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let payload = serde_json::to_string(&response)
+                        .unwrap_or_else(|_| {
+                            "{\"error\":\"serialization\"}".to_string()
+                        });
+                    let _ = worker_tx.send(Ok(SseEvent::default()
+                        .event("done")
+                        .data(payload)));
+                }
+                Err(error) => {
+                    let _ = worker_tx.send(Ok(SseEvent::default()
+                        .event("error")
+                        .data(error.to_string())));
+                }
             }
-            Err(error) => {
-                let _ = tx.send(Ok(SseEvent::default()
-                    .event("error")
-                    .data(error.to_string())));
+        });
+
+        tokio::select! {
+            _ = tx.closed() => {
+                worker.abort();
+                let _ = worker.await;
             }
+            _ = &mut worker => {}
         }
     });
 
