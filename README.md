@@ -1,6 +1,6 @@
 # zumblezay
 
-Zumblezay is an Axum-based service that collects camera events, transcripts, and AI-generated summaries. It exposes a JSON/HTML API for reviewing activity, downloading captions, and kicking off summarization jobs with OpenAI-compatible models.
+Zumblezay is an Axum-based service that collects camera events, transcripts, and AI-generated summaries. It exposes a JSON/HTML API for reviewing activity, downloading captions, generating daily summaries, and running Bedrock-powered investigation queries over transcript history.
 
 - See `docs/AI_AGENT_GUIDE.md` for an architecture walk-through tuned for LLM-based tooling.
 - The primary binary is `zumblezay_server`; it wires databases, background workers, and the HTTP surface defined in `src/app.rs`.
@@ -25,8 +25,14 @@ Key CLI switches (defined in `src/app.rs`):
 
 - `--whisper-url` / `WHISPER_URL`: upstream transcription endpoint (defaults to `http://localhost:9000/asr`).
 - `--enable-transcription`: toggle the background transcription worker.
+- `--transcription-service`: transcription type key used in DB reads/writes (defaults to `whisper-local`).
 - `--enable-sync` / `--sync-interval`: control the event sync loop.
+- `--openai-api-key` / `OPENAI_API_KEY` and `--openai-api-base` / `OPENAI_API_BASE`: OpenAI-compatible provider used by summary endpoints.
+- `--bedrock-region` / `AWS_REGION`: optional Bedrock region override.
 - `--default-summary-model`: model identifier passed to the summary generator.
+- `--investigation-model` / `BEDROCK_INVESTIGATION_MODEL`: Bedrock model ID used for `/api/investigate`.
+- `--signing-secret` / `SIGNING_SECRET`: HMAC secret for signed prompt-context fetches.
+- `--video-path-original-prefix` and `--video-path-replacement-prefix`: map DB video paths to local filesystem paths for media streaming.
 - `--timezone`: overrides the timezone used in transcript exports.
 
 `cargo run --bin zumblezay_server -- --help` prints the full list of flags and defaults.
@@ -69,6 +75,16 @@ The Playwright config spins up `cargo run --bin playwright_server`, which seeds 
 
 If a test fails you can rerun it in headed mode with `npm run test:ui:headed` and inspect the captured trace via `npx playwright show-trace <path-to-trace.zip>`.
 
+UI coverage includes events search/latest, transcript page, summary page, and the investigation page.
+
+## Optional live Bedrock integration tests
+
+```bash
+RUN_BEDROCK_INTEGRATION=1 cargo test --test bedrock_integration_tests -- --nocapture
+```
+
+These tests call live Bedrock endpoints and require valid AWS credentials plus network access.
+
 ## Manually seeding data
 
 When you run the service locally you can seed the SQLite databases with the same shape the tests expect:
@@ -92,9 +108,12 @@ Daily summaries are cached in the `daily_summaries` table. The tests demonstrate
 The integration tests cover the most important routes; refer to them as living examples of request/response behaviour:
 - `GET /api/events` with filters for `date` (legacy), `date_start`, `date_end`, `camera_id`, `time_start`, `time_end`, plus pagination via `limit`, `cursor_start`, `cursor_event_id`. Returns `{ events, next_cursor }` and includes `snippet` when searching.
 - `GET /api/cameras` after calling `cache_camera_names`.
+- `GET /api/models` to list summary models available from the configured OpenAI-compatible provider.
 - `GET /api/transcripts/json/{date}` and `GET /api/transcripts/csv/{date}` for transcript exports.
 - `GET /api/event/{event_id}` for the combined event/transcription payload.
 - `GET /api/captions/{event_id}` to stream WebVTT captions generated from the transcript JSON.
-- `GET /api/transcripts/summary/{date}` and related summary endpoints that either reuse cached summaries or call out to the configured AI provider.
+- `GET /api/transcripts/summary/{date}`, `/json`, `/list`, and `/type/{type}/model/{model}/prompt/{prompt}` for cached/generated summaries.
+- `POST /api/investigate` and `POST /api/investigate/stream` for transcript-grounded investigation answers (JSON + SSE variants).
+- `GET /api/storyboard/image/{event_id}` and `GET /api/storyboard/vtt/{event_id}` for storyboard artefacts.
 
 For additional examples open `tests/api_tests.rs`, where helper functions such as `insert_event_with_transcript` show the minimal inserts needed to mimic live data. Pair that with the module map in `docs/AI_AGENT_GUIDE.md` when asking tooling to extend the service.

@@ -11,6 +11,12 @@ The suite spins up `AppState::new_for_testing()` with three temporary SQLite fil
 cargo test --test api_tests -- test_transcript_summary_endpoints_return_cached_content -- --nocapture
 ```
 
+Optional live Bedrock integration tests:
+```bash
+RUN_BEDROCK_INTEGRATION=1 cargo test --test bedrock_integration_tests -- --nocapture
+```
+These tests are no-op unless `RUN_BEDROCK_INTEGRATION=1` is set, and they require valid AWS credentials plus Bedrock network access.
+
 ## Playwright UI tests
 ```bash
 npm install
@@ -24,6 +30,8 @@ npm run test:ui
 npm run test:ui:headed
 npx playwright show-trace <path-to-trace.zip>
 ```
+
+The suite currently covers `events.spec.ts`, `transcript.spec.ts`, `summary.spec.ts`, and `investigate.spec.ts`.
 
 ## Local data seeding
 For manual experiments, insert rows into `events` and `transcriptions` (see [Data & Storage](data-storage.md)). Start the server; it will cache camera names on boot so API and UI responses include friendly labels.
