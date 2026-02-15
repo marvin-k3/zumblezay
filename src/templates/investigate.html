@@ -1,0 +1,471 @@
+{% extends "base.html" %}
+
+{% block title %}Investigate{% endblock %}
+
+{% block page_title %}Video Chat{% endblock %}
+
+{% block extra_head %}
+<style>
+    .chat-shell {
+        max-width: 920px;
+        margin: 0 auto;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 12px;
+        background: var(--bs-body-bg);
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 240px);
+        min-height: 520px;
+    }
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1rem;
+        background: var(--bs-secondary-bg);
+    }
+    .chat-row {
+        display: flex;
+        margin-bottom: 0.75rem;
+    }
+    .chat-row.user {
+        justify-content: flex-end;
+    }
+    .chat-row.assistant {
+        justify-content: flex-start;
+    }
+    .chat-bubble {
+        max-width: min(760px, 88%);
+        padding: 0.75rem 0.9rem;
+        border-radius: 14px;
+        white-space: pre-wrap;
+        border: 1px solid var(--bs-border-color);
+    }
+    .chat-row.user .chat-bubble {
+        background: var(--bs-primary);
+        color: #fff;
+        border-color: var(--bs-primary);
+        border-bottom-right-radius: 4px;
+    }
+    .chat-row.assistant .chat-bubble {
+        background: var(--bs-body-bg);
+        color: var(--bs-body-color);
+        border-bottom-left-radius: 4px;
+    }
+    .chat-row.system {
+        justify-content: center;
+    }
+    .chat-row.system .chat-bubble {
+        max-width: min(820px, 95%);
+        background: var(--bs-tertiary-bg);
+        color: var(--bs-secondary-color);
+        font-size: 0.9rem;
+        border-radius: 10px;
+    }
+    .tool-progress .tool-current {
+        color: var(--bs-body-color);
+        font-size: 0.95rem;
+    }
+    .tool-progress details summary {
+        cursor: pointer;
+        color: var(--bs-secondary-color);
+    }
+    .tool-progress .tool-history-items {
+        max-height: 180px;
+        overflow-y: auto;
+        border-left: 2px solid var(--bs-border-color);
+        padding-left: 0.6rem;
+    }
+    .tool-progress .tool-history-item {
+        margin-bottom: 0.35rem;
+        color: var(--bs-secondary-color);
+    }
+    .chat-bubble p:last-child {
+        margin-bottom: 0;
+    }
+    .chat-bubble pre {
+        background: rgba(0, 0, 0, 0.08);
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        padding: 0.6rem;
+    }
+    .chat-bubble code {
+        background: rgba(0, 0, 0, 0.08);
+        padding: 0.05rem 0.25rem;
+        border-radius: 4px;
+    }
+    .evidence-wrap {
+        margin-top: 0.75rem;
+        display: grid;
+        gap: 0.5rem;
+    }
+    .evidence-card {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 10px;
+        background: var(--bs-body-bg);
+        padding: 0.65rem 0.75rem;
+    }
+    .evidence-title {
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+    .evidence-snippet {
+        font-size: 0.9rem;
+        color: var(--bs-secondary-color);
+        margin-bottom: 0.35rem;
+    }
+    .chat-footer {
+        border-top: 1px solid var(--bs-border-color);
+        padding: 0.75rem;
+        background: var(--bs-body-bg);
+    }
+    .chat-status {
+        min-height: 1.1rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-shell">
+    <div id="chat-messages" class="chat-messages">
+        <div class="chat-row assistant">
+            <div class="chat-bubble">Ask about events and I will answer with matching video moments you can open directly.</div>
+        </div>
+    </div>
+    <div class="chat-footer">
+        <form id="chat-form">
+            <div class="input-group">
+                <input id="chat-input" type="text" class="form-control" placeholder="Ask about your videos..." required>
+                <button id="send-button" class="btn btn-primary" type="submit">Send</button>
+            </div>
+        </form>
+        <div id="chat-status" class="chat-status small text-muted mt-2"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
+<script>
+(() => {
+    const chatMessages = document.getElementById("chat-messages");
+    const chatForm = document.getElementById("chat-form");
+    const chatInput = document.getElementById("chat-input");
+    const sendButton = document.getElementById("send-button");
+    const chatStatus = document.getElementById("chat-status");
+    const conversation = [];
+
+    function scrollToBottom() {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function appendMessage(role, text = "") {
+        const row = document.createElement("div");
+        row.className = `chat-row ${role}`;
+
+        const bubble = document.createElement("div");
+        bubble.className = "chat-bubble";
+        bubble.textContent = text;
+
+        row.appendChild(bubble);
+        chatMessages.appendChild(row);
+        scrollToBottom();
+        return bubble;
+    }
+
+    function escapeHtml(text) {
+        return text
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll("\"", "&quot;")
+            .replaceAll("'", "&#39;");
+    }
+
+    function renderMarkdown(markdownText) {
+        if (window.marked && typeof window.marked.parse === "function") {
+            const html = window.marked.parse(markdownText || "", {
+                breaks: true,
+                gfm: true
+            });
+            if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
+                return window.DOMPurify.sanitize(html);
+            }
+            return html;
+        }
+        return escapeHtml(markdownText || "").replaceAll("\n", "<br>");
+    }
+
+    function setBubbleMarkdown(bubble, markdownText) {
+        bubble.dataset.rawText = markdownText;
+        bubble.innerHTML = renderMarkdown(markdownText);
+        scrollToBottom();
+    }
+
+    function appendEvidenceToBubble(bubble, evidenceItems) {
+        if (!Array.isArray(evidenceItems) || evidenceItems.length === 0) return;
+
+        const heading = document.createElement("div");
+        heading.className = "mt-3 mb-2 fw-semibold";
+        heading.textContent = "Relevant video moments";
+        bubble.appendChild(heading);
+
+        const wrap = document.createElement("div");
+        wrap.className = "evidence-wrap";
+
+        for (const item of evidenceItems) {
+            const card = document.createElement("div");
+            card.className = "evidence-card";
+
+            const title = document.createElement("div");
+            title.className = "evidence-title";
+            title.textContent = `${item.camera_id} • ${item.event_id}`;
+            card.appendChild(title);
+
+            if (item.snippet) {
+                const snippet = document.createElement("div");
+                snippet.className = "evidence-snippet";
+                snippet.textContent = item.snippet;
+                card.appendChild(snippet);
+            }
+
+            const link = document.createElement("a");
+            link.href = item.jump_url || `/video/${item.event_id}`;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "Open video at moment";
+            card.appendChild(link);
+
+            wrap.appendChild(card);
+        }
+
+        bubble.appendChild(wrap);
+        scrollToBottom();
+    }
+
+    function createProgressTracker() {
+        const row = document.createElement("div");
+        row.className = "chat-row system";
+
+        const bubble = document.createElement("div");
+        bubble.className = "chat-bubble tool-progress";
+
+        const header = document.createElement("div");
+        header.className = "d-flex justify-content-between align-items-center mb-1";
+
+        const title = document.createElement("span");
+        title.className = "fw-semibold";
+        title.textContent = "Investigation progress";
+        header.appendChild(title);
+
+        const stateBadge = document.createElement("span");
+        stateBadge.className = "badge text-bg-secondary";
+        stateBadge.textContent = "Running";
+        header.appendChild(stateBadge);
+
+        const current = document.createElement("div");
+        current.className = "tool-current";
+        current.textContent = "Starting...";
+
+        const historyDetails = document.createElement("details");
+        historyDetails.className = "mt-2";
+
+        const summary = document.createElement("summary");
+        summary.textContent = "Show full tool history (0)";
+        historyDetails.appendChild(summary);
+
+        const historyItems = document.createElement("div");
+        historyItems.className = "tool-history-items small mt-2";
+        historyDetails.appendChild(historyItems);
+
+        bubble.appendChild(header);
+        bubble.appendChild(current);
+        bubble.appendChild(historyDetails);
+        row.appendChild(bubble);
+        chatMessages.appendChild(row);
+        scrollToBottom();
+
+        let count = 0;
+        function addHistory(text) {
+            const item = document.createElement("div");
+            item.className = "tool-history-item";
+            item.textContent = text;
+            historyItems.appendChild(item);
+            count += 1;
+            summary.textContent = `Show full tool history (${count})`;
+            scrollToBottom();
+        }
+
+        return {
+            update(text) {
+                current.textContent = text;
+                addHistory(text);
+            },
+            complete(text) {
+                if (text) {
+                    current.textContent = text;
+                }
+                stateBadge.className = "badge text-bg-success";
+                stateBadge.textContent = "Complete";
+                if (count > 0) {
+                    historyDetails.open = false;
+                }
+            },
+            fail(text) {
+                if (text) {
+                    current.textContent = text;
+                    addHistory(text);
+                }
+                stateBadge.className = "badge text-bg-danger";
+                stateBadge.textContent = "Failed";
+                historyDetails.open = true;
+            }
+        };
+    }
+
+    function formatSearchPlan(plan) {
+        const queries = Array.isArray(plan.search_queries) ? plan.search_queries : [];
+        const parts = [];
+        if (queries.length === 0) {
+            parts.push("queries=(none)");
+        } else {
+            parts.push(`queries=${queries.join(", ")}`);
+        }
+        if (plan.time_window_start_utc && plan.time_window_end_utc) {
+            parts.push(`window=${plan.time_window_start_utc} to ${plan.time_window_end_utc}`);
+        }
+        return `transcript_search plan: ${parts.join(" | ")}`;
+    }
+
+    function updateStatus(text) {
+        chatStatus.textContent = text || "";
+    }
+
+    function parseSseBlock(block) {
+        let eventType = "message";
+        const dataLines = [];
+        for (const line of block.split("\n")) {
+            if (line.startsWith("event:")) {
+                eventType = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+                dataLines.push(line.slice(5));
+            }
+        }
+        return { eventType, data: dataLines.join("\n") };
+    }
+
+    chatForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const question = chatInput.value.trim();
+        if (!question) return;
+
+        appendMessage("user", question);
+        conversation.push({ role: "user", content: question });
+        chatInput.value = "";
+        sendButton.disabled = true;
+        updateStatus("Working...");
+
+        const progressTracker = createProgressTracker();
+        const assistantBubble = appendMessage("assistant", "");
+        let assistantText = "";
+        let donePayload = null;
+
+        try {
+            const response = await fetch("/api/investigate/stream", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    question,
+                    chat_history: conversation
+                })
+            });
+
+            if (!response.ok || !response.body) {
+                const text = await response.text();
+                throw new Error(text || `HTTP ${response.status}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                let splitIndex;
+                while ((splitIndex = buffer.indexOf("\n\n")) !== -1) {
+                    const block = buffer.slice(0, splitIndex);
+                    buffer = buffer.slice(splitIndex + 2);
+                    if (!block.trim()) continue;
+
+                    const parsed = parseSseBlock(block);
+                    if (parsed.eventType === "status") {
+                        updateStatus(parsed.data);
+                        if (parsed.data) {
+                            progressTracker.update(`status: ${parsed.data}`);
+                        }
+                    } else if (parsed.eventType === "search_plan") {
+                        try {
+                            const plan = JSON.parse(parsed.data);
+                            progressTracker.update(formatSearchPlan(plan));
+                        } catch (_e) {
+                            // Ignore malformed status payloads.
+                        }
+                    } else if (parsed.eventType === "tool_use") {
+                        try {
+                            const event = JSON.parse(parsed.data);
+                            const name = event && event.tool_name ? event.tool_name : "tool";
+                            const stage = event && event.stage ? event.stage : "update";
+                            const message = event && event.message ? event.message : "";
+                            progressTracker.update(`[${name}] ${stage}: ${message}`);
+                        } catch (_e) {
+                            // Ignore malformed tool payloads.
+                        }
+                    } else if (parsed.eventType === "answer_delta") {
+                        let delta = parsed.data;
+                        try {
+                            const payload = JSON.parse(parsed.data);
+                            if (payload && typeof payload.delta === "string") {
+                                delta = payload.delta;
+                            }
+                        } catch (_e) {
+                            // Fallback for older/non-JSON delta events.
+                        }
+                        assistantText += delta;
+                        setBubbleMarkdown(assistantBubble, assistantText);
+                    } else if (parsed.eventType === "done") {
+                        donePayload = JSON.parse(parsed.data);
+                    } else if (parsed.eventType === "error") {
+                        throw new Error(parsed.data || "Stream failed");
+                    }
+                }
+            }
+
+            if (donePayload) {
+                if (typeof donePayload.answer === "string" && donePayload.answer.length > 0) {
+                    assistantText = donePayload.answer;
+                    setBubbleMarkdown(assistantBubble, assistantText);
+                    conversation.push({ role: "assistant", content: donePayload.answer });
+                }
+                appendEvidenceToBubble(assistantBubble, donePayload.evidence || []);
+                updateStatus("Complete");
+                progressTracker.complete("Answer ready");
+            } else {
+                updateStatus("No response payload returned");
+                progressTracker.fail("No final response payload returned");
+            }
+        } catch (error) {
+            assistantText = `Error: ${error.message}`;
+            setBubbleMarkdown(assistantBubble, assistantText);
+            updateStatus("Failed");
+            progressTracker.fail(`Error: ${error.message}`);
+        } finally {
+            sendButton.disabled = false;
+            chatInput.focus();
+        }
+    });
+})();
+</script>
+{% endblock %}

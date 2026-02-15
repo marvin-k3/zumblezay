@@ -1,3 +1,4 @@
+use crate::bedrock::{create_bedrock_client, BedrockClientTrait};
 use crate::openai::{real::maybe_create_openai_client, OpenAIClientTrait};
 use anyhow::Result;
 use base64::Engine;
@@ -20,6 +21,9 @@ use tracing::instrument;
 use tracing::warn;
 
 pub mod app;
+pub mod bedrock;
+pub mod bedrock_spend;
+pub mod investigation;
 pub mod openai;
 pub mod process_events;
 pub mod prompt_context;
@@ -83,11 +87,13 @@ pub struct AppState {
     pub active_tasks: Arc<Mutex<HashMap<String, String>>>,
     pub semaphore: Arc<tokio::sync::Semaphore>,
     pub openai_client: Option<Arc<dyn OpenAIClientTrait>>,
+    pub bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
     pub runpod_api_key: Option<String>,
     pub transcription_service: String,
     pub camera_name_cache: Arc<Mutex<HashMap<String, String>>>,
     pub storyboard_cache: Arc<RwLock<LruCache<String, StoryboardData>>>,
     pub default_summary_model: String,
+    pub investigation_model: String,
     pub video_path_original_prefix: String,
     pub video_path_replacement_prefix: String,
     pub timezone: chrono_tz::Tz,
@@ -108,11 +114,18 @@ pub struct AppState {
 
 impl AppState {
     pub fn new_for_testing() -> Self {
-        Self::new_for_testing_with_openai_client(None)
+        Self::new_for_testing_with_clients(None, None)
     }
     // Create a new AppState for testing with minimal configuration
     pub fn new_for_testing_with_openai_client(
         openai_client: Option<Arc<dyn OpenAIClientTrait>>,
+    ) -> Self {
+        Self::new_for_testing_with_clients(openai_client, None)
+    }
+
+    pub fn new_for_testing_with_clients(
+        openai_client: Option<Arc<dyn OpenAIClientTrait>>,
+        bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
     ) -> Self {
         // Create temporary files for SQLite databases
         let temp_events_file = tempfile::NamedTempFile::new()
@@ -176,6 +189,8 @@ impl AppState {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             openai_client,
+            bedrock_client: bedrock_client
+                .or_else(|| Some(create_bedrock_client(None))),
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),
             camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -183,6 +198,8 @@ impl AppState {
                 NonZeroUsize::new(10).unwrap(),
             ))),
             default_summary_model: "anthropic-claude-haiku".to_string(),
+            investigation_model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                .to_string(),
             video_path_original_prefix: "/data".to_string(),
             video_path_replacement_prefix: "/path/to/replacement".to_string(),
             // Use Adelaide timezone for tests because it is an odd timezone,
@@ -237,10 +254,12 @@ pub struct AppConfig {
     pub max_concurrent_tasks: usize,
     pub openai_api_key: Option<String>,
     pub openai_api_base: Option<String>,
+    pub bedrock_region: Option<String>,
     pub runpod_api_key: Option<String>,
     pub signing_secret: Option<String>,
     pub transcription_service: String,
     pub default_summary_model: String,
+    pub investigation_model: String,
     pub video_path_original_prefix: String,
     pub video_path_replacement_prefix: String,
     pub timezone_str: Option<String>,
@@ -283,6 +302,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
             config.max_concurrent_tasks,
         )),
         openai_client,
+        bedrock_client: Some(create_bedrock_client(config.bedrock_region)),
         runpod_api_key: config.runpod_api_key,
         transcription_service: config.transcription_service,
         camera_name_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -290,6 +310,7 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
             NonZeroUsize::new(100).unwrap(),
         ))),
         default_summary_model: config.default_summary_model,
+        investigation_model: config.investigation_model,
         video_path_original_prefix: config.video_path_original_prefix,
         video_path_replacement_prefix: config.video_path_replacement_prefix,
         timezone,
@@ -386,6 +407,50 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
                 ON events(event_start DESC, event_id DESC);
             "#,
         ),
+        M::up(
+            r#"
+            CREATE TABLE IF NOT EXISTS bedrock_pricing (
+                model_id TEXT PRIMARY KEY,
+                input_cost_per_1k_usd REAL NOT NULL,
+                output_cost_per_1k_usd REAL NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bedrock_spend_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                request_id TEXT,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                estimated_cost_usd REAL NOT NULL
+            );
+            "#,
+        ),
+        M::up(
+            r#"
+            INSERT OR IGNORE INTO bedrock_pricing (
+                model_id,
+                input_cost_per_1k_usd,
+                output_cost_per_1k_usd,
+                updated_at
+            ) VALUES
+                (
+                    'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+                    0.003,
+                    0.015,
+                    strftime('%s', 'now')
+                ),
+                (
+                    'anthropic.claude-sonnet-4-5-20250929-v1:0',
+                    0.003,
+                    0.015,
+                    strftime('%s', 'now')
+                );
+            "#,
+        ),
     ]
 }
 
@@ -470,6 +535,8 @@ mod migration_tests {
         assert!(has_table(&conn, "daily_summaries")?);
         assert!(has_table(&conn, "corrupted_files")?);
         assert!(has_table(&conn, "metadata")?);
+        assert!(has_table(&conn, "bedrock_pricing")?);
+        assert!(has_table(&conn, "bedrock_spend_ledger")?);
         assert!(has_index(&conn, "idx_events_camera_start_end")?);
 
         Ok(())
@@ -492,6 +559,8 @@ mod migration_tests {
         assert!(has_table(&conn, "transcriptions")?);
         assert!(has_table(&conn, "transcript_search")?);
         assert!(has_table(&conn, "metadata")?);
+        assert!(has_table(&conn, "bedrock_pricing")?);
+        assert!(has_table(&conn, "bedrock_spend_ledger")?);
 
         Ok(())
     }
@@ -527,10 +596,12 @@ mod app_state_tests {
             max_concurrent_tasks: 2,
             openai_api_key: None,
             openai_api_base: None,
+            bedrock_region: None,
             runpod_api_key: None,
             signing_secret: None,
             transcription_service: "whisper-local".to_string(),
             default_summary_model: "test-model".to_string(),
+            investigation_model: "test-bedrock-model".to_string(),
             video_path_original_prefix: "/data".to_string(),
             video_path_replacement_prefix: "/tmp".to_string(),
             timezone_str: Some("America/Los_Angeles".to_string()),

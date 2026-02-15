@@ -1,4 +1,5 @@
 use super::storyboard;
+use crate::investigation::{self, InvestigationRequest};
 use crate::process_events;
 use crate::prompt_context;
 use crate::prompt_context::PromptContextError;
@@ -11,8 +12,11 @@ use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        Html, IntoResponse,
+    },
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -25,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::env;
 use std::fs::File;
 use std::io::SeekFrom;
@@ -36,7 +41,9 @@ use std::time::Duration;
 use tera::{Context as TeraContext, Tera};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::io::ReaderStream;
 use tower_http::compression::predicate::{
     NotForContentType, Predicate, SizeAbove,
@@ -249,6 +256,11 @@ fn init_templates() -> Tera {
     tera.add_raw_template(
         "transcript.html",
         include_str!("templates/transcript.html"),
+    )
+    .unwrap();
+    tera.add_raw_template(
+        "investigate.html",
+        include_str!("templates/investigate.html"),
     )
     .unwrap();
     tera
@@ -954,6 +966,10 @@ struct Args {
     #[arg(long, env = "OPENAI_API_BASE")]
     openai_api_base: Option<String>,
 
+    /// Optional Bedrock region override
+    #[arg(long, env = "AWS_REGION")]
+    bedrock_region: Option<String>,
+
     /// RunPod API key for transcription
     #[arg(long, env = "RUNPOD_API_KEY")]
     runpod_api_key: Option<String>,
@@ -973,6 +989,14 @@ struct Args {
     /// Default model to use for summary generation
     #[arg(long, default_value = "anthropic-claude-haiku")]
     default_summary_model: String,
+
+    /// Model ID used for investigation calls to Bedrock
+    #[arg(
+        long,
+        env = "BEDROCK_INVESTIGATION_MODEL",
+        default_value = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    )]
+    investigation_model: String,
 
     /// Original path prefix to replace in video paths
     #[arg(long, default_value = "/data")]
@@ -1682,6 +1706,21 @@ async fn transcript_page(State(state): State<Arc<AppState>>) -> Html<String> {
     Html(rendered)
 }
 
+#[axum::debug_handler]
+async fn investigate_page() -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/investigate");
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("investigate.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
 // Add a new API endpoint for transcripts with event IDs
 #[axum::debug_handler]
 async fn get_transcripts_json(
@@ -1700,12 +1739,106 @@ async fn get_transcripts_json(
     })))
 }
 
+#[axum::debug_handler]
+async fn investigate_videos(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvestigationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let response = investigation::investigate_question(&state, request)
+        .await
+        .map_err(|error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    })?;
+    Ok(Json(response))
+}
+
+#[axum::debug_handler]
+async fn investigate_videos_stream(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvestigationRequest>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let (tx, rx) = mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
+
+    tokio::spawn(async move {
+        let _ =
+            tx.send(Ok(SseEvent::default().event("status").data("planning")));
+
+        let mut stream_delta = {
+            let tx = tx.clone();
+            move |delta: String| {
+                let payload = serde_json::to_string(&serde_json::json!({
+                    "delta": delta
+                }))
+                .unwrap_or_else(|_| "{\"delta\":\"\"}".to_string());
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("answer_delta")
+                    .data(payload)));
+            }
+        };
+        let mut stream_search_plan = {
+            let tx = tx.clone();
+            move |plan: investigation::SearchPlanEvent| {
+                let payload = serde_json::to_string(&plan).unwrap_or_else(|_| {
+                    "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
+                });
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("search_plan")
+                    .data(payload)));
+            }
+        };
+        let mut stream_tool_use = {
+            let tx = tx.clone();
+            move |event: investigation::ToolUseEvent| {
+                let payload =
+                    serde_json::to_string(&event).unwrap_or_else(|_| {
+                        "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
+                    });
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("tool_use")
+                    .data(payload)));
+            }
+        };
+
+        match investigation::investigate_question_streaming(
+            &state,
+            request,
+            &mut stream_search_plan,
+            &mut stream_tool_use,
+            &mut stream_delta,
+        )
+        .await
+        {
+            Ok(response) => {
+                let payload =
+                    serde_json::to_string(&response).unwrap_or_else(|_| {
+                        "{\"error\":\"serialization\"}".to_string()
+                    });
+                let _ = tx
+                    .send(Ok(SseEvent::default().event("done").data(payload)));
+            }
+            Err(error) => {
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("error")
+                    .data(error.to_string())));
+            }
+        }
+    });
+
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    )
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     let predicate = SizeAbove::new(32)
         // still don't compress gRPC
         .and(NotForContentType::GRPC)
         // still don't compress images
         .and(NotForContentType::IMAGES)
+        // don't compress SSE; compression can buffer and break progressive updates
+        .and(NotForContentType::const_new("text/event-stream"))
         // also don't compress JSON
         .and(NotForContentType::const_new("video/mp4"));
 
@@ -1725,6 +1858,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/status", get(get_status_page))
         .route("/summary", get(summary_page))
         .route("/transcript", get(transcript_page))
+        .route("/investigate", get(investigate_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route("/api/models", get(get_available_models))
@@ -1733,6 +1867,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
         .route("/api/transcripts/json/{date}", get(get_transcripts_json))
+        .route("/api/investigate", post(investigate_videos))
+        .route("/api/investigate/stream", post(investigate_videos_stream))
         .route(
             "/api/transcripts/summary/{date}",
             get(get_transcripts_summary),
@@ -1843,10 +1979,12 @@ pub async fn serve() -> Result<()> {
         max_concurrent_tasks: args.max_concurrent_tasks,
         openai_api_key: args.openai_api_key,
         openai_api_base: args.openai_api_base,
+        bedrock_region: args.bedrock_region,
         runpod_api_key: args.runpod_api_key,
         signing_secret: args.signing_secret,
         transcription_service: args.transcription_service,
         default_summary_model: args.default_summary_model,
+        investigation_model: args.investigation_model,
         video_path_original_prefix: args.video_path_original_prefix,
         video_path_replacement_prefix: args.video_path_replacement_prefix,
         timezone_str: args.timezone,
