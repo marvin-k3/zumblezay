@@ -437,7 +437,7 @@ async fn test_events_api() {
         events_page.latency_ms.unwrap_or_default() < 60_000,
         "Expected latency_ms to be under 60s"
     );
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-2"));
@@ -469,7 +469,7 @@ async fn test_events_api() {
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| e["camera_id"] == "camera1"));
     assert_eq!(events.len(), 2);
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-3"));
@@ -485,7 +485,7 @@ async fn test_events_api() {
         make_api_request(app_router.clone(), &time_query_url).await;
     let events_page = validate_and_parse_events(status, &body);
     let events = &events_page.events;
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-1"));
     assert!(event_ids.contains(&"test-event-2"));
@@ -515,7 +515,7 @@ async fn test_events_api() {
         "Expected 1 event in time range 10:00:00 to 23:59:00, got {}",
         events.len()
     );
-    let event_ids = extract_event_ids(&events);
+    let event_ids = extract_event_ids(events);
 
     assert!(event_ids.contains(&"test-event-3"));
 

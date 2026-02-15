@@ -314,6 +314,12 @@ impl FakeBedrockClient {
     }
 }
 
+impl Default for FakeBedrockClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl BedrockClientTrait for FakeBedrockClient {
     async fn complete_text(

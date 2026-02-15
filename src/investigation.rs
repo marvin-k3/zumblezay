@@ -542,10 +542,12 @@ Rules:
         state,
         client,
         &model_id,
-        "investigation_answer",
-        synthesis_system_prompt,
-        &synthesis_user_prompt,
-        800,
+        BedrockCompletionRequest {
+            operation: "investigation_answer",
+            system_prompt: synthesis_system_prompt,
+            user_prompt: &synthesis_user_prompt,
+            max_tokens: 800,
+        },
         on_delta,
     )
     .await?;
@@ -900,6 +902,13 @@ struct LoggedCompletion {
     estimated_cost_usd: f64,
 }
 
+struct BedrockCompletionRequest<'a> {
+    operation: &'a str,
+    system_prompt: &'a str,
+    user_prompt: &'a str,
+    max_tokens: i32,
+}
+
 async fn invoke_and_log_bedrock(
     state: &Arc<AppState>,
     client: Arc<dyn BedrockClientTrait>,
@@ -951,18 +960,15 @@ async fn invoke_and_log_bedrock_streaming(
     state: &Arc<AppState>,
     client: Arc<dyn BedrockClientTrait>,
     model_id: &str,
-    operation: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    max_tokens: i32,
+    request: BedrockCompletionRequest<'_>,
     on_delta: &mut (dyn FnMut(String) + Send),
 ) -> Result<LoggedCompletion> {
     let completion = client
         .complete_text_streaming(
             model_id,
-            system_prompt,
-            user_prompt,
-            max_tokens,
+            request.system_prompt,
+            request.user_prompt,
+            request.max_tokens,
             on_delta,
         )
         .await?;
@@ -970,7 +976,7 @@ async fn invoke_and_log_bedrock_streaming(
     let conn = state.zumblezay_db.get()?;
     let spend_request = SpendLogRequest {
         category: INVESTIGATION_SPEND_CATEGORY,
-        operation,
+        operation: request.operation,
         model_id,
         request_id: completion.request_id.as_deref(),
         usage: completion.usage.clone(),

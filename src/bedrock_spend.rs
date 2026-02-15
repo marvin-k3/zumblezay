@@ -257,7 +257,7 @@ fn extract_per_1k_rate_from_terms(
     for term in sku_terms.values() {
         let price_dimensions =
             term.get("priceDimensions").and_then(Value::as_object)?;
-        for dimension in price_dimensions.values() {
+        if let Some(dimension) = price_dimensions.values().next() {
             let usd = dimension
                 .get("pricePerUnit")
                 .and_then(|value| value.get("USD"))
