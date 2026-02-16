@@ -533,7 +533,7 @@ pub fn backfill_date_range(
             params![event_id, job_type, priority, now, now],
         )?;
         indexed_rows += 1;
-        if scanned_rows % 500 == 0 {
+        if scanned_rows.is_multiple_of(500) {
             info!(
                 "Embedding backfill progress: scanned_rows={} indexed_rows={} parse_failures={}",
                 scanned_rows, indexed_rows, parse_failures
@@ -1062,7 +1062,7 @@ fn serialize_embedding(values: &[f32]) -> Vec<u8> {
 }
 
 fn deserialize_embedding(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         anyhow::bail!("embedding blob length must be multiple of 4");
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);

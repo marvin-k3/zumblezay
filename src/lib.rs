@@ -22,6 +22,9 @@ use tracing::info;
 use tracing::instrument;
 use tracing::warn;
 
+type BackfillTaskHandle = JoinHandle<()>;
+type BackfillTasks = Arc<Mutex<Vec<(i64, BackfillTaskHandle)>>>;
+
 pub mod app;
 pub mod bedrock;
 pub mod bedrock_spend;
@@ -109,7 +112,7 @@ pub struct AppState {
     // Holds temporary data for prompt context.
     pub prompt_context_store: Arc<prompt_context::Store>,
     pub shutdown_token: CancellationToken,
-    pub backfill_tasks: Arc<Mutex<Vec<(i64, JoinHandle<()>)>>>,
+    pub backfill_tasks: BackfillTasks,
     // Add fields to track temp files
     #[allow(dead_code)]
     temp_events_path: Option<tempfile::NamedTempFile>,

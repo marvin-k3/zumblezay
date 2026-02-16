@@ -190,15 +190,15 @@ Rules:
         search_queries.push(request.question.clone());
     }
 
-    let mut candidates = collect_candidates(
-        state,
-        &search_queries,
-        window_start.timestamp() as f64,
-        window_end.timestamp() as f64,
-        RETRIEVAL_POOL_LIMIT,
-        state.timezone,
+    let search_params = CandidateSearchParams {
+        window_start: window_start.timestamp() as f64,
+        window_end: window_end.timestamp() as f64,
+        limit: RETRIEVAL_POOL_LIMIT,
+        timezone: state.timezone,
         search_mode,
-    )?;
+    };
+    let mut candidates =
+        collect_candidates(state, &search_queries, &search_params)?;
 
     if candidates.is_empty() {
         let usage = aggregate_usage(
@@ -454,14 +454,17 @@ Rules:
             window_end.to_rfc3339()
         ),
     });
+    let search_params = CandidateSearchParams {
+        window_start: window_start.timestamp() as f64,
+        window_end: window_end.timestamp() as f64,
+        limit: RETRIEVAL_POOL_LIMIT,
+        timezone: state.timezone,
+        search_mode,
+    };
     let mut candidates = collect_candidates_with_progress(
         state,
         &search_queries,
-        window_start.timestamp() as f64,
-        window_end.timestamp() as f64,
-        RETRIEVAL_POOL_LIMIT,
-        state.timezone,
-        search_mode,
+        &search_params,
         |query_term, hit_count| {
             on_tool_use(ToolUseEvent {
                 tool_name: "transcript_search".to_string(),
@@ -685,23 +688,23 @@ fn parse_json_body<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     Ok(serde_json::from_str(trimmed)?)
 }
 
-fn collect_candidates(
-    state: &Arc<AppState>,
-    search_queries: &[String],
+struct CandidateSearchParams {
     window_start: f64,
     window_end: f64,
     limit: usize,
     timezone: chrono_tz::Tz,
     search_mode: hybrid_search::SearchMode,
+}
+
+fn collect_candidates(
+    state: &Arc<AppState>,
+    search_queries: &[String],
+    params: &CandidateSearchParams,
 ) -> Result<Vec<CandidateMoment>> {
     collect_candidates_with_progress(
         state,
         search_queries,
-        window_start,
-        window_end,
-        limit,
-        timezone,
-        search_mode,
+        params,
         |_query_term, _hit_count| {},
     )
 }
@@ -709,11 +712,7 @@ fn collect_candidates(
 fn collect_candidates_with_progress<F>(
     state: &Arc<AppState>,
     search_queries: &[String],
-    window_start: f64,
-    window_end: f64,
-    limit: usize,
-    timezone: chrono_tz::Tz,
-    search_mode: hybrid_search::SearchMode,
+    params: &CandidateSearchParams,
     mut on_query_results: F,
 ) -> Result<Vec<CandidateMoment>>
 where
@@ -722,13 +721,13 @@ where
     let conn = state.zumblezay_db.get()?;
     let mut candidates = Vec::new();
     let per_query_limit =
-        usize::max(10, limit / usize::max(1, search_queries.len()));
+        usize::max(10, params.limit / usize::max(1, search_queries.len()));
 
     for query_term in search_queries {
         let filters = hybrid_search::EventFilters {
             transcription_type: state.transcription_service.clone(),
-            start_ts: window_start,
-            end_ts: window_end,
+            start_ts: params.window_start,
+            end_ts: params.window_end,
             camera_id: None,
             cursor_start: None,
             cursor_event_id: None,
@@ -738,7 +737,7 @@ where
             query_term,
             &filters,
             per_query_limit,
-            search_mode,
+            params.search_mode,
         )?;
 
         let mut query_hits = 0;
@@ -807,10 +806,11 @@ where
                     event_end_utc: timestamp_to_rfc3339(event_end),
                     event_start_local: timestamp_to_local_rfc3339(
                         event_start,
-                        timezone,
+                        params.timezone,
                     ),
                     event_end_local: timestamp_to_local_rfc3339(
-                        event_end, timezone,
+                        event_end,
+                        params.timezone,
                     ),
                     start_offset_sec,
                     end_offset_sec,

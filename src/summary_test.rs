@@ -32,8 +32,7 @@ mod tests {
 
         // The result might be an error due to missing transcripts in the test database
         // That's okay for this test since we're primarily testing the OpenAI client interaction
-        if result.is_ok() {
-            let summary = result.unwrap();
+        if let Ok(summary) = result {
             assert_eq!(summary, test_response);
 
             // Verify it was saved in the database
@@ -459,8 +458,8 @@ mod tests {
         .await;
 
         // Should succeed
-        if result.is_ok() {
-            assert_eq!(result.unwrap(), "This is a valid summary");
+        if let Ok(summary) = result {
+            assert_eq!(summary, "This is a valid summary");
         }
     }
 
@@ -484,8 +483,8 @@ mod tests {
         .await;
 
         // Should succeed
-        if result.is_ok() {
-            assert_eq!(result.unwrap(), json_content);
+        if let Ok(summary) = result {
+            assert_eq!(summary, json_content);
         }
     }
 
