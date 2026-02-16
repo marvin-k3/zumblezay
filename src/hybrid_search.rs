@@ -493,6 +493,34 @@ pub fn process_pending_embedding_jobs_with_client_and_concurrency(
     Ok(processed)
 }
 
+pub fn process_pending_embedding_jobs_embeddings_only_with_client_and_concurrency(
+    conn: &Connection,
+    max_jobs: usize,
+    embedding_concurrency: usize,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
+    if max_jobs == 0 {
+        return Ok(0);
+    }
+    process_embedding_jobs_parallel(
+        conn,
+        max_jobs,
+        embedding_concurrency.max(1),
+        bedrock_client.as_ref(),
+    )
+}
+
+pub fn process_pending_embedding_jobs_backfill_only_with_client(
+    conn: &Connection,
+    max_jobs: usize,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
+    if max_jobs == 0 {
+        return Ok(0);
+    }
+    process_backfill_jobs_sequential(conn, max_jobs, bedrock_client.as_ref())
+}
+
 #[derive(Debug, Clone)]
 struct ClaimedEmbeddingJob {
     job_id: i64,

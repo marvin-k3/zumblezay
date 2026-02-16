@@ -1843,16 +1843,28 @@ struct Args {
     enable_embedding_updates: bool,
 
     /// Interval in seconds between embedding queue drain attempts
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 0.5)]
     embedding_worker_interval_secs: f64,
 
     /// Max jobs to process per embedding worker drain cycle
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 64)]
     embedding_worker_batch_size: usize,
 
     /// Max concurrent embedding model invocations per drain cycle
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 8)]
     embedding_worker_concurrency: usize,
+
+    /// Interval in seconds between embedding backfill queue drain attempts
+    #[arg(long, default_value_t = 1.0)]
+    embedding_backfill_worker_interval_secs: f64,
+
+    /// Max jobs to process per embedding backfill worker drain cycle
+    #[arg(long, default_value_t = 32)]
+    embedding_backfill_worker_batch_size: usize,
+
+    /// Max concurrent embedding model invocations per backfill worker drain cycle
+    #[arg(long, default_value_t = 1)]
+    embedding_backfill_worker_concurrency: usize,
 
     /// Default model to use for summary generation
     #[arg(long, default_value = "anthropic-claude-haiku")]
@@ -2336,7 +2348,7 @@ async fn drain_embedding_jobs_loop(
                     if paused_for_backfill {
                         return Ok((0, true));
                     }
-                    let processed = crate::hybrid_search::process_pending_embedding_jobs_with_client_and_concurrency(
+                    let processed = crate::hybrid_search::process_pending_embedding_jobs_embeddings_only_with_client_and_concurrency(
                         &conn,
                         batch_size,
                         concurrency,
@@ -2355,7 +2367,14 @@ async fn drain_embedding_jobs_loop(
                         }
                     }
                     Ok(Err(error)) => {
-                        error!("Embedding queue drain failed: {}", error);
+                        if error.to_string().contains("database is locked") {
+                            warn!(
+                                "Embedding queue drain hit transient SQLite lock; will retry next cycle: {}",
+                                error
+                            );
+                        } else {
+                            error!("Embedding queue drain failed: {}", error);
+                        }
                     }
                     Err(join_error) => {
                         error!("Embedding queue drain join error: {}", join_error);
@@ -2367,6 +2386,77 @@ async fn drain_embedding_jobs_loop(
     }
 
     info!("Embedding queue drain task terminated");
+}
+
+#[instrument(skip(state))]
+async fn drain_embedding_backfill_jobs_loop(
+    state: Arc<AppState>,
+    interval: Duration,
+    batch_size: usize,
+    concurrency: usize,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    info!(
+        "Starting embedding backfill queue drain loop with {}s interval, batch_size={}, concurrency={}",
+        interval.as_secs_f64(),
+        batch_size,
+        concurrency
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                info!("Shutting down embedding backfill queue drain task");
+                break;
+            }
+            _ = async {
+                let state_for_work = state.clone();
+                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool)> {
+                    let conn = state_for_work.zumblezay_db.get()?;
+                    let paused_for_backfill = has_running_backfill(&conn)?;
+                    if paused_for_backfill {
+                        return Ok((0, true));
+                    }
+                    let processed = crate::hybrid_search::process_pending_embedding_jobs_backfill_only_with_client(
+                        &conn,
+                        batch_size,
+                        state_for_work.bedrock_client.clone(),
+                    )?;
+                    Ok((processed, false))
+                }).await;
+
+                match result {
+                    Ok(Ok((processed, paused_for_backfill))) => {
+                        if paused_for_backfill {
+                            debug!("Embedding backfill queue drain paused while backfill is running");
+                        }
+                        if processed > 0 {
+                            info!("Processed {} embedding backfill jobs", processed);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        if error.to_string().contains("database is locked") {
+                            warn!(
+                                "Embedding backfill queue drain hit transient SQLite lock; will retry next cycle: {}",
+                                error
+                            );
+                        } else {
+                            error!(
+                                "Embedding backfill queue drain failed: {}",
+                                error
+                            );
+                        }
+                    }
+                    Err(join_error) => {
+                        error!("Embedding backfill queue drain join error: {}", join_error);
+                    }
+                }
+                time::sleep(interval).await;
+            } => {}
+        }
+    }
+
+    info!("Embedding backfill queue drain task terminated");
 }
 
 #[axum::debug_handler]
@@ -3072,10 +3162,11 @@ pub async fn serve() -> Result<()> {
         }))
     };
 
-    let embedding_worker_handle = if args.enable_embedding_updates
+    let (embedding_worker_handle, embedding_backfill_worker_handle) = if args
+        .enable_embedding_updates
         && args.enable_embedding_worker
     {
-        info!("Starting background embedding queue drain task");
+        info!("Starting background embedding queue drain tasks");
         let worker_state = state.clone();
         let worker_interval = Duration::from_secs_f64(
             args.embedding_worker_interval_secs.max(0.1),
@@ -3083,7 +3174,7 @@ pub async fn serve() -> Result<()> {
         let worker_batch_size = args.embedding_worker_batch_size.max(1);
         let worker_concurrency = args.embedding_worker_concurrency.max(1);
         let worker_shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        let embedding_handle = Some(tokio::spawn(async move {
             drain_embedding_jobs_loop(
                 worker_state,
                 worker_interval,
@@ -3092,13 +3183,34 @@ pub async fn serve() -> Result<()> {
                 worker_shutdown_rx,
             )
             .await;
-        }))
+        }));
+
+        let backfill_worker_state = state.clone();
+        let backfill_worker_interval = Duration::from_secs_f64(
+            args.embedding_backfill_worker_interval_secs.max(0.1),
+        );
+        let backfill_worker_batch_size =
+            args.embedding_backfill_worker_batch_size.max(1);
+        let backfill_worker_concurrency =
+            args.embedding_backfill_worker_concurrency.max(1);
+        let backfill_worker_shutdown_rx = shutdown_tx.subscribe();
+        let backfill_handle = Some(tokio::spawn(async move {
+            drain_embedding_backfill_jobs_loop(
+                backfill_worker_state,
+                backfill_worker_interval,
+                backfill_worker_batch_size,
+                backfill_worker_concurrency,
+                backfill_worker_shutdown_rx,
+            )
+            .await;
+        }));
+        (embedding_handle, backfill_handle)
     } else {
         info!(
             "Background embedding queue drain task disabled (enable_embedding_updates={}, enable_embedding_worker={})",
             args.enable_embedding_updates, args.enable_embedding_worker
         );
-        None
+        (None, None)
     };
 
     // Initialize templates
@@ -3154,6 +3266,10 @@ pub async fn serve() -> Result<()> {
         ("processing", processing_handle),
         ("pricing-refresh", pricing_refresh_handle),
         ("embedding-worker", embedding_worker_handle),
+        (
+            "embedding-backfill-worker",
+            embedding_backfill_worker_handle,
+        ),
     ] {
         if let Some(handle) = handle {
             match tokio::time::timeout(Duration::from_secs(30), handle).await {
