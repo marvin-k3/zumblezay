@@ -25,6 +25,7 @@ Key CLI switches (defined in `src/app.rs`):
 
 - `--whisper-url` / `WHISPER_URL`: upstream transcription endpoint (defaults to `http://localhost:9000/asr`).
 - `--enable-transcription`: toggle the background transcription worker.
+- `--enable-embedding-updates`: toggle embedding indexing/queueing/writes for this server instance.
 - `--enable-sync` / `--sync-interval`: control the event sync loop.
 - `--default-summary-model`: model identifier passed to the summary generator.
 - `--timezone`: overrides the timezone used in transcript exports.

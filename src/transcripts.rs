@@ -247,22 +247,31 @@ pub async fn save_transcript(
         );
     }
 
-    if let Err(err) = hybrid_search::index_transcript_units_for_event(
-        &conn,
-        &event.id,
-        &raw_json,
-        event.start,
-    ) {
-        warn!(
-            "Failed to update transcript units for event {}: {}",
-            event.id, err
-        );
-    }
+    if state.enable_embedding_updates {
+        if let Err(err) = hybrid_search::index_transcript_units_for_event(
+            &conn,
+            &event.id,
+            &raw_json,
+            event.start,
+        ) {
+            warn!(
+                "Failed to update transcript units for event {}: {}",
+                event.id, err
+            );
+        }
 
-    if let Err(err) = hybrid_search::process_pending_embedding_jobs(&conn, 16) {
-        warn!(
-            "Failed to process embedding jobs after transcript save {}: {}",
-            event.id, err
+        if let Err(err) =
+            hybrid_search::process_pending_embedding_jobs(&conn, 16)
+        {
+            warn!(
+                "Failed to process embedding jobs after transcript save {}: {}",
+                event.id, err
+            );
+        }
+    } else {
+        info!(
+            "Skipping embedding updates for {} because enable_embedding_updates=false",
+            event.id
         );
     }
 

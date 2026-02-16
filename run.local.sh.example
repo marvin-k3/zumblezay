@@ -6,6 +6,7 @@ RUN_BIN="zumblezay_server"
 RUN_ARGS=(
   --enable-sync=false
   --enable-transcription=false
+  --enable-embedding-updates=false
   --port=3011
   --timezone=America/Los_Angeles
   --video-path-replacement-prefix=/unifi-data

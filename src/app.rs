@@ -538,6 +538,13 @@ async fn start_embeddings_backfill(
     Json(request): Json<EmbeddingsBackfillRequest>,
 ) -> Result<(StatusCode, Json<EmbeddingsBackfillAccepted>), (StatusCode, String)>
 {
+    if !state.enable_embedding_updates {
+        return Err((
+            StatusCode::CONFLICT,
+            "Embedding updates are disabled on this server".to_string(),
+        ));
+    }
+
     let timezone = if let Some(tz) = request.timezone.as_deref() {
         time_util::get_local_timezone(Some(tz))
     } else {
@@ -1617,6 +1624,10 @@ struct Args {
     /// Enable background embedding queue worker (enabled by default)
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     enable_embedding_worker: bool,
+
+    /// Enable embedding updates (indexing, queueing, and embedding writes)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_embedding_updates: bool,
 
     /// Interval in seconds between embedding queue drain attempts
     #[arg(long, default_value_t = 2.0)]
@@ -2757,6 +2768,7 @@ pub async fn serve() -> Result<()> {
         runpod_api_key: args.runpod_api_key,
         signing_secret: args.signing_secret,
         transcription_service: args.transcription_service,
+        enable_embedding_updates: args.enable_embedding_updates,
         default_summary_model: args.default_summary_model,
         investigation_model: args.investigation_model,
         video_path_original_prefix: args.video_path_original_prefix,
@@ -2828,7 +2840,9 @@ pub async fn serve() -> Result<()> {
         }))
     };
 
-    let embedding_worker_handle = if args.enable_embedding_worker {
+    let embedding_worker_handle = if args.enable_embedding_updates
+        && args.enable_embedding_worker
+    {
         info!("Starting background embedding queue drain task");
         let worker_state = state.clone();
         let worker_interval = Duration::from_secs_f64(
@@ -2846,7 +2860,10 @@ pub async fn serve() -> Result<()> {
             .await;
         }))
     } else {
-        info!("Background embedding queue drain task disabled");
+        info!(
+            "Background embedding queue drain task disabled (enable_embedding_updates={}, enable_embedding_worker={})",
+            args.enable_embedding_updates, args.enable_embedding_worker
+        );
         None
     };
 
