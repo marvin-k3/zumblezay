@@ -124,22 +124,11 @@ pub async fn fetch_bedrock_pricing_from_aws(
         return Ok(None);
     }
 
-    let region_index_url = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/region_index.json";
-    let region_index: Value =
-        reqwest::get(region_index_url).await?.json().await?;
-
-    let version_path = region_index
-        .get("regions")
-        .and_then(|value| value.get(region_code))
-        .and_then(|value| value.get("currentVersionUrl"))
-        .and_then(Value::as_str);
-
-    let Some(version_path) = version_path else {
+    let Some(pricing_doc) =
+        fetch_foundation_models_pricing_doc(region_code).await?
+    else {
         return Ok(None);
     };
-    let pricing_url =
-        format!("https://pricing.us-east-1.amazonaws.com{version_path}");
-    let pricing_doc: Value = reqwest::get(pricing_url).await?.json().await?;
 
     let products = pricing_doc
         .get("products")
@@ -208,10 +197,122 @@ pub async fn fetch_bedrock_pricing_from_aws(
         .into_iter()
         .find_map(|sku| extract_per_1k_rate_from_terms(terms, sku));
 
+    let from_foundation_models = input_rate.map(|input| BedrockPricingRate {
+        input_cost_per_1k_usd: input,
+        output_cost_per_1k_usd: output_rate.unwrap_or(0.0),
+    });
+    if from_foundation_models.is_some() {
+        return Ok(from_foundation_models);
+    }
+
+    // Nova 2 multimodal embeddings is published in AmazonBedrock pricing.
+    if model_id
+        .to_ascii_lowercase()
+        .contains("nova-2-multimodal-embeddings-v1")
+    {
+        return fetch_nova_multimodal_embeddings_pricing_from_bedrock(
+            region_code,
+        )
+        .await;
+    }
+
+    Ok(None)
+}
+
+async fn fetch_foundation_models_pricing_doc(
+    region_code: &str,
+) -> Result<Option<Value>> {
+    let region_index_url = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/region_index.json";
+    let region_index: Value =
+        reqwest::get(region_index_url).await?.json().await?;
+
+    let version_path = region_index
+        .get("regions")
+        .and_then(|value| value.get(region_code))
+        .and_then(|value| value.get("currentVersionUrl"))
+        .and_then(Value::as_str);
+
+    let Some(version_path) = version_path else {
+        return Ok(None);
+    };
+    let pricing_url =
+        format!("https://pricing.us-east-1.amazonaws.com{version_path}");
+    let pricing_doc: Value = reqwest::get(pricing_url).await?.json().await?;
+    Ok(Some(pricing_doc))
+}
+
+async fn fetch_nova_multimodal_embeddings_pricing_from_bedrock(
+    region_code: &str,
+) -> Result<Option<BedrockPricingRate>> {
+    let Some(region_prefix) = bedrock_usage_type_region_prefix(region_code)
+    else {
+        return Ok(None);
+    };
+    let pricing_url = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/index.json";
+    let pricing_doc: Value = reqwest::get(pricing_url).await?.json().await?;
+
+    let products = pricing_doc
+        .get("products")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("missing products object in AWS pricing response")
+        })?;
+
+    let mut input_skus = Vec::new();
+    let mut output_skus = Vec::new();
+
+    for (sku, product) in products {
+        let Some(attributes) =
+            product.get("attributes").and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let usage_type = attributes
+            .get("usagetype")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let usage_lower = usage_type.to_ascii_lowercase();
+        if !usage_lower
+            .starts_with(&format!("{region_prefix}-novamultimodalembeddings"))
+        {
+            continue;
+        }
+        if !is_standard_token_rate_usage_type(usage_type) {
+            continue;
+        }
+        if usage_lower.contains("input-tokens") {
+            input_skus.push(sku.as_str());
+        }
+        if usage_lower.contains("output-tokens") {
+            output_skus.push(sku.as_str());
+        }
+    }
+
+    let terms = pricing_doc
+        .get("terms")
+        .and_then(|value| value.get("OnDemand"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("missing OnDemand terms in AWS pricing response")
+        })?;
+    let input_rate = input_skus
+        .into_iter()
+        .find_map(|sku| extract_per_1k_rate_from_terms(terms, sku));
+    let output_rate = output_skus
+        .into_iter()
+        .find_map(|sku| extract_per_1k_rate_from_terms(terms, sku));
+
     Ok(input_rate.map(|input| BedrockPricingRate {
         input_cost_per_1k_usd: input,
         output_cost_per_1k_usd: output_rate.unwrap_or(0.0),
     }))
+}
+
+fn bedrock_usage_type_region_prefix(region_code: &str) -> Option<&'static str> {
+    match region_code {
+        "us-east-1" => Some("use1"),
+        _ => None,
+    }
 }
 
 fn lookup_pricing(conn: &Connection, model_id: &str) -> Option<(f64, f64)> {
