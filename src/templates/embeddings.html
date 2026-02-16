@@ -71,13 +71,9 @@
                         <label class="form-label" for="timezone">Timezone</label>
                         <input id="timezone" class="form-control" type="text" value="{{ timezone | safe }}">
                     </div>
-                    <div class="col-md-8">
+                    <div class="col-12">
                         <label class="form-label" for="transcription-type">Transcription Type</label>
                         <input id="transcription-type" class="form-control" type="text" value="whisper-local">
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label" for="max-jobs">Job Batch</label>
-                        <input id="max-jobs" class="form-control" type="number" min="1" value="1024">
                     </div>
                     <div class="col-12 d-flex gap-2">
                         <button id="start-backfill" type="submit" class="btn btn-primary">Start Backfill</button>
@@ -101,6 +97,31 @@
 
 {% block scripts %}
 <script>
+function toLocalYmd(date) {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+}
+
+function initializeBackfillForm() {
+    const dateStartInput = document.getElementById('date-start');
+    const dateEndInput = document.getElementById('date-end');
+    const today = new Date();
+    const todayYmd = toLocalYmd(today);
+    const monthStartYmd = toLocalYmd(new Date(today.getFullYear(), today.getMonth(), 1));
+
+    if (!dateStartInput.value) {
+        dateStartInput.value = monthStartYmd;
+    }
+    if (!dateEndInput.value) {
+        dateEndInput.value = todayYmd;
+    }
+
+    dateStartInput.max = todayYmd;
+    dateEndInput.max = todayYmd;
+}
+
 async function loadEmbeddingStatus() {
     try {
         const res = await fetch('/api/embeddings/status', {
@@ -156,15 +177,26 @@ async function loadEmbeddingStatus() {
 document.getElementById('backfill-form').addEventListener('submit', async (event) => {
     event.preventDefault();
 
+    const dateStart = document.getElementById('date-start').value;
+    const dateEnd = document.getElementById('date-end').value;
+    const statusEl = document.getElementById('backfill-submit-status');
+
+    if (!dateStart || !dateEnd) {
+        statusEl.textContent = 'Choose both start and end dates.';
+        return;
+    }
+    if (dateStart > dateEnd) {
+        statusEl.textContent = 'Date start must be on or before date end.';
+        return;
+    }
+
     const payload = {
-        date_start: document.getElementById('date-start').value,
-        date_end: document.getElementById('date-end').value,
+        date_start: dateStart,
+        date_end: dateEnd,
         timezone: document.getElementById('timezone').value,
-        transcription_type: document.getElementById('transcription-type').value,
-        max_jobs_per_cycle: Number(document.getElementById('max-jobs').value)
+        transcription_type: document.getElementById('transcription-type').value
     };
 
-    const statusEl = document.getElementById('backfill-submit-status');
     statusEl.textContent = 'Submitting...';
 
     try {
@@ -191,6 +223,7 @@ document.getElementById('backfill-form').addEventListener('submit', async (event
     }
 });
 
+initializeBackfillForm();
 loadEmbeddingStatus();
 setInterval(loadEmbeddingStatus, 3000);
 </script>

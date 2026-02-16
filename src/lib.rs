@@ -16,6 +16,8 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::instrument;
 use tracing::warn;
@@ -105,6 +107,8 @@ pub struct AppState {
     pub signing_secret: String,
     // Holds temporary data for prompt context.
     pub prompt_context_store: Arc<prompt_context::Store>,
+    pub shutdown_token: CancellationToken,
+    pub backfill_tasks: Arc<Mutex<Vec<(i64, JoinHandle<()>)>>>,
     // Add fields to track temp files
     #[allow(dead_code)]
     temp_events_path: Option<tempfile::NamedTempFile>,
@@ -212,6 +216,8 @@ impl AppState {
             in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
             signing_secret: "test_secret".to_string(),
             prompt_context_store: Arc::new(prompt_context::Store::new()),
+            shutdown_token: CancellationToken::new(),
+            backfill_tasks: Arc::new(Mutex::new(Vec::new())),
             // Store temp files so they're cleaned up when AppState is dropped
             temp_events_path: Some(temp_events_file),
             temp_zumblezay_path: Some(temp_zumblezay_file),
@@ -323,6 +329,8 @@ pub fn create_app_state(config: AppConfig) -> Arc<AppState> {
         in_progress_storyboards: Arc::new(Mutex::new(HashMap::new())),
         signing_secret,
         prompt_context_store: Arc::new(prompt_context::Store::new()),
+        shutdown_token: CancellationToken::new(),
+        backfill_tasks: Arc::new(Mutex::new(Vec::new())),
         temp_events_path: None,
         temp_zumblezay_path: None,
         temp_cache_db_path: None,

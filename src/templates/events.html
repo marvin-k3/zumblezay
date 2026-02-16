@@ -158,6 +158,48 @@
         border-radius: 50%;
         background-color: var(--bs-success);
     }
+    .embedding-indicator {
+        display: inline-flex;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+    }
+    .embedding-indicator.ready {
+        background-color: var(--bs-info);
+    }
+    .embedding-indicator.pending {
+        background-color: var(--bs-secondary);
+    }
+    .embedding-table td, .embedding-table th {
+        font-size: 0.85rem;
+        vertical-align: top;
+    }
+    .embedding-preview {
+        min-width: 360px;
+        white-space: normal;
+        word-break: break-word;
+    }
+    .embedding-meta {
+        white-space: nowrap;
+    }
+    .embedding-id-pill {
+        display: inline-block;
+        font-family: var(--bs-font-monospace);
+        font-size: 0.75rem;
+        padding: 2px 6px;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 999px;
+        background: var(--bs-tertiary-bg);
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        vertical-align: middle;
+    }
+    .embedding-copy {
+        padding: 0 0.35rem;
+        line-height: 1.2;
+        font-size: 0.75rem;
+    }
     .empty-state {
         text-align: center;
         padding: 1.5rem;
@@ -349,6 +391,16 @@
                             <div class="transcript-placeholder">
                                 Select a video to view its transcript
                             </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Embeddings</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="embedding-inspector" class="small text-muted">
+                            Select a video to inspect embedding status and chunks
                         </div>
                     </div>
                 </div>
@@ -888,6 +940,7 @@
             const duration = Math.max(Math.round(t.event_end - t.event_start), 1);
             const cameraLabel = t.camera_name || t.camera_id;
             const snippet = t.snippet ? `<div class="event-snippet small text-muted mt-1" style="display:${showSnippets ? 'block' : 'none'}">${renderSnippet(t.snippet)}</div>` : '';
+            const embeddingTitle = t.has_embeddings ? 'Embeddings available' : 'Embeddings pending';
             return `
                 <div class="event-item p-2 border-bottom"
                      onclick="loadVideo('${t.event_id}')"
@@ -899,6 +952,8 @@
                             <span class="transcript-indicator" title="Transcript available" aria-hidden="true"></span>
                             <span class="visually-hidden">Transcript available</span>
                         ` : ''}
+                        <span class="embedding-indicator ${t.has_embeddings ? 'ready' : 'pending'}" title="${embeddingTitle}" aria-hidden="true"></span>
+                        <span class="visually-hidden">${embeddingTitle}</span>
                     </div>
                     <div class="small text-muted">${formatTimestamp(t.event_start)} - ${duration} seconds</div>
                     ${snippet}
@@ -986,7 +1041,9 @@
         window.history.pushState({}, '', newUrl);
 
         const transcriptContainer = document.getElementById('transcript-container');
+        const embeddingInspector = document.getElementById('embedding-inspector');
         transcriptContainer.innerHTML = '<div class="p-3 text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading transcript...</div>';
+        embeddingInspector.innerHTML = '<div class="p-2"><div class="spinner-border spinner-border-sm" role="status"></div> Loading embedding status...</div>';
         transcriptData = [];
         activeSegmentId = null;
 
@@ -1032,6 +1089,8 @@
                     transcriptContainer.innerHTML = '<div class="transcript-placeholder">No transcript available for this video</div>';
                 }
 
+                loadEmbeddingInspector(eventId);
+
                 const storyboardTrack = document.createElement('track');
                 storyboardTrack.kind = 'metadata';
                 storyboardTrack.label = 'thumbnails';
@@ -1053,6 +1112,104 @@
             newUrl.searchParams.delete('video');
             window.history.pushState({}, '', newUrl);
             transcriptContainer.innerHTML = '<div class="transcript-placeholder">Error loading transcript</div>';
+            document.getElementById('embedding-inspector').innerHTML = '<div class="text-danger">Error loading embedding status</div>';
+        });
+    }
+
+    function escapeHtml(value) {
+        return String(value || '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
+    }
+
+    function formatMs(ms) {
+        if (ms === null || ms === undefined) return 'n/a';
+        return `${(ms / 1000).toFixed(1)}s`;
+    }
+
+    function formatEmbeddingId(id) {
+        if (!id) return '';
+        if (id.length <= 16) return id;
+        return `${id.slice(0, 8)}...${id.slice(-6)}`;
+    }
+
+    function formatEmbeddingTime(epochSecs) {
+        if (!epochSecs) return '';
+        return new Date(epochSecs * 1000).toLocaleString();
+    }
+
+    function copyEmbeddingId(id) {
+        if (!id) return;
+        navigator.clipboard.writeText(id).catch(() => {});
+    }
+
+    function loadEmbeddingInspector(eventId) {
+        fetch(`/api/event/${encodeURIComponent(eventId)}/embeddings`, {
+            headers: { 'Accept': 'application/json' }
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            const container = document.getElementById('embedding-inspector');
+            const summary = `
+                <div class="mb-2">
+                    <strong>Units:</strong> ${data.embedded_units}/${data.total_units}
+                    &nbsp;|&nbsp;<strong>Pending jobs:</strong> ${data.pending_jobs}
+                    &nbsp;|&nbsp;<strong>Failed jobs:</strong> ${data.failed_jobs}
+                </div>
+            `;
+
+            if (!Array.isArray(data.units) || data.units.length === 0) {
+                container.innerHTML = `${summary}<div class="text-muted">No transcript chunks indexed yet for this event.</div>`;
+                return;
+            }
+
+            const rows = data.units.map(unit => `
+                <tr>
+                    <td><code>${escapeHtml(unit.unit_type)}</code></td>
+                    <td>${formatMs(unit.start_ms)} - ${formatMs(unit.end_ms)}</td>
+                    <td>${unit.has_embedding ? '<span class="badge text-bg-info">embedded</span>' : '<span class="badge text-bg-secondary">pending</span>'}</td>
+                    <td class="embedding-meta">
+                        ${unit.has_embedding
+                            ? `
+                                <span class="badge text-bg-light border">${escapeHtml(unit.model_key || 'model')}</span>
+                                <span class="badge text-bg-light border">${escapeHtml(unit.embedding_dim || '?')}d</span>
+                                <span class="embedding-id-pill" title="${escapeHtml(unit.embedding_id || '')}">${escapeHtml(formatEmbeddingId(unit.embedding_id || ''))}</span>
+                                <button class="btn btn-outline-secondary btn-sm embedding-copy" title="Copy embedding id" onclick="copyEmbeddingId('${escapeHtml(unit.embedding_id || '')}')">Copy</button>
+                                <div class="text-muted">${escapeHtml(formatEmbeddingTime(unit.embedding_created_at))}</div>
+                              `
+                            : '<span class="text-muted">queued / not generated</span>'}
+                    </td>
+                    <td class="embedding-preview">${escapeHtml(unit.content_preview)}</td>
+                </tr>
+            `).join('');
+
+            container.innerHTML = `
+                ${summary}
+                <div class="table-responsive">
+                    <table class="table table-sm embedding-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Span</th>
+                                <th>Status</th>
+                                <th>Embedding</th>
+                                <th>Chunk Preview</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            `;
+        })
+        .catch(error => {
+            console.error('Error loading embedding inspector:', error);
+            document.getElementById('embedding-inspector').innerHTML = '<div class="text-danger">Error loading embedding status</div>';
         });
     }
 

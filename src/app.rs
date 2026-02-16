@@ -121,7 +121,6 @@ struct EmbeddingsBackfillRequest {
     date_end: String,
     timezone: Option<String>,
     transcription_type: Option<String>,
-    max_jobs_per_cycle: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +141,22 @@ impl r2d2::CustomizeConnection<Connection, rusqlite::Error> for DbAttacher {
                 std::path::PathBuf::from("events_db path is empty"),
             ));
         }
+        // WAL still allows only one writer; wait briefly instead of failing
+        // immediately on transient write contention.
+        conn.busy_timeout(Duration::from_secs(10))?;
         conn.execute("ATTACH DATABASE ? AS ubnt", params![&self.events_db])?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct BusyTimeoutOnly;
+
+impl r2d2::CustomizeConnection<Connection, rusqlite::Error>
+    for BusyTimeoutOnly
+{
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        conn.busy_timeout(Duration::from_secs(10))?;
         Ok(())
     }
 }
@@ -430,6 +444,20 @@ fn fetch_backfill_run(
     .optional()
 }
 
+fn has_running_backfill(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    let running: Option<i64> = conn
+        .query_row(
+            "SELECT run_id FROM embedding_backfill_runs
+             WHERE status = 'running'
+             ORDER BY run_id DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(running.is_some())
+}
+
 #[axum::debug_handler]
 async fn get_embeddings_status(
     State(state): State<Arc<AppState>>,
@@ -530,8 +558,12 @@ async fn start_embeddings_backfill(
             timezone,
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    let max_jobs_per_cycle = request.max_jobs_per_cycle.unwrap_or(1024).max(1);
+    if start_ts > end_ts {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "date_start must be on or before date_end".to_string(),
+        ));
+    }
 
     let conn = state
         .zumblezay_db
@@ -576,61 +608,101 @@ async fn start_embeddings_backfill(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let run_id = conn.last_insert_rowid();
     drop(conn);
+    info!(
+        "Accepted embedding backfill run_id={} date_start={} date_end={} timezone={} transcription_type={}",
+        run_id,
+        request.date_start,
+        request.date_end,
+        timezone_str,
+        transcription_type
+    );
 
     let state_for_job = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let run = || -> Result<(), anyhow::Error> {
-            let conn = state_for_job.zumblezay_db.get()?;
-            let summary = hybrid_search::backfill_date_range(
+    let tracked_handle = tokio::spawn(async move {
+        info!("Starting embedding backfill worker for run_id={}", run_id);
+        let shutdown_token = state_for_job.shutdown_token.clone();
+        let state_for_blocking = state_for_job.clone();
+        let transcription_type_for_blocking = transcription_type.clone();
+
+        let blocking_result = tokio::task::spawn_blocking(move || {
+            let conn = state_for_blocking.zumblezay_db.get()?;
+            hybrid_search::backfill_date_range(
                 &conn,
                 &hybrid_search::BackfillRangeParams {
                     start_ts,
                     end_ts,
-                    transcription_type: transcription_type.clone(),
-                    max_jobs_per_cycle,
+                    transcription_type: transcription_type_for_blocking,
+                    shutdown_token: Some(shutdown_token),
                 },
-            )?;
+            )
+        })
+        .await;
 
-            let finished_at = Utc::now().timestamp();
-            conn.execute(
-                "UPDATE embedding_backfill_runs
-                 SET status = 'done',
-                     finished_at = ?,
-                     scanned_rows = ?,
-                     indexed_rows = ?,
-                     parse_failures = ?,
-                     processed_jobs = ?,
-                     updated_at = ?
-                 WHERE run_id = ?",
-                params![
-                    finished_at,
-                    summary.scanned_rows as i64,
-                    summary.indexed_rows as i64,
-                    summary.parse_failures as i64,
-                    summary.processed_jobs as i64,
-                    finished_at,
-                    run_id
-                ],
-            )?;
-            Ok(())
-        };
+        let result: Result<hybrid_search::BackfillSummary, anyhow::Error> =
+            match blocking_result {
+                Ok(inner) => inner,
+                Err(join_error) => Err(anyhow::anyhow!(
+                    "backfill task join error: {}",
+                    join_error
+                )),
+            };
 
-        if let Err(error) = run() {
-            if let Ok(conn) = state_for_job.zumblezay_db.get() {
-                let now = Utc::now().timestamp();
-                let _ = conn.execute(
-                    "UPDATE embedding_backfill_runs
-                     SET status = 'failed',
-                         finished_at = ?,
-                         error = ?,
-                         updated_at = ?
-                     WHERE run_id = ?",
-                    params![now, error.to_string(), now, run_id],
+        match result {
+            Ok(summary) => {
+                if let Ok(conn) = state_for_job.zumblezay_db.get() {
+                    let finished_at = Utc::now().timestamp();
+                    let _ = conn.execute(
+                        "UPDATE embedding_backfill_runs
+                         SET status = 'done',
+                             finished_at = ?,
+                             scanned_rows = ?,
+                             indexed_rows = ?,
+                             parse_failures = ?,
+                             processed_jobs = ?,
+                             updated_at = ?
+                         WHERE run_id = ?",
+                        params![
+                            finished_at,
+                            summary.scanned_rows as i64,
+                            summary.indexed_rows as i64,
+                            summary.parse_failures as i64,
+                            summary.processed_jobs as i64,
+                            finished_at,
+                            run_id
+                        ],
+                    );
+                }
+                info!(
+                    "Embedding backfill run_id={} done scanned_rows={} indexed_rows={} parse_failures={} processed_jobs={}",
+                    run_id,
+                    summary.scanned_rows,
+                    summary.indexed_rows,
+                    summary.parse_failures,
+                    summary.processed_jobs
                 );
             }
-            error!("embedding backfill run {} failed: {}", run_id, error);
+            Err(error) => {
+                if let Ok(conn) = state_for_job.zumblezay_db.get() {
+                    let now = Utc::now().timestamp();
+                    let _ = conn.execute(
+                        "UPDATE embedding_backfill_runs
+                         SET status = 'failed',
+                             finished_at = ?,
+                             error = ?,
+                             updated_at = ?
+                         WHERE run_id = ?",
+                        params![now, error.to_string(), now, run_id],
+                    );
+                }
+                error!("embedding backfill run {} failed: {}", run_id, error);
+            }
         }
     });
+    {
+        let mut tasks = state.backfill_tasks.lock().await;
+        tasks.retain(|(_, handle)| !handle.is_finished());
+        tasks.push((run_id, tracked_handle));
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -807,6 +879,23 @@ async fn get_completed_events(
                 event_start,
                 event_end,
                 has_transcript: true,
+                has_embeddings: conn
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1
+                            FROM transcript_units tu
+                            JOIN unit_embeddings ue ON ue.unit_id = tu.unit_id
+                            WHERE tu.event_id = ?
+                        )",
+                        params![event_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|e| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?
+                    .unwrap_or(0)
+                    != 0,
                 snippet: Some(hit.snippet),
                 search_unit_type: hit.unit_type,
                 search_segment_start_ms: hit.segment_start_ms,
@@ -852,7 +941,13 @@ async fn get_completed_events(
                     WHERE t.event_id = e1.event_id
                       AND t.transcription_type = ?
                  ) AS has_transcript,
-                 NULL AS snippet
+                 NULL AS snippet,
+                 EXISTS(
+                    SELECT 1
+                    FROM transcript_units tu
+                    JOIN unit_embeddings ue ON ue.unit_id = tu.unit_id
+                    WHERE tu.event_id = e1.event_id
+                 ) AS has_embeddings
           FROM events e1
           WHERE e1.event_start BETWEEN ? AND ?
             AND NOT EXISTS (
@@ -923,6 +1018,7 @@ async fn get_completed_events(
                 event_start: row.get(2)?,
                 event_end: row.get(3)?,
                 has_transcript: row.get(4)?,
+                has_embeddings: row.get::<_, i64>(6)? != 0,
                 snippet: if has_search { row.get(5)? } else { None },
                 search_unit_type: None,
                 search_segment_start_ms: None,
@@ -1038,14 +1134,148 @@ async fn get_event(
         )
         .ok();
 
+    let has_embeddings: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM transcript_units tu
+                JOIN unit_embeddings ue ON ue.unit_id = tu.unit_id
+                WHERE tu.event_id = ?
+            )",
+            params![event_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )
+        .unwrap_or(false);
+
     // Combine event and transcript data
     let mut response = event.as_object().unwrap().clone();
+    response.insert("has_embeddings".to_string(), json!(has_embeddings));
     if let Some(transcript_data) = transcript {
         response.insert("has_transcript".to_string(), json!(true));
         response.extend(transcript_data.as_object().unwrap().clone());
     }
 
     Ok(Json(Value::Object(response)))
+}
+
+#[axum::debug_handler]
+async fn get_event_embeddings(
+    State(state): State<Arc<AppState>>,
+    Path(event_id): Path<String>,
+) -> Result<Json<EventEmbeddingStatusResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let event_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?)",
+            params![event_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !event_exists {
+        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+    }
+
+    let total_units: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transcript_units WHERE event_id = ?",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let embedded_units: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT tu.unit_id)
+             FROM transcript_units tu
+             JOIN unit_embeddings ue ON ue.unit_id = tu.unit_id
+             WHERE tu.event_id = ?",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let pending_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM embedding_jobs
+             WHERE event_id = ? AND status IN ('pending', 'running')",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let failed_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM embedding_jobs
+             WHERE event_id = ? AND status = 'failed'",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT tu.unit_id,
+                    tu.unit_type,
+                    tu.start_ms,
+                    tu.end_ms,
+                    tu.content_version,
+                    substr(tu.content_text, 1, 180) AS content_preview,
+                    ue.embedding_id,
+                    ue.model_key,
+                    ue.embedding_dim,
+                    ue.created_at
+             FROM transcript_units tu
+             LEFT JOIN unit_embeddings ue
+               ON ue.unit_id = tu.unit_id
+              AND ue.model_key = ?
+              AND ue.embedding_kind = ?
+              AND ue.content_version = tu.content_version
+             WHERE tu.event_id = ?
+             ORDER BY CASE tu.unit_type WHEN 'full' THEN 0 ELSE 1 END,
+                      COALESCE(tu.start_ms, -1),
+                      tu.unit_id",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let units_rows = stmt
+        .query_map(
+            params![
+                hybrid_search::ACTIVE_MODEL_KEY,
+                hybrid_search::ACTIVE_EMBEDDING_KIND,
+                event_id
+            ],
+            |row| {
+                let embedding_id = row.get::<_, Option<String>>(6)?;
+                Ok(EventEmbeddingUnitStatus {
+                    unit_id: row.get(0)?,
+                    unit_type: row.get(1)?,
+                    start_ms: row.get(2)?,
+                    end_ms: row.get(3)?,
+                    content_version: row.get(4)?,
+                    content_preview: row.get(5)?,
+                    has_embedding: embedding_id.is_some(),
+                    embedding_id,
+                    model_key: row.get(7)?,
+                    embedding_dim: row.get(8)?,
+                    embedding_created_at: row.get(9)?,
+                })
+            },
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let units = units_rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(EventEmbeddingStatusResponse {
+        event_id,
+        total_units,
+        embedded_units,
+        pending_jobs,
+        failed_jobs,
+        units,
+    }))
 }
 
 #[axum::debug_handler]
@@ -1213,6 +1443,7 @@ struct TranscriptListItem {
     event_start: f64,
     event_end: f64,
     has_transcript: bool,
+    has_embeddings: bool,
     snippet: Option<String>,
     search_unit_type: Option<String>,
     search_segment_start_ms: Option<i64>,
@@ -1235,6 +1466,31 @@ struct EventPage {
     events: Vec<TranscriptListItem>,
     next_cursor: Option<EventCursor>,
     latency_ms: Option<u128>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventEmbeddingUnitStatus {
+    unit_id: String,
+    unit_type: String,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    content_version: i64,
+    content_preview: String,
+    has_embedding: bool,
+    embedding_id: Option<String>,
+    model_key: Option<String>,
+    embedding_dim: Option<i64>,
+    embedding_created_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventEmbeddingStatusResponse {
+    event_id: String,
+    total_units: i64,
+    embedded_units: i64,
+    pending_jobs: i64,
+    failed_jobs: i64,
+    units: Vec<EventEmbeddingUnitStatus>,
 }
 
 // Update the events page handlers
@@ -1844,13 +2100,21 @@ async fn drain_embedding_jobs_loop(
             }
             _ = async {
                 let state_for_work = state.clone();
-                let result = tokio::task::spawn_blocking(move || -> Result<usize> {
+                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool)> {
                     let conn = state_for_work.zumblezay_db.get()?;
-                    crate::hybrid_search::process_pending_embedding_jobs(&conn, batch_size)
+                    let paused_for_backfill = has_running_backfill(&conn)?;
+                    if paused_for_backfill {
+                        return Ok((0, true));
+                    }
+                    let processed = crate::hybrid_search::process_pending_embedding_jobs(&conn, batch_size)?;
+                    Ok((processed, false))
                 }).await;
 
                 match result {
-                    Ok(Ok(processed)) => {
+                    Ok(Ok((processed, paused_for_backfill))) => {
+                        if paused_for_backfill {
+                            debug!("Embedding queue drain paused while backfill is running");
+                        }
                         if processed > 0 {
                             info!("Processed {} embedding jobs", processed);
                         }
@@ -2334,6 +2598,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/investigate", get(investigate_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
+        .route(
+            "/api/event/{event_id}/embeddings",
+            get(get_event_embeddings),
+        )
         .route("/api/models", get(get_available_models))
         .route("/api/cameras", get(get_cameras))
         .route("/video/{event_id}", get(stream_video))
@@ -2465,7 +2733,9 @@ pub async fn serve() -> Result<()> {
     check_file_is_writable(&args.cache_db, "cache database")?;
 
     let cache_manager = SqliteConnectionManager::file(&args.cache_db);
-    let cache_pool = Pool::new(cache_manager)?;
+    let cache_pool = Pool::builder()
+        .connection_customizer(Box::new(BusyTimeoutOnly))
+        .build(cache_manager)?;
 
     // Initialize cache database schema
     {
@@ -2495,14 +2765,15 @@ pub async fn serve() -> Result<()> {
     });
 
     // Create a channel for shutdown coordination
-    let (shutdown_tx, mut shutdown_rx) =
-        tokio::sync::broadcast::channel::<()>(1);
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Set up ctrl-c handler
     let shutdown_tx_clone = shutdown_tx.clone();
+    let shutdown_token_for_signal = state.shutdown_token.clone();
     tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
             info!("Received CTRL-C, initiating shutdown");
+            shutdown_token_for_signal.cancel();
             let _ = shutdown_tx_clone.send(());
         }
     });
@@ -2583,23 +2854,48 @@ pub async fn serve() -> Result<()> {
     ensure_templates();
 
     // Start web server
+    let shutdown_state = state.clone();
     let app = routes(state);
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Server running on http://{}", addr);
-
-    let server = axum::serve(listener, app);
+    let mut shutdown_rx_server = shutdown_tx.subscribe();
+    let mut shutdown_rx_main = shutdown_tx.subscribe();
+    let mut server_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx_server.recv().await;
+            })
+            .await
+    });
 
     tokio::select! {
-        result = server => {
-            if let Err(e) = result {
-                error!("Server error: {}", e);
+        result = &mut server_handle => {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("Server error: {}", e),
+                Err(e) => error!("Server task join error: {}", e),
             }
         }
-        _ = shutdown_rx.recv() => {
+        _ = shutdown_rx_main.recv() => {
             info!("Shutdown signal received, waiting for background tasks to complete...");
+            match tokio::time::timeout(Duration::from_secs(10), &mut server_handle).await {
+                Ok(result) => {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => error!("Server error during shutdown: {}", e),
+                        Err(e) => error!("Server task join error during shutdown: {}", e),
+                    }
+                }
+                Err(_) => {
+                    warn!("HTTP server graceful shutdown timed out; aborting server task");
+                    server_handle.abort();
+                    let _ = server_handle.await;
+                }
+            }
         }
     }
+    shutdown_state.shutdown_token.cancel();
 
     // Wait for both handles with timeout
     for (task_name, handle) in [
@@ -2614,6 +2910,19 @@ pub async fn serve() -> Result<()> {
                 Err(_) => {
                     warn!("Background {} timed out during shutdown", task_name)
                 }
+            }
+        }
+    }
+
+    let backfill_handles = {
+        let mut tasks = shutdown_state.backfill_tasks.lock().await;
+        std::mem::take(&mut *tasks)
+    };
+    for (run_id, handle) in backfill_handles {
+        match tokio::time::timeout(Duration::from_secs(30), handle).await {
+            Ok(_) => info!("Backfill run {} stopped gracefully", run_id),
+            Err(_) => {
+                warn!("Backfill run {} timed out during shutdown", run_id)
             }
         }
     }

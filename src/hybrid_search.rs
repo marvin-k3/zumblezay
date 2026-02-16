@@ -5,6 +5,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 pub const ACTIVE_MODEL_KEY: &str = "nova2_text_v1";
 pub const ACTIVE_PROVIDER_MODEL_ID: &str =
@@ -18,6 +20,7 @@ const SEGMENT_WINDOW_MS: i64 = 30_000;
 const SEGMENT_OVERLAP_MS: i64 = 10_000;
 const RETRY_BASE_SECS: i64 = 60;
 const MAX_ATTEMPTS: i64 = 5;
+const JOB_TYPE_BACKFILL_EVENT_PREFIX: &str = "backfill_event:";
 
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -79,7 +82,7 @@ pub struct BackfillRangeParams {
     pub start_ts: f64,
     pub end_ts: f64,
     pub transcription_type: String,
-    pub max_jobs_per_cycle: usize,
+    pub shutdown_token: Option<CancellationToken>,
 }
 
 #[derive(Debug, Clone)]
@@ -463,8 +466,19 @@ pub fn backfill_date_range(
     conn: &Connection,
     params: &BackfillRangeParams,
 ) -> Result<BackfillSummary> {
+    info!(
+        "Embedding backfill scan starting: start_ts={} end_ts={} transcription_type={}",
+        params.start_ts, params.end_ts, params.transcription_type
+    );
+    if params
+        .shutdown_token
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Err(anyhow::anyhow!("backfill cancelled due to shutdown"));
+    }
     let mut stmt = conn.prepare(
-        "SELECT e.event_id, e.event_start, t.raw_response
+        "SELECT e.event_id, e.event_start
          FROM events e
          JOIN transcriptions t ON t.event_id = e.event_id
          WHERE e.event_start BETWEEN ? AND ?
@@ -477,51 +491,64 @@ pub fn backfill_date_range(
             params.end_ts,
             params.transcription_type.as_str()
         ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
     )?;
+    let rows: Vec<(String, f64)> = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
 
     let mut scanned_rows = 0usize;
     let mut indexed_rows = 0usize;
-    let mut parse_failures = 0usize;
+    let parse_failures = 0usize;
+    let now = chrono::Utc::now().timestamp();
+    let job_type = format!(
+        "{}{}",
+        JOB_TYPE_BACKFILL_EVENT_PREFIX, params.transcription_type
+    );
     for row in rows {
-        let (event_id, event_start, raw_response) = row?;
+        if params
+            .shutdown_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            return Err(anyhow::anyhow!("backfill cancelled due to shutdown"));
+        }
+        let (event_id, event_start) = row;
         scanned_rows += 1;
 
-        let raw_json: Value = match serde_json::from_str(&raw_response) {
-            Ok(value) => value,
-            Err(_) => {
-                parse_failures += 1;
-                continue;
-            }
+        let age_secs =
+            (chrono::Utc::now().timestamp() as f64 - event_start).max(0.0);
+        let priority = if age_secs <= 86_400.0 {
+            100
+        } else if age_secs <= 7.0 * 86_400.0 {
+            50
+        } else {
+            10
         };
 
-        upsert_transcript_search_content(conn, &event_id, &raw_json)?;
-        index_transcript_units_for_event(
-            conn,
-            &event_id,
-            &raw_json,
-            event_start,
+        conn.execute(
+            "INSERT INTO embedding_jobs (
+                event_id, unit_id, job_type, priority, status,
+                attempt_count, next_attempt_at, created_at, updated_at
+             ) VALUES (?, NULL, ?, ?, 'pending', 0, NULL, ?, ?)",
+            params![event_id, job_type, priority, now, now],
         )?;
         indexed_rows += 1;
-    }
-    drop(stmt);
-
-    let mut processed_jobs = 0usize;
-    loop {
-        let n =
-            process_pending_embedding_jobs(conn, params.max_jobs_per_cycle)?;
-        if n == 0 {
-            break;
+        if scanned_rows % 500 == 0 {
+            info!(
+                "Embedding backfill progress: scanned_rows={} indexed_rows={} parse_failures={}",
+                scanned_rows, indexed_rows, parse_failures
+            );
         }
-        processed_jobs += n;
     }
 
+    // Backfill only scans/indexes and enqueues embedding work.
+    // The background drain loop is the sole embedding writer.
+    let processed_jobs = 0usize;
+
+    info!(
+        "Embedding backfill complete: scanned_rows={} indexed_rows={} parse_failures={} processed_jobs={}",
+        scanned_rows, indexed_rows, parse_failures, processed_jobs
+    );
     Ok(BackfillSummary {
         scanned_rows,
         indexed_rows,
@@ -546,7 +573,7 @@ fn process_single_job(conn: &Connection, job_id: i64) -> Result<()> {
 
     let job_row = conn
         .query_row(
-            "SELECT event_id, unit_id, attempt_count
+            "SELECT event_id, unit_id, attempt_count, job_type
              FROM embedding_jobs WHERE job_id = ?",
             params![job_id],
             |row| {
@@ -554,18 +581,50 @@ fn process_single_job(conn: &Connection, job_id: i64) -> Result<()> {
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((_event_id, unit_id_opt, attempts)) = job_row else {
+    let Some((event_id, unit_id_opt, attempts, job_type)) = job_row else {
         return Ok(());
     };
 
     let result = (|| -> Result<()> {
-        let unit_id = unit_id_opt.context("embedding job missing unit_id")?;
-        upsert_current_embedding_for_unit(conn, &unit_id)
+        if let Some(transcription_type) =
+            job_type.strip_prefix(JOB_TYPE_BACKFILL_EVENT_PREFIX)
+        {
+            let row = conn
+                .query_row(
+                    "SELECT e.event_start, t.raw_response
+                     FROM events e
+                     JOIN transcriptions t ON t.event_id = e.event_id
+                     WHERE e.event_id = ? AND t.transcription_type = ?
+                     LIMIT 1",
+                    params![event_id, transcription_type],
+                    |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+
+            let Some((event_start, raw_response)) = row else {
+                return Ok(());
+            };
+
+            let raw_json: Value = serde_json::from_str(&raw_response)?;
+            upsert_transcript_search_content(conn, &event_id, &raw_json)?;
+            index_transcript_units_for_event(
+                conn,
+                &event_id,
+                &raw_json,
+                event_start,
+            )?;
+            Ok(())
+        } else {
+            let unit_id =
+                unit_id_opt.context("embedding job missing unit_id")?;
+            upsert_current_embedding_for_unit(conn, &unit_id)
+        }
     })();
 
     match result {

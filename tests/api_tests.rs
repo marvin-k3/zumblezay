@@ -1143,17 +1143,10 @@ async fn test_embeddings_backfill_endpoint_runs_for_date_range() {
         if payload["latest_backfill"]["status"] == json!("done") {
             done = true;
             assert!(
-                payload["transcript_units"]
-                    .as_i64()
-                    .expect("transcript_units as i64")
+                payload["queued_jobs"].as_i64().expect("queued_jobs as i64")
                     > 0
             );
-            assert!(
-                payload["unit_embeddings"]
-                    .as_i64()
-                    .expect("unit_embeddings as i64")
-                    > 0
-            );
+            assert_eq!(payload["latest_backfill"]["processed_jobs"], json!(0));
             break;
         }
 
@@ -1161,6 +1154,39 @@ async fn test_embeddings_backfill_endpoint_runs_for_date_range() {
     }
 
     assert!(done, "backfill did not complete in expected time");
+}
+
+#[tokio::test]
+async fn test_embeddings_backfill_rejects_reversed_date_range() {
+    init_test_logging();
+    let (_app_state, app_router) = app();
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/embeddings/backfill")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "date_start": "2026-11-01",
+                        "date_end": "2026-02-16",
+                        "timezone": "America/Los_Angeles",
+                        "transcription_type": "whisper-local",
+                        "max_jobs_per_cycle": 128
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("date_start must be on or before date_end"));
 }
 
 #[tokio::test]
@@ -1210,6 +1236,31 @@ async fn test_event_detail_and_captions_endpoints() {
         .as_str()
         .unwrap()
         .contains("Visitor chatted at the door"));
+    assert!(event_json["has_embeddings"].is_boolean());
+
+    let embeddings_response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/event/event-echo/embeddings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(embeddings_response.status(), StatusCode::OK);
+    let embeddings_body = embeddings_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let embeddings_json: serde_json::Value =
+        serde_json::from_slice(&embeddings_body).unwrap();
+    assert_eq!(embeddings_json["event_id"], "event-echo");
+    assert!(embeddings_json["total_units"].is_number());
+    assert!(embeddings_json["embedded_units"].is_number());
+    assert!(embeddings_json["units"].is_array());
 
     let captions_response = app_router
         .clone()
