@@ -1701,25 +1701,28 @@ fn build_transcript_units(
         });
     }
 
-    for segment in build_segments(raw_json) {
-        if segment.content_text.trim().is_empty() {
-            continue;
+    let segments = build_segments(raw_json);
+    if segments.len() > 1 {
+        for segment in segments {
+            if segment.content_text.trim().is_empty() {
+                continue;
+            }
+            drafts.push(TranscriptUnitDraft {
+                unit_id: format!(
+                    "{}:segment:{}:{}:{}",
+                    event_id,
+                    ACTIVE_SEGMENT_STRATEGY,
+                    segment.start_ms,
+                    segment.end_ms
+                ),
+                unit_type: "segment",
+                segment_strategy: Some(ACTIVE_SEGMENT_STRATEGY),
+                start_ms: Some(segment.start_ms),
+                end_ms: Some(segment.end_ms),
+                content_hash: hash_hex(&segment.content_text),
+                content_text: segment.content_text,
+            });
         }
-        drafts.push(TranscriptUnitDraft {
-            unit_id: format!(
-                "{}:segment:{}:{}:{}",
-                event_id,
-                ACTIVE_SEGMENT_STRATEGY,
-                segment.start_ms,
-                segment.end_ms
-            ),
-            unit_type: "segment",
-            segment_strategy: Some(ACTIVE_SEGMENT_STRATEGY),
-            start_ms: Some(segment.start_ms),
-            end_ms: Some(segment.end_ms),
-            content_hash: hash_hex(&segment.content_text),
-            content_text: segment.content_text,
-        });
     }
 
     drafts
@@ -1907,6 +1910,36 @@ mod tests {
         assert_eq!(segments[0].end_ms, 30_000);
         assert_eq!(segments[1].start_ms, 20_000);
         assert_eq!(segments[1].end_ms, 50_000);
+    }
+
+    #[test]
+    fn short_clips_only_index_full_clip_unit() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        init_zumblezay_db(&mut conn)?;
+
+        let raw = serde_json::json!({
+            "text": "short event transcript",
+            "segments": [
+                {"start": 0.0, "end": 10.0, "text": "short event transcript"}
+            ]
+        });
+        index_transcript_units_for_event(&conn, "evt-short", &raw, 0.0)?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM transcript_units WHERE event_id = ?",
+            params!["evt-short"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        let unit_type: String = conn.query_row(
+            "SELECT unit_type FROM transcript_units WHERE event_id = ?",
+            params!["evt-short"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(unit_type, "full_clip");
+
+        Ok(())
     }
 
     #[test]
