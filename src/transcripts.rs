@@ -261,7 +261,11 @@ pub async fn save_transcript(
         }
 
         if let Err(err) =
-            hybrid_search::process_pending_embedding_jobs(&conn, 16)
+            hybrid_search::process_pending_embedding_jobs_with_client(
+                &conn,
+                16,
+                state.bedrock_client.clone(),
+            )
         {
             warn!(
                 "Failed to process embedding jobs after transcript save {}: {}",

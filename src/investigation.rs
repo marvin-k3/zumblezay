@@ -732,12 +732,13 @@ where
             cursor_start: None,
             cursor_event_id: None,
         };
-        let hits = hybrid_search::search_events(
+        let hits = hybrid_search::search_events_with_client(
             &conn,
             query_term,
             &filters,
             per_query_limit,
             params.search_mode,
+            state.bedrock_client.clone(),
         )?;
 
         let mut query_hits = 0;

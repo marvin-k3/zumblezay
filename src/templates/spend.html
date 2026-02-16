@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Bedrock Spend{% endblock %}
+
+{% block page_title %}Bedrock Spend{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">Calls</div>
+                <div id="total-calls" class="fs-4 fw-semibold">-</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">Input Tokens</div>
+                <div id="total-input" class="fs-4 fw-semibold">-</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">Output Tokens</div>
+                <div id="total-output" class="fs-4 fw-semibold">-</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">Estimated Cost</div>
+                <div id="total-cost" class="fs-4 fw-semibold">$0.00</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-12 col-lg-4">
+        <div class="card h-100">
+            <div class="card-header"><strong>By Category</strong></div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Category</th>
+                                <th class="text-end">Calls</th>
+                                <th class="text-end">Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody id="by-category-rows">
+                            <tr><td colspan="3" class="text-muted p-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div class="card h-100">
+            <div class="card-header"><strong>By Operation</strong></div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Operation</th>
+                                <th class="text-end">Calls</th>
+                                <th class="text-end">Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody id="by-operation-rows">
+                            <tr><td colspan="3" class="text-muted p-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div class="card h-100">
+            <div class="card-header"><strong>By Model</strong></div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Model</th>
+                                <th class="text-end">Calls</th>
+                                <th class="text-end">Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody id="by-model-rows">
+                            <tr><td colspan="3" class="text-muted p-3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Recent Bedrock Calls</strong>
+        <span class="text-muted small">Newest first</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Category</th>
+                        <th>Operation</th>
+                        <th>Model</th>
+                        <th class="text-end">Input</th>
+                        <th class="text-end">Output</th>
+                        <th class="text-end">Cost</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-rows">
+                    <tr><td colspan="7" class="text-muted p-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    function fmtInt(value) {
+        return Number(value || 0).toLocaleString();
+    }
+
+    function fmtUsd(value) {
+        const n = Number(value || 0);
+        return `$${n.toFixed(6)}`;
+    }
+
+    function fmtTs(epochSecs) {
+        if (!epochSecs) return "-";
+        return new Date(epochSecs * 1000).toLocaleString();
+    }
+
+    function renderBreakdownRows(elementId, rows) {
+        const body = document.getElementById(elementId);
+        if (!Array.isArray(rows) || rows.length === 0) {
+            body.innerHTML = '<tr><td colspan="3" class="text-muted p-3">No spend logged yet</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map((row) => `
+            <tr>
+                <td><code>${row.key}</code></td>
+                <td class="text-end">${fmtInt(row.call_count)}</td>
+                <td class="text-end">${fmtUsd(row.estimated_cost_usd)}</td>
+            </tr>
+        `).join("");
+    }
+
+    function renderRecentRows(rows) {
+        const body = document.getElementById("recent-rows");
+        if (!Array.isArray(rows) || rows.length === 0) {
+            body.innerHTML = '<tr><td colspan="7" class="text-muted p-3">No spend logged yet</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map((row) => `
+            <tr>
+                <td>${fmtTs(row.created_at)}</td>
+                <td><code>${row.category}</code></td>
+                <td><code>${row.operation}</code></td>
+                <td><code>${row.model_id}</code></td>
+                <td class="text-end">${fmtInt(row.input_tokens)}</td>
+                <td class="text-end">${fmtInt(row.output_tokens)}</td>
+                <td class="text-end">${fmtUsd(row.estimated_cost_usd)}</td>
+            </tr>
+        `).join("");
+    }
+
+    async function refreshSpend() {
+        const response = await fetch("/api/bedrock/spend?limit=200", {
+            headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        document.getElementById("total-calls").textContent = fmtInt(data.totals.call_count);
+        document.getElementById("total-input").textContent = fmtInt(data.totals.input_tokens);
+        document.getElementById("total-output").textContent = fmtInt(data.totals.output_tokens);
+        document.getElementById("total-cost").textContent = fmtUsd(data.totals.estimated_cost_usd);
+
+        renderBreakdownRows("by-category-rows", data.by_category);
+        renderBreakdownRows("by-operation-rows", data.by_operation);
+        renderBreakdownRows("by-model-rows", data.by_model);
+        renderRecentRows(data.recent_entries);
+    }
+
+    refreshSpend().catch((error) => {
+        console.error("Failed to load spend:", error);
+        document.getElementById("recent-rows").innerHTML =
+            '<tr><td colspan="7" class="text-danger p-3">Failed to load spend data</td></tr>';
+    });
+    setInterval(() => {
+        refreshSpend().catch((error) => {
+            console.error("Failed to refresh spend:", error);
+        });
+    }, 10000);
+})();
+</script>
+{% endblock %}

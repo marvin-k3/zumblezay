@@ -1,3 +1,8 @@
+use crate::bedrock::{BedrockClientTrait, BedrockUsage};
+use crate::bedrock_spend::{
+    fetch_bedrock_pricing_from_aws, is_missing_pricing_error,
+    record_bedrock_spend, upsert_bedrock_pricing, SpendLogRequest,
+};
 use anyhow::{Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -5,8 +10,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 pub const ACTIVE_MODEL_KEY: &str = "nova2_text_v1";
 pub const ACTIVE_PROVIDER_MODEL_ID: &str =
@@ -21,6 +27,9 @@ const SEGMENT_OVERLAP_MS: i64 = 10_000;
 const RETRY_BASE_SECS: i64 = 60;
 const MAX_ATTEMPTS: i64 = 5;
 const JOB_TYPE_BACKFILL_EVENT_PREFIX: &str = "backfill_event:";
+const EMBEDDING_SPEND_CATEGORY: &str = "transcript_embedding";
+const EMBEDDING_SPEND_OPERATION_INDEX: &str = "embed_transcript_unit";
+const EMBEDDING_SPEND_OPERATION_QUERY: &str = "embed_search_query";
 
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -438,13 +447,27 @@ pub fn process_pending_embedding_jobs(
     conn: &Connection,
     max_jobs: usize,
 ) -> Result<usize> {
+    process_pending_embedding_jobs_with_client(conn, max_jobs, None)
+}
+
+pub fn process_pending_embedding_jobs_with_client(
+    conn: &Connection,
+    max_jobs: usize,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
     let now = chrono::Utc::now().timestamp();
     let mut stmt = conn.prepare(
         "SELECT job_id
          FROM embedding_jobs
          WHERE status = 'pending'
            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-         ORDER BY priority DESC, created_at ASC
+         ORDER BY
+           CASE
+             WHEN job_type LIKE 'backfill_event:%' THEN 1
+             ELSE 0
+           END ASC,
+           priority DESC,
+           created_at ASC
          LIMIT ?",
     )?;
     let job_rows = stmt
@@ -454,7 +477,7 @@ pub fn process_pending_embedding_jobs(
 
     let mut processed = 0usize;
     for job_id in job_ids {
-        if process_single_job(conn, job_id).is_ok() {
+        if process_single_job(conn, job_id, bedrock_client.as_ref()).is_ok() {
             processed += 1;
         }
     }
@@ -557,7 +580,11 @@ pub fn backfill_date_range(
     })
 }
 
-fn process_single_job(conn: &Connection, job_id: i64) -> Result<()> {
+fn process_single_job(
+    conn: &Connection,
+    job_id: i64,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
+) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     let changed = conn.execute(
         "UPDATE embedding_jobs
@@ -623,7 +650,7 @@ fn process_single_job(conn: &Connection, job_id: i64) -> Result<()> {
         } else {
             let unit_id =
                 unit_id_opt.context("embedding job missing unit_id")?;
-            upsert_current_embedding_for_unit(conn, &unit_id)
+            upsert_current_embedding_for_unit(conn, &unit_id, bedrock_client)
         }
     })();
 
@@ -673,6 +700,7 @@ fn process_single_job(conn: &Connection, job_id: i64) -> Result<()> {
 fn upsert_current_embedding_for_unit(
     conn: &Connection,
     unit_id: &str,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
 ) -> Result<()> {
     let row = conn
         .query_row(
@@ -697,7 +725,15 @@ fn upsert_current_embedding_for_unit(
         .optional()?
         .unwrap_or(DEFAULT_EMBEDDING_DIM as i64);
 
-    let embedding = embed_text_deterministic(&content_text, dim as usize);
+    let embedding_result =
+        embed_text(&content_text, dim as usize, bedrock_client)?;
+    maybe_record_embedding_spend(
+        conn,
+        &embedding_result,
+        EMBEDDING_SPEND_OPERATION_INDEX,
+    )?;
+
+    let embedding = embedding_result.embedding;
     let embedding_id = deterministic_embedding_id(
         unit_id,
         ACTIVE_MODEL_KEY,
@@ -749,6 +785,17 @@ pub fn search_events(
     limit: usize,
     mode: SearchMode,
 ) -> Result<Vec<HybridSearchHit>> {
+    search_events_with_client(conn, query, filters, limit, mode, None)
+}
+
+pub fn search_events_with_client(
+    conn: &Connection,
+    query: &str,
+    filters: &EventFilters,
+    limit: usize,
+    mode: SearchMode,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<Vec<HybridSearchHit>> {
     let cfg = load_search_config(conn)?;
 
     let bm25_candidates = if mode == SearchMode::Vector {
@@ -759,7 +806,23 @@ pub fn search_events(
     let vector_candidates = if mode == SearchMode::Bm25 {
         Vec::new()
     } else {
-        search_vector(conn, query, filters, limit.saturating_mul(4))?
+        match search_vector(
+            conn,
+            query,
+            filters,
+            limit.saturating_mul(4),
+            bedrock_client.as_ref(),
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) if mode == SearchMode::Hybrid => {
+                warn!(
+                    "Hybrid vector search failed; falling back to BM25-only: {}",
+                    error
+                );
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        }
     };
 
     let mut bm25_ranks: HashMap<String, usize> = HashMap::new();
@@ -929,6 +992,7 @@ fn search_vector(
     query: &str,
     filters: &EventFilters,
     limit: usize,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
 ) -> Result<Vec<SourceCandidate>> {
     let dim: i64 = conn
         .query_row(
@@ -939,7 +1003,14 @@ fn search_vector(
         )
         .optional()?
         .unwrap_or(DEFAULT_EMBEDDING_DIM as i64);
-    let query_embedding = embed_text_deterministic(query, dim as usize);
+    let query_embedding_result =
+        embed_text(query, dim as usize, bedrock_client)?;
+    maybe_record_embedding_spend(
+        conn,
+        &query_embedding_result,
+        EMBEDDING_SPEND_OPERATION_QUERY,
+    )?;
+    let query_embedding = query_embedding_result.embedding;
 
     let mut sql = String::from(
         "SELECT e.event_id,
@@ -1127,6 +1198,126 @@ fn embed_text_deterministic(text: &str, dim: usize) -> Vec<f32> {
         }
     }
     vec
+}
+
+fn embed_text(
+    text: &str,
+    dim: usize,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
+) -> Result<EmbeddingCallResult> {
+    let Some(client) = bedrock_client else {
+        return Ok(EmbeddingCallResult {
+            embedding: embed_text_deterministic(text, dim),
+            usage: None,
+            request_id: None,
+        });
+    };
+
+    if dim == 0 {
+        return Ok(EmbeddingCallResult {
+            embedding: Vec::new(),
+            usage: None,
+            request_id: None,
+        });
+    }
+
+    let model_id = ACTIVE_PROVIDER_MODEL_ID.to_string();
+    let text_owned = text.to_string();
+    let client = Arc::clone(client);
+    let dim_i32 =
+        i32::try_from(dim).context("embedding dimension too large")?;
+
+    let run_call = move || -> Result<EmbeddingCallResult> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("create tokio runtime for bedrock embedding call")?;
+        let response = runtime.block_on(client.embed_text(
+            &model_id,
+            &text_owned,
+            dim_i32,
+        ))?;
+        if response.embedding.len() != dim {
+            return Err(anyhow::anyhow!(
+                "bedrock embedding dimension mismatch: expected {}, got {}",
+                dim,
+                response.embedding.len()
+            ));
+        }
+        Ok(EmbeddingCallResult {
+            embedding: response.embedding,
+            usage: Some(response.usage),
+            request_id: response.request_id,
+        })
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let handle = std::thread::spawn(run_call);
+        return handle.join().map_err(|_| {
+            anyhow::anyhow!("bedrock embedding thread panicked")
+        })?;
+    }
+
+    run_call()
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingCallResult {
+    embedding: Vec<f32>,
+    usage: Option<BedrockUsage>,
+    request_id: Option<String>,
+}
+
+fn maybe_record_embedding_spend(
+    conn: &Connection,
+    result: &EmbeddingCallResult,
+    operation: &'static str,
+) -> Result<()> {
+    let Some(usage) = result.usage.clone() else {
+        return Ok(());
+    };
+
+    let spend_request = SpendLogRequest {
+        category: EMBEDDING_SPEND_CATEGORY,
+        operation,
+        model_id: ACTIVE_PROVIDER_MODEL_ID,
+        request_id: result.request_id.as_deref(),
+        usage,
+    };
+
+    match record_bedrock_spend(conn, spend_request.clone()) {
+        Ok(_) => Ok(()),
+        Err(error) if is_missing_pricing_error(&error) => {
+            let aws_region = std::env::var("AWS_REGION").ok();
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                if let Ok(Some(rate)) =
+                    runtime.block_on(fetch_bedrock_pricing_from_aws(
+                        ACTIVE_PROVIDER_MODEL_ID,
+                        aws_region.as_deref(),
+                    ))
+                {
+                    upsert_bedrock_pricing(
+                        conn,
+                        ACTIVE_PROVIDER_MODEL_ID,
+                        rate,
+                    )?;
+                    record_bedrock_spend(conn, spend_request)?;
+                    return Ok(());
+                }
+            }
+
+            warn!(
+                model_id = ACTIVE_PROVIDER_MODEL_ID,
+                error = %error,
+                "Skipping embedding spend log due to missing Bedrock pricing"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn build_transcript_units(

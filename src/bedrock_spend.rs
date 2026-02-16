@@ -118,8 +118,9 @@ pub async fn fetch_bedrock_pricing_from_aws(
         .filter(|value| !value.is_empty())
         .unwrap_or("us-east-1");
 
-    let hints = model_service_name_hints(model_id);
-    if hints.is_empty() {
+    let service_name_hints = model_service_name_hints(model_id);
+    let usage_type_hints = model_usage_type_hints(model_id);
+    if service_name_hints.is_empty() && usage_type_hints.is_empty() {
         return Ok(None);
     }
 
@@ -161,22 +162,33 @@ pub async fn fetch_bedrock_pricing_from_aws(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_lowercase();
-        if !hints.iter().any(|hint| service_name.contains(hint)) {
-            continue;
-        }
 
         let usage_type = attributes
             .get("usagetype")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let usage_type_lower = usage_type.to_lowercase();
+        if !service_name_hints
+            .iter()
+            .any(|hint| service_name.contains(hint))
+            && !usage_type_hints
+                .iter()
+                .any(|hint| usage_type_lower.contains(hint))
+        {
+            continue;
+        }
         if !is_standard_token_rate_usage_type(usage_type) {
             continue;
         }
 
-        if usage_type.contains("InputTokenCount-Units") {
+        if usage_type.contains("InputTokenCount-Units")
+            || usage_type_lower.contains("input-tokens")
+        {
             input_skus.push(sku.as_str());
         }
-        if usage_type.contains("OutputTokenCount-Units") {
+        if usage_type.contains("OutputTokenCount-Units")
+            || usage_type_lower.contains("output-tokens")
+        {
             output_skus.push(sku.as_str());
         }
     }
@@ -196,13 +208,10 @@ pub async fn fetch_bedrock_pricing_from_aws(
         .into_iter()
         .find_map(|sku| extract_per_1k_rate_from_terms(terms, sku));
 
-    Ok(match (input_rate, output_rate) {
-        (Some(input), Some(output)) => Some(BedrockPricingRate {
-            input_cost_per_1k_usd: input,
-            output_cost_per_1k_usd: output,
-        }),
-        _ => None,
-    })
+    Ok(input_rate.map(|input| BedrockPricingRate {
+        input_cost_per_1k_usd: input,
+        output_cost_per_1k_usd: output_rate.unwrap_or(0.0),
+    }))
 }
 
 fn lookup_pricing(conn: &Connection, model_id: &str) -> Option<(f64, f64)> {
@@ -236,17 +245,20 @@ fn normalized_pricing_model_id(model_id: &str) -> Option<String> {
 }
 
 fn is_standard_token_rate_usage_type(usage_type: &str) -> bool {
+    let lower = usage_type.to_lowercase();
     if !(usage_type.contains("InputTokenCount-Units")
-        || usage_type.contains("OutputTokenCount-Units"))
+        || usage_type.contains("OutputTokenCount-Units")
+        || lower.contains("input-tokens")
+        || lower.contains("output-tokens"))
     {
         return false;
     }
 
-    !usage_type.contains("Cache")
-        && !usage_type.contains("Batch")
-        && !usage_type.contains("Global")
-        && !usage_type.contains("LCtx")
-        && !usage_type.contains("LatencyOptimized")
+    !lower.contains("cache")
+        && !lower.contains("batch")
+        && !lower.contains("global")
+        && !lower.contains("lctx")
+        && !lower.contains("latencyoptimized")
 }
 
 fn extract_per_1k_rate_from_terms(
@@ -294,6 +306,12 @@ fn model_service_name_hints(model_id: &str) -> Vec<String> {
     if lower.contains("claude-haiku-4-5") {
         return vec!["claude haiku 4.5".to_string()];
     }
+    if lower.contains("titan-embed-text-v2") {
+        return vec!["titan text embeddings v2".to_string()];
+    }
+    if lower.contains("nova-2-multimodal-embeddings-v1") {
+        return vec!["nova 2 multimodal embeddings".to_string()];
+    }
 
     let mut hints = Vec::new();
     if lower.contains("claude") {
@@ -308,6 +326,23 @@ fn model_service_name_hints(model_id: &str) -> Vec<String> {
         }
     }
     hints
+}
+
+fn model_usage_type_hints(model_id: &str) -> Vec<String> {
+    let normalized = normalized_pricing_model_id(model_id)
+        .unwrap_or_else(|| model_id.to_string());
+    let lower = normalized.to_lowercase();
+
+    if lower.contains("nova-2-multimodal-embeddings-v1") {
+        return vec!["novamultimodalembeddings".to_string()];
+    }
+    if lower.contains("titan-embed-text-v2") {
+        return vec!["titanembeddingv2-text".to_string()];
+    }
+    if lower.contains("titan-embed-image-v1") {
+        return vec!["titanembeddingsg1-image".to_string()];
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -425,11 +460,24 @@ mod tests {
         assert!(is_standard_token_rate_usage_type(
             "USE1-MP:USE1_InputTokenCount-Units"
         ));
+        assert!(is_standard_token_rate_usage_type(
+            "USE1-NovaMultiModalEmbeddings-input-tokens"
+        ));
         assert!(!is_standard_token_rate_usage_type(
             "USE1-MP:USE1_InputTokenCount_Batch-Units"
         ));
         assert!(!is_standard_token_rate_usage_type(
             "USE1-MP:USE1_CacheReadInputTokenCount-Units"
         ));
+        assert!(!is_standard_token_rate_usage_type(
+            "USE1-NovaMultiModalEmbeddings-input-tokens-batch"
+        ));
+    }
+
+    #[test]
+    fn usage_hint_generation_for_nova_embeddings_model() {
+        let hints =
+            model_usage_type_hints("amazon.nova-2-multimodal-embeddings-v1:0");
+        assert!(hints.iter().any(|hint| hint == "novamultimodalembeddings"));
     }
 }

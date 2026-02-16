@@ -5,8 +5,17 @@ use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 use tokio::sync::OnceCell;
+use tokio::time::{sleep, Duration};
+use tracing::{debug, warn};
+
+const MODEL_INVOKE_MAX_ATTEMPTS: usize = 2;
+const EMBEDDING_INVOKE_MAX_ATTEMPTS: usize = 1;
+const MODEL_INVOKE_TIMEOUT: Duration = Duration::from_secs(20);
+const EMBEDDING_INVOKE_TIMEOUT: Duration = Duration::from_secs(8);
+const STREAM_RECV_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BedrockUsage {
@@ -17,6 +26,13 @@ pub struct BedrockUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BedrockCompletionResponse {
     pub content: String,
+    pub usage: BedrockUsage,
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BedrockEmbeddingResponse {
+    pub embedding: Vec<f32>,
     pub usage: BedrockUsage,
     pub request_id: Option<String>,
 }
@@ -39,6 +55,13 @@ pub trait BedrockClientTrait: Send + Sync {
         max_tokens: i32,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<BedrockCompletionResponse>;
+
+    async fn embed_text(
+        &self,
+        model_id: &str,
+        text: &str,
+        dimensions: i32,
+    ) -> Result<BedrockEmbeddingResponse>;
 }
 
 pub struct RealBedrockClient {
@@ -67,6 +90,20 @@ impl RealBedrockClient {
             })
             .await
     }
+
+    fn is_retryable_invoke_error(error: &str) -> bool {
+        let normalized = error.to_ascii_lowercase();
+        normalized.contains("timeout")
+            || normalized.contains("throughputbelowminimum")
+            || normalized.contains("dispatchfailure")
+            || normalized.contains("connectorerror")
+    }
+
+    fn supports_count_tokens(model_id: &str) -> bool {
+        !model_id
+            .to_ascii_lowercase()
+            .contains("nova-2-multimodal-embeddings")
+    }
 }
 
 #[async_trait]
@@ -92,21 +129,65 @@ impl BedrockClientTrait for RealBedrockClient {
             }]
         });
 
-        let response = self
-            .client()
-            .await?
-            .invoke_model()
-            .model_id(model_id)
-            .content_type("application/json")
-            .accept("application/json")
-            .body(Blob::new(
-                serde_json::to_vec(&body).context("serialize bedrock body")?,
-            ))
-            .send()
-            .await
-            .map_err(|error| {
-                anyhow!("Bedrock invoke_model failed for model '{model_id}': {error:?}")
-            })?;
+        let body_bytes =
+            serde_json::to_vec(&body).context("serialize bedrock body")?;
+        let mut response_opt = None;
+        let mut last_error = None;
+        for attempt in 1..=MODEL_INVOKE_MAX_ATTEMPTS {
+            let send_result = tokio::time::timeout(
+                MODEL_INVOKE_TIMEOUT,
+                self.client()
+                    .await?
+                    .invoke_model()
+                    .model_id(model_id)
+                    .content_type("application/json")
+                    .accept("application/json")
+                    .body(Blob::new(body_bytes.clone()))
+                    .send(),
+            )
+            .await;
+            match send_result {
+                Ok(Ok(response)) => {
+                    response_opt = Some(response);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    let error_text = format!("{error:?}");
+                    if attempt < MODEL_INVOKE_MAX_ATTEMPTS
+                        && Self::is_retryable_invoke_error(&error_text)
+                    {
+                        sleep(Duration::from_millis(300 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    last_error = Some(error_text);
+                    break;
+                }
+                Err(_) => {
+                    let error_text = format!(
+                        "Timed out after {}s waiting for model invoke",
+                        MODEL_INVOKE_TIMEOUT.as_secs()
+                    );
+                    if attempt < MODEL_INVOKE_MAX_ATTEMPTS {
+                        sleep(Duration::from_millis(300 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    last_error = Some(error_text);
+                    break;
+                }
+            }
+        }
+        let response = if let Some(response) = response_opt {
+            response
+        } else {
+            return Err(anyhow!(
+                    "Bedrock invoke_model failed for model '{model_id}': {}",
+                    last_error.unwrap_or_else(
+                        || "unknown invoke_model error".to_string()
+                    )
+                ));
+        };
         let request_id = response.request_id().map(str::to_string);
 
         let payload: Value = serde_json::from_slice(response.body().as_ref())
@@ -184,23 +265,31 @@ impl BedrockClientTrait for RealBedrockClient {
             }]
         });
 
-        let response = self
-            .client()
-            .await?
-            .invoke_model_with_response_stream()
-            .model_id(model_id)
-            .content_type("application/json")
-            .accept("application/json")
-            .body(Blob::new(
-                serde_json::to_vec(&body).context("serialize bedrock body")?,
-            ))
-            .send()
-            .await
-            .map_err(|error| {
-                anyhow!(
-                    "Bedrock invoke_model_with_response_stream failed for model '{model_id}': {error:?}"
-                )
-            })?;
+        let body_bytes =
+            serde_json::to_vec(&body).context("serialize bedrock body")?;
+        let response = tokio::time::timeout(
+            MODEL_INVOKE_TIMEOUT,
+            self.client()
+                .await?
+                .invoke_model_with_response_stream()
+                .model_id(model_id)
+                .content_type("application/json")
+                .accept("application/json")
+                .body(Blob::new(body_bytes))
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Bedrock invoke_model_with_response_stream timed out for model '{model_id}' after {}s",
+                MODEL_INVOKE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|error| {
+            anyhow!(
+                "Bedrock invoke_model_with_response_stream failed for model '{model_id}': {error:?}"
+            )
+        })?;
 
         let request_id = response.request_id().map(str::to_string);
         let mut stream = response.body;
@@ -210,11 +299,20 @@ impl BedrockClientTrait for RealBedrockClient {
             output_tokens: 0,
         };
 
-        while let Some(event) = stream.recv().await.map_err(|error| {
-            anyhow!(
-                "Bedrock stream receive failed for model '{model_id}': {error:?}"
-            )
-        })? {
+        while let Some(event) = tokio::time::timeout(STREAM_RECV_TIMEOUT, stream.recv())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Bedrock stream receive timed out for model '{model_id}' after {}s",
+                    STREAM_RECV_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|error| {
+                anyhow!(
+                    "Bedrock stream receive failed for model '{model_id}': {error:?}"
+                )
+            })?
+        {
             let payload_part = match event {
                 aws_sdk_bedrockruntime::types::ResponseStream::Chunk(part) => part,
                 _ => {
@@ -286,6 +384,230 @@ impl BedrockClientTrait for RealBedrockClient {
             request_id,
         })
     }
+
+    async fn embed_text(
+        &self,
+        model_id: &str,
+        text: &str,
+        dimensions: i32,
+    ) -> Result<BedrockEmbeddingResponse> {
+        let body = if model_id
+            .to_ascii_lowercase()
+            .contains("nova-2-multimodal-embeddings")
+        {
+            serde_json::json!({
+                "taskType": "SINGLE_EMBEDDING",
+                "singleEmbeddingParams": {
+                    "embeddingPurpose": "GENERIC_INDEX",
+                    "embeddingDimension": dimensions,
+                    "text": {
+                        "value": text,
+                        "truncationMode": "END"
+                    }
+                }
+            })
+        } else {
+            serde_json::json!({
+                "inputText": text,
+                "dimensions": dimensions,
+                "normalize": true
+            })
+        };
+        let body_bytes = serde_json::to_vec(&body)
+            .context("serialize bedrock embedding body")?;
+        let mut response_opt = None;
+        let mut last_error = None;
+        for attempt in 1..=EMBEDDING_INVOKE_MAX_ATTEMPTS {
+            let send_result = tokio::time::timeout(
+                EMBEDDING_INVOKE_TIMEOUT,
+                self.client()
+                    .await?
+                    .invoke_model()
+                    .model_id(model_id)
+                    .content_type("application/json")
+                    .accept("application/json")
+                    .body(Blob::new(body_bytes.clone()))
+                    .send(),
+            )
+            .await;
+            match send_result {
+                Ok(Ok(response)) => {
+                    response_opt = Some(response);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    let error_text = format!("{error:?}");
+                    if attempt < EMBEDDING_INVOKE_MAX_ATTEMPTS
+                        && Self::is_retryable_invoke_error(&error_text)
+                    {
+                        sleep(Duration::from_millis(300 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    last_error = Some(error_text);
+                    break;
+                }
+                Err(_) => {
+                    let error_text = format!(
+                        "Timed out after {}s waiting for embedding invoke",
+                        EMBEDDING_INVOKE_TIMEOUT.as_secs()
+                    );
+                    if attempt < EMBEDDING_INVOKE_MAX_ATTEMPTS {
+                        sleep(Duration::from_millis(300 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    last_error = Some(error_text);
+                    break;
+                }
+            }
+        }
+
+        let response = if let Some(response) = response_opt {
+            response
+        } else {
+            return Err(anyhow!(
+                "Bedrock invoke_model failed for embedding model '{model_id}': {}",
+                last_error.unwrap_or_else(|| "unknown invoke_model error".to_string())
+            ));
+        };
+        let request_id = response.request_id().map(str::to_string);
+
+        let payload: Value =
+            serde_json::from_slice(response.body().as_ref())
+                .context("parse bedrock embedding response body")?;
+
+        let embedding_values = payload
+            .get("embedding")
+            .and_then(Value::as_array)
+            .or_else(|| {
+                payload
+                    .get("embeddingsByType")
+                    .and_then(|value| value.get("text"))
+                    .and_then(Value::as_array)
+            })
+            .or_else(|| {
+                payload
+                    .get("embeddings")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.get("embedding"))
+                    .and_then(Value::as_array)
+            })
+            .ok_or_else(|| {
+                anyhow!("missing embedding vector in bedrock response")
+            })?;
+
+        let mut embedding = Vec::with_capacity(embedding_values.len());
+        for value in embedding_values {
+            if let Some(number) = value.as_f64() {
+                embedding.push(number as f32);
+            }
+        }
+        if embedding.is_empty() {
+            return Err(anyhow!(
+                "bedrock embedding response had an empty/non-numeric embedding"
+            ));
+        }
+
+        let mut input_tokens = payload
+            .get("inputTextTokenCount")
+            .and_then(Value::as_i64)
+            .or_else(|| payload.get("tokenCount").and_then(Value::as_i64))
+            .or_else(|| {
+                payload
+                    .get("usage")
+                    .and_then(|v| v.get("input_tokens"))
+                    .and_then(Value::as_i64)
+            })
+            .or_else(|| {
+                payload
+                    .get("usage")
+                    .and_then(|v| v.get("inputTokens"))
+                    .and_then(Value::as_i64)
+            })
+            .unwrap_or(0);
+        if input_tokens == 0 && Self::supports_count_tokens(model_id) {
+            let token_request =
+                aws_sdk_bedrockruntime::types::InvokeModelTokensRequest::builder()
+                    .body(Blob::new(body_bytes.clone()))
+                    .build();
+            if let Ok(token_request) = token_request {
+                let count_tokens_result = tokio::time::timeout(
+                    EMBEDDING_INVOKE_TIMEOUT,
+                    self.client().await?.count_tokens().model_id(model_id).input(
+                        aws_sdk_bedrockruntime::types::CountTokensInput::InvokeModel(
+                            token_request,
+                        ),
+                    )
+                    .send(),
+                )
+                .await;
+                match count_tokens_result {
+                    Ok(Ok(output)) => {
+                        input_tokens = i64::from(output.input_tokens());
+                    }
+                    Ok(Err(error)) => {
+                        warn!(model_id = model_id, error = ?error, "Bedrock count_tokens failed for embedding request");
+                    }
+                    Err(_) => {
+                        warn!(
+                            model_id = model_id,
+                            timeout_secs = EMBEDDING_INVOKE_TIMEOUT.as_secs(),
+                            "Bedrock count_tokens timed out for embedding request"
+                        );
+                    }
+                }
+            }
+        }
+        if input_tokens == 0 {
+            let top_level_keys = payload
+                .as_object()
+                .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let first_embedding_keys = payload
+                .get("embeddings")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_object)
+                .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            debug!(
+                model_id = model_id,
+                top_level_keys = ?top_level_keys,
+                usage = ?payload.get("usage"),
+                token_count = ?payload.get("tokenCount"),
+                input_text_token_count = ?payload.get("inputTextTokenCount"),
+                first_embedding_keys = ?first_embedding_keys,
+                "Bedrock embedding response missing token usage"
+            );
+            // Fallback estimator to avoid reporting zero spend when Bedrock
+            // omits usage and count_tokens is unavailable for this model.
+            input_tokens = estimate_embedding_input_tokens(text);
+        }
+        let output_tokens = payload
+            .get("usage")
+            .and_then(|v| v.get("output_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+
+        Ok(BedrockEmbeddingResponse {
+            embedding,
+            usage: BedrockUsage {
+                input_tokens,
+                output_tokens,
+            },
+            request_id,
+        })
+    }
+}
+
+fn estimate_embedding_input_tokens(text: &str) -> i64 {
+    if text.trim().is_empty() {
+        return 0;
+    }
+    // Heuristic token estimate (~4 chars/token) with a minimum of 1 token.
+    ((text.chars().count() as i64 + 3) / 4).max(1)
 }
 
 pub fn create_bedrock_client(
@@ -350,4 +672,62 @@ impl BedrockClientTrait for FakeBedrockClient {
         on_delta(response.content.clone());
         Ok(response)
     }
+
+    async fn embed_text(
+        &self,
+        _model_id: &str,
+        text: &str,
+        dimensions: i32,
+    ) -> Result<BedrockEmbeddingResponse> {
+        let dim = usize::try_from(dimensions)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(256);
+        let embedding = embed_text_deterministic(text, dim);
+        let usage = BedrockUsage {
+            input_tokens: estimate_token_count(text),
+            output_tokens: 0,
+        };
+        Ok(BedrockEmbeddingResponse {
+            embedding,
+            usage,
+            request_id: Some("fake-bedrock-embed".to_string()),
+        })
+    }
+}
+
+fn estimate_token_count(text: &str) -> i64 {
+    let approx = text.split_whitespace().count().max(1);
+    i64::try_from(approx).unwrap_or(1)
+}
+
+fn embed_text_deterministic(text: &str, dim: usize) -> Vec<f32> {
+    if dim == 0 {
+        return Vec::new();
+    }
+
+    let mut values = vec![0.0f32; dim];
+    let normalized = text.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return values;
+    }
+
+    for token in normalized.split_whitespace() {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let digest = hasher.finalize();
+        for (idx, byte) in digest.iter().enumerate() {
+            let position = (idx * 31 + usize::from(*byte)) % dim;
+            let centered = (f32::from(*byte) / 255.0) - 0.5;
+            values[position] += centered;
+        }
+    }
+
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut values {
+            *value /= norm;
+        }
+    }
+    values
 }

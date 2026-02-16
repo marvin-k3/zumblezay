@@ -16,7 +16,8 @@ use tokio::signal;
 use tokio::time::{sleep, Duration as TokioDuration};
 use zumblezay::app;
 use zumblezay::bedrock::{
-    BedrockClientTrait, BedrockCompletionResponse, BedrockUsage,
+    BedrockClientTrait, BedrockCompletionResponse, BedrockEmbeddingResponse,
+    BedrockUsage,
 };
 use zumblezay::transcripts;
 use zumblezay::AppState;
@@ -174,6 +175,41 @@ impl BedrockClientTrait for PlaywrightBedrockClient {
                 output_tokens: 24,
             },
             request_id: Some("playwright-stream-answer".to_string()),
+        })
+    }
+
+    async fn embed_text(
+        &self,
+        _model_id: &str,
+        text: &str,
+        dimensions: i32,
+    ) -> Result<BedrockEmbeddingResponse> {
+        let dim = usize::try_from(dimensions)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(256);
+        let mut embedding = vec![0.0f32; dim];
+        for (idx, b) in text.as_bytes().iter().enumerate() {
+            embedding[idx % dim] += f32::from(*b) / 255.0 - 0.5;
+        }
+        let norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        if norm > 0.0 {
+            for value in &mut embedding {
+                *value /= norm;
+            }
+        }
+
+        Ok(BedrockEmbeddingResponse {
+            embedding,
+            usage: BedrockUsage {
+                input_tokens: 10,
+                output_tokens: 0,
+            },
+            request_id: Some("playwright-embed".to_string()),
         })
     }
 }

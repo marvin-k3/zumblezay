@@ -129,6 +129,49 @@ struct EmbeddingsBackfillAccepted {
     status: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+struct BedrockSpendQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockSpendTotals {
+    call_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockSpendBreakdownRow {
+    key: String,
+    call_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockSpendLedgerRow {
+    created_at: i64,
+    category: String,
+    operation: String,
+    model_id: String,
+    request_id: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct BedrockSpendResponse {
+    totals: BedrockSpendTotals,
+    by_category: Vec<BedrockSpendBreakdownRow>,
+    by_operation: Vec<BedrockSpendBreakdownRow>,
+    by_model: Vec<BedrockSpendBreakdownRow>,
+    recent_entries: Vec<BedrockSpendLedgerRow>,
+}
+
 #[derive(Debug)]
 struct DbAttacher {
     events_db: String,
@@ -338,6 +381,8 @@ fn init_templates() -> Tera {
         include_str!("templates/embeddings.html"),
     )
     .unwrap();
+    tera.add_raw_template("spend.html", include_str!("templates/spend.html"))
+        .unwrap();
     tera
 }
 
@@ -374,6 +419,22 @@ async fn embeddings_page(State(state): State<Arc<AppState>>) -> Html<String> {
         .get()
         .unwrap()
         .render("embeddings.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn spend_page(State(state): State<Arc<AppState>>) -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/spend");
+    context.insert("timezone", &state.timezone.to_string().replace("::", "/"));
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("spend.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
     Html(rendered)
@@ -529,6 +590,157 @@ async fn get_embeddings_status(
         job_status_counts,
         running_backfill,
         latest_backfill,
+    }))
+}
+
+#[axum::debug_handler]
+async fn get_bedrock_spend(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BedrockSpendQuery>,
+) -> Result<Json<BedrockSpendResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let limit = query.limit.unwrap_or(200).clamp(1, 5000) as i64;
+    let totals = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(estimated_cost_usd), 0.0)
+             FROM bedrock_spend_ledger",
+            [],
+            |row| {
+                Ok(BedrockSpendTotals {
+                    call_count: row.get(0)?,
+                    input_tokens: row.get(1)?,
+                    output_tokens: row.get(2)?,
+                    estimated_cost_usd: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let by_category = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT category,
+                        COUNT(*),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(estimated_cost_usd), 0.0)
+                 FROM bedrock_spend_ledger
+                 GROUP BY category
+                 ORDER BY estimated_cost_usd DESC, category ASC",
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BedrockSpendBreakdownRow {
+                    key: row.get(0)?,
+                    call_count: row.get(1)?,
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    estimated_cost_usd: row.get(4)?,
+                })
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    let by_operation = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT operation,
+                        COUNT(*),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(estimated_cost_usd), 0.0)
+                 FROM bedrock_spend_ledger
+                 GROUP BY operation
+                 ORDER BY estimated_cost_usd DESC, operation ASC",
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BedrockSpendBreakdownRow {
+                    key: row.get(0)?,
+                    call_count: row.get(1)?,
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    estimated_cost_usd: row.get(4)?,
+                })
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    let by_model = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT model_id,
+                        COUNT(*),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(estimated_cost_usd), 0.0)
+                 FROM bedrock_spend_ledger
+                 GROUP BY model_id
+                 ORDER BY estimated_cost_usd DESC, model_id ASC",
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BedrockSpendBreakdownRow {
+                    key: row.get(0)?,
+                    call_count: row.get(1)?,
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    estimated_cost_usd: row.get(4)?,
+                })
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    let recent_entries = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT created_at, category, operation, model_id, request_id,
+                        input_tokens, output_tokens, estimated_cost_usd
+                 FROM bedrock_spend_ledger
+                 ORDER BY id DESC
+                 LIMIT ?",
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(BedrockSpendLedgerRow {
+                    created_at: row.get(0)?,
+                    category: row.get(1)?,
+                    operation: row.get(2)?,
+                    model_id: row.get(3)?,
+                    request_id: row.get(4)?,
+                    input_tokens: row.get(5)?,
+                    output_tokens: row.get(6)?,
+                    estimated_cost_usd: row.get(7)?,
+                })
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    Ok(Json(BedrockSpendResponse {
+        totals,
+        by_category,
+        by_operation,
+        by_model,
+        recent_entries,
     }))
 }
 
@@ -845,12 +1057,13 @@ async fn get_completed_events(
             cursor_event_id,
         };
 
-        let hits = hybrid_search::search_events(
+        let hits = hybrid_search::search_events_with_client(
             &conn,
             raw_query,
             &hybrid_filters,
             query_limit,
             search_mode,
+            state.bedrock_client.clone(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1634,7 +1847,7 @@ struct Args {
     embedding_worker_interval_secs: f64,
 
     /// Max jobs to process per embedding worker drain cycle
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 32)]
     embedding_worker_batch_size: usize,
 
     /// Default model to use for summary generation
@@ -2117,7 +2330,11 @@ async fn drain_embedding_jobs_loop(
                     if paused_for_backfill {
                         return Ok((0, true));
                     }
-                    let processed = crate::hybrid_search::process_pending_embedding_jobs(&conn, batch_size)?;
+                    let processed = crate::hybrid_search::process_pending_embedding_jobs_with_client(
+                        &conn,
+                        batch_size,
+                        state_for_work.bedrock_client.clone(),
+                    )?;
                     Ok((processed, false))
                 }).await;
 
@@ -2604,6 +2821,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
         .route("/embeddings", get(embeddings_page))
+        .route("/spend", get(spend_page))
         .route("/summary", get(summary_page))
         .route("/transcript", get(transcript_page))
         .route("/investigate", get(investigate_page))
@@ -2617,6 +2835,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/cameras", get(get_cameras))
         .route("/video/{event_id}", get(stream_video))
         .route("/api/status", get(get_status))
+        .route("/api/bedrock/spend", get(get_bedrock_spend))
         .route("/api/embeddings/status", get(get_embeddings_status))
         .route("/api/embeddings/backfill", post(start_embeddings_backfill))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
@@ -2652,32 +2871,38 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn refresh_investigation_pricing_once(
+async fn refresh_bedrock_pricing_once(
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let model_id = state.investigation_model.clone();
     let region = state.bedrock_region.clone();
+    let model_ids = vec![
+        state.investigation_model.clone(),
+        hybrid_search::ACTIVE_PROVIDER_MODEL_ID.to_string(),
+    ];
 
-    let Some(rate) =
-        fetch_bedrock_pricing_from_aws(&model_id, region.as_deref()).await?
-    else {
+    for model_id in model_ids {
+        let Some(rate) =
+            fetch_bedrock_pricing_from_aws(&model_id, region.as_deref())
+                .await?
+        else {
+            info!(
+                model_id = model_id,
+                region = region.as_deref().unwrap_or("us-east-1"),
+                "No Bedrock pricing entry found from AWS price list for model"
+            );
+            continue;
+        };
+
+        let conn = state.zumblezay_db.get()?;
+        upsert_bedrock_pricing(&conn, &model_id, rate)?;
         info!(
             model_id = model_id,
             region = region.as_deref().unwrap_or("us-east-1"),
-            "No Bedrock pricing entry found from AWS price list for model"
+            input_cost_per_1k_usd = rate.input_cost_per_1k_usd,
+            output_cost_per_1k_usd = rate.output_cost_per_1k_usd,
+            "Refreshed Bedrock model pricing from AWS Price List API"
         );
-        return Ok(());
-    };
-
-    let conn = state.zumblezay_db.get()?;
-    upsert_bedrock_pricing(&conn, &model_id, rate)?;
-    info!(
-        model_id = model_id,
-        region = region.as_deref().unwrap_or("us-east-1"),
-        input_cost_per_1k_usd = rate.input_cost_per_1k_usd,
-        output_cost_per_1k_usd = rate.output_cost_per_1k_usd,
-        "Refreshed Bedrock model pricing from AWS Price List API"
-    );
+    }
     Ok(())
 }
 
@@ -2829,7 +3054,7 @@ pub async fn serve() -> Result<()> {
         Some(tokio::spawn(async move {
             tokio::select! {
                 _ = time::sleep(Duration::from_secs(60)) => {
-                    if let Err(error) = refresh_investigation_pricing_once(pricing_state).await {
+                    if let Err(error) = refresh_bedrock_pricing_once(pricing_state).await {
                         warn!("Bedrock pricing refresh task failed: {}", error);
                     }
                 }
