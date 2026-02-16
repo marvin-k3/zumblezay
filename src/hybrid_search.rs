@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::thread;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -447,7 +448,9 @@ pub fn process_pending_embedding_jobs(
     conn: &Connection,
     max_jobs: usize,
 ) -> Result<usize> {
-    process_pending_embedding_jobs_with_client(conn, max_jobs, None)
+    process_pending_embedding_jobs_with_client_and_concurrency(
+        conn, max_jobs, 1, None,
+    )
 }
 
 pub fn process_pending_embedding_jobs_with_client(
@@ -455,17 +458,74 @@ pub fn process_pending_embedding_jobs_with_client(
     max_jobs: usize,
     bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
 ) -> Result<usize> {
+    process_pending_embedding_jobs_with_client_and_concurrency(
+        conn,
+        max_jobs,
+        1,
+        bedrock_client,
+    )
+}
+
+pub fn process_pending_embedding_jobs_with_client_and_concurrency(
+    conn: &Connection,
+    max_jobs: usize,
+    embedding_concurrency: usize,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
+    if max_jobs == 0 {
+        return Ok(0);
+    }
+
+    let embedding_concurrency = embedding_concurrency.max(1);
+    let mut processed = process_embedding_jobs_parallel(
+        conn,
+        max_jobs,
+        embedding_concurrency,
+        bedrock_client.as_ref(),
+    )?;
+    if processed < max_jobs {
+        processed += process_backfill_jobs_sequential(
+            conn,
+            max_jobs - processed,
+            bedrock_client.as_ref(),
+        )?;
+    }
+    Ok(processed)
+}
+
+#[derive(Debug, Clone)]
+struct ClaimedEmbeddingJob {
+    job_id: i64,
+    unit_id: Option<String>,
+    attempts: i64,
+    content_text: Option<String>,
+    content_version: Option<i64>,
+    embedding_dim: i64,
+}
+
+#[derive(Debug)]
+struct EmbeddingJobComputationWithMeta {
+    embedding_id: String,
+    content_version: i64,
+    embedding: Vec<f32>,
+    usage: Option<BedrockUsage>,
+    request_id: Option<String>,
+}
+
+fn process_embedding_jobs_parallel(
+    conn: &Connection,
+    max_jobs: usize,
+    embedding_concurrency: usize,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
     let now = chrono::Utc::now().timestamp();
     let mut stmt = conn.prepare(
         "SELECT job_id
          FROM embedding_jobs
          WHERE status = 'pending'
            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           AND job_type IN ('full_clip', 'segment')
          ORDER BY
-           CASE
-             WHEN job_type LIKE 'backfill_event:%' THEN 1
-             ELSE 0
-           END ASC,
            priority DESC,
            created_at ASC
          LIMIT ?",
@@ -475,14 +535,266 @@ pub fn process_pending_embedding_jobs_with_client(
     let job_ids: Vec<i64> = job_rows.collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let mut processed = 0usize;
+    let mut claimed_jobs = Vec::new();
     for job_id in job_ids {
-        if process_single_job(conn, job_id, bedrock_client.as_ref()).is_ok() {
-            processed += 1;
+        let updated = conn.execute(
+            "UPDATE embedding_jobs
+             SET status = 'running',
+                 attempt_count = attempt_count + 1,
+                 updated_at = ?
+             WHERE job_id = ? AND status = 'pending'",
+            params![now, job_id],
+        )?;
+        if updated == 0 {
+            continue;
+        }
+
+        let row = conn
+            .query_row(
+                "SELECT ej.unit_id, ej.attempt_count, tu.content_text, tu.content_version
+                 FROM embedding_jobs ej
+                 LEFT JOIN transcript_units tu ON tu.unit_id = ej.unit_id
+                 WHERE ej.job_id = ?",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((unit_id, attempts, content_text, content_version)) = row
+        else {
+            continue;
+        };
+
+        let embedding_dim: i64 = conn
+            .query_row(
+                "SELECT embedding_dim FROM embedding_models
+                 WHERE model_key = ?",
+                params![ACTIVE_MODEL_KEY],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(DEFAULT_EMBEDDING_DIM as i64);
+
+        claimed_jobs.push(ClaimedEmbeddingJob {
+            job_id,
+            unit_id,
+            attempts,
+            content_text,
+            content_version,
+            embedding_dim,
+        });
+    }
+
+    let mut processed = 0usize;
+    for batch in claimed_jobs.chunks(embedding_concurrency) {
+        let mut handles = Vec::with_capacity(batch.len());
+        for job in batch {
+            let job_for_thread = job.clone();
+            let client = bedrock_client.cloned();
+            handles.push(thread::spawn(move || {
+                compute_embedding_for_job(job_for_thread, client)
+            }));
+        }
+
+        for handle in handles {
+            let computation = handle.join().map_err(|_| {
+                anyhow::anyhow!("embedding computation thread panicked")
+            })?;
+            if finalize_embedding_job(conn, computation, now)?.is_ok() {
+                processed += 1;
+            }
         }
     }
 
     Ok(processed)
+}
+
+fn process_backfill_jobs_sequential(
+    conn: &Connection,
+    max_jobs: usize,
+    bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
+) -> Result<usize> {
+    if max_jobs == 0 {
+        return Ok(0);
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let mut stmt = conn.prepare(
+        "SELECT job_id
+         FROM embedding_jobs
+         WHERE status = 'pending'
+           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           AND job_type LIKE 'backfill_event:%'
+         ORDER BY priority DESC, created_at ASC
+         LIMIT ?",
+    )?;
+    let rows = stmt
+        .query_map(params![now, max_jobs as i64], |row| row.get::<_, i64>(0))?;
+    let job_ids: Vec<i64> = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut processed = 0usize;
+    for job_id in job_ids {
+        if process_single_job(conn, job_id, bedrock_client).is_ok() {
+            processed += 1;
+        }
+    }
+    Ok(processed)
+}
+
+fn compute_embedding_for_job(
+    job: ClaimedEmbeddingJob,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> (
+    ClaimedEmbeddingJob,
+    Result<Option<EmbeddingJobComputationWithMeta>>,
+) {
+    let Some(unit_id) = job.unit_id.clone() else {
+        return (job, Err(anyhow::anyhow!("embedding job missing unit_id")));
+    };
+
+    let Some(content_text) = job.content_text.clone() else {
+        return (job, Ok(None));
+    };
+
+    let Some(content_version) = job.content_version else {
+        return (job, Ok(None));
+    };
+
+    let dim =
+        usize::try_from(job.embedding_dim).unwrap_or(DEFAULT_EMBEDDING_DIM);
+    let result = embed_text(&content_text, dim, bedrock_client.as_ref()).map(
+        |embedding_result| {
+            let embedding_id = deterministic_embedding_id(
+                &unit_id,
+                ACTIVE_MODEL_KEY,
+                ACTIVE_EMBEDDING_KIND,
+                content_version,
+            );
+            Some(EmbeddingJobComputationWithMeta {
+                embedding_id,
+                content_version,
+                embedding: embedding_result.embedding,
+                usage: embedding_result.usage,
+                request_id: embedding_result.request_id,
+            })
+        },
+    );
+
+    (job, result)
+}
+
+fn finalize_embedding_job(
+    conn: &Connection,
+    computation: (
+        ClaimedEmbeddingJob,
+        Result<Option<EmbeddingJobComputationWithMeta>>,
+    ),
+    now: i64,
+) -> Result<Result<()>> {
+    let (job, result) = computation;
+    match result {
+        Ok(Some(mut payload)) => {
+            let unit_id = job
+                .unit_id
+                .as_deref()
+                .context("embedding job missing unit_id")?;
+            let dim = i64::try_from(payload.embedding.len())
+                .context("embedding vector too large for i64")?;
+            let blob = serialize_embedding(&payload.embedding);
+            conn.execute(
+                "INSERT OR REPLACE INTO unit_embeddings (
+                    embedding_id, unit_id, model_key, embedding_kind,
+                    embedding_dim, vector_blob, content_version, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    payload.embedding_id,
+                    unit_id,
+                    ACTIVE_MODEL_KEY,
+                    ACTIVE_EMBEDDING_KIND,
+                    dim,
+                    blob,
+                    payload.content_version,
+                    now
+                ],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO unit_embedding_vec_index (
+                    embedding_id, vector_blob
+                 ) VALUES (?, ?)",
+                params![
+                    payload.embedding_id.clone(),
+                    serialize_embedding(&payload.embedding)
+                ],
+            )?;
+            let embedding_values = std::mem::take(&mut payload.embedding);
+            maybe_record_embedding_spend(
+                conn,
+                &EmbeddingCallResult {
+                    embedding: embedding_values,
+                    usage: payload.usage,
+                    request_id: payload.request_id,
+                },
+                EMBEDDING_SPEND_OPERATION_INDEX,
+            )?;
+            conn.execute(
+                "UPDATE embedding_jobs
+                 SET status = 'done',
+                     next_attempt_at = NULL,
+                     last_error = NULL,
+                     updated_at = ?
+                 WHERE job_id = ?",
+                params![now, job.job_id],
+            )?;
+            Ok(Ok(()))
+        }
+        Ok(None) => {
+            conn.execute(
+                "UPDATE embedding_jobs
+                 SET status = 'done',
+                     next_attempt_at = NULL,
+                     last_error = NULL,
+                     updated_at = ?
+                 WHERE job_id = ?",
+                params![now, job.job_id],
+            )?;
+            Ok(Ok(()))
+        }
+        Err(err) => {
+            let attempts = job.attempts.max(1);
+            if attempts >= MAX_ATTEMPTS {
+                conn.execute(
+                    "UPDATE embedding_jobs
+                     SET status = 'failed',
+                         last_error = ?,
+                         updated_at = ?
+                     WHERE job_id = ?",
+                    params![err.to_string(), now, job.job_id],
+                )?;
+            } else {
+                let mut rng = rand::thread_rng();
+                let jitter: i64 = rng.gen_range(0..=15);
+                let delay = RETRY_BASE_SECS * (1i64 << (attempts - 1)) + jitter;
+                conn.execute(
+                    "UPDATE embedding_jobs
+                     SET status = 'pending',
+                         next_attempt_at = ?,
+                         last_error = ?,
+                         updated_at = ?
+                     WHERE job_id = ?",
+                    params![now + delay, err.to_string(), now, job.job_id],
+                )?;
+            }
+            Ok(Err(err))
+        }
+    }
 }
 
 pub fn backfill_date_range(

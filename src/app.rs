@@ -1850,6 +1850,10 @@ struct Args {
     #[arg(long, default_value_t = 32)]
     embedding_worker_batch_size: usize,
 
+    /// Max concurrent embedding model invocations per drain cycle
+    #[arg(long, default_value_t = 6)]
+    embedding_worker_concurrency: usize,
+
     /// Default model to use for summary generation
     #[arg(long, default_value = "anthropic-claude-haiku")]
     default_summary_model: String,
@@ -2308,12 +2312,14 @@ async fn drain_embedding_jobs_loop(
     state: Arc<AppState>,
     interval: Duration,
     batch_size: usize,
+    concurrency: usize,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
     info!(
-        "Starting embedding queue drain loop with {}s interval and batch_size={}",
+        "Starting embedding queue drain loop with {}s interval, batch_size={}, concurrency={}",
         interval.as_secs_f64(),
-        batch_size
+        batch_size,
+        concurrency
     );
 
     loop {
@@ -2330,9 +2336,10 @@ async fn drain_embedding_jobs_loop(
                     if paused_for_backfill {
                         return Ok((0, true));
                     }
-                    let processed = crate::hybrid_search::process_pending_embedding_jobs_with_client(
+                    let processed = crate::hybrid_search::process_pending_embedding_jobs_with_client_and_concurrency(
                         &conn,
                         batch_size,
+                        concurrency,
                         state_for_work.bedrock_client.clone(),
                     )?;
                     Ok((processed, false))
@@ -3074,12 +3081,14 @@ pub async fn serve() -> Result<()> {
             args.embedding_worker_interval_secs.max(0.1),
         );
         let worker_batch_size = args.embedding_worker_batch_size.max(1);
+        let worker_concurrency = args.embedding_worker_concurrency.max(1);
         let worker_shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             drain_embedding_jobs_loop(
                 worker_state,
                 worker_interval,
                 worker_batch_size,
+                worker_concurrency,
                 worker_shutdown_rx,
             )
             .await;
