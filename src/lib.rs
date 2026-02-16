@@ -23,6 +23,7 @@ use tracing::warn;
 pub mod app;
 pub mod bedrock;
 pub mod bedrock_spend;
+pub mod hybrid_search;
 pub mod investigation;
 pub mod openai;
 pub mod process_events;
@@ -473,6 +474,7 @@ fn apply_zumblezay_migrations(conn: &mut Connection) -> Result<()> {
 pub fn init_zumblezay_db(conn: &mut Connection) -> Result<()> {
     info!("Initializing zumblezay database");
     apply_zumblezay_migrations(conn)?;
+    crate::hybrid_search::ensure_schema(conn)?;
     crate::transcripts::ensure_transcript_search_index(conn)?;
     Ok(())
 }
@@ -542,6 +544,11 @@ mod migration_tests {
         assert!(has_table(&conn, "metadata")?);
         assert!(has_table(&conn, "bedrock_pricing")?);
         assert!(has_table(&conn, "bedrock_spend_ledger")?);
+        assert!(has_table(&conn, "embedding_models")?);
+        assert!(has_table(&conn, "transcript_units")?);
+        assert!(has_table(&conn, "unit_embeddings")?);
+        assert!(has_table(&conn, "embedding_jobs")?);
+        assert!(has_table(&conn, "search_config")?);
         assert!(has_index(&conn, "idx_events_camera_start_end")?);
 
         Ok(())
@@ -566,6 +573,11 @@ mod migration_tests {
         assert!(has_table(&conn, "metadata")?);
         assert!(has_table(&conn, "bedrock_pricing")?);
         assert!(has_table(&conn, "bedrock_spend_ledger")?);
+        assert!(has_table(&conn, "embedding_models")?);
+        assert!(has_table(&conn, "transcript_units")?);
+        assert!(has_table(&conn, "unit_embeddings")?);
+        assert!(has_table(&conn, "embedding_jobs")?);
+        assert!(has_table(&conn, "search_config")?);
 
         Ok(())
     }

@@ -236,8 +236,9 @@
                 <div class="col-md-3">
                     <label for="search-mode" class="form-label">Mode</label>
                     <select class="form-select" id="search-mode">
-                        <option value="keyword" selected>Keyword</option>
-                        <option value="semantic" disabled>Semantic (coming soon)</option>
+                        <option value="hybrid" selected>Hybrid</option>
+                        <option value="bm25">BM25 only</option>
+                        <option value="vector">Vector only</option>
                     </select>
                 </div>
                 <div class="col-md-3">
@@ -379,7 +380,8 @@
         camera_id: '',
         timeStart: '',
         timeEnd: '',
-        q: ''
+        q: '',
+        search_mode: 'hybrid'
     };
 
     function formatDate(date) {
@@ -641,8 +643,10 @@
                     camera_id: '',
                     timeStart: '',
                     timeEnd: '',
-                    q: ''
+                    q: '',
+                    search_mode: 'hybrid'
                 };
+                document.getElementById('search-mode').value = 'hybrid';
                 showSnippets = true;
                 clearResults();
                 setListEmptyMessage('Run a search to see results.');
@@ -652,6 +656,12 @@
 
         if (urlFilters?.q) {
             document.getElementById('search-filter').value = urlFilters.q;
+        }
+        if (urlFilters?.search_mode) {
+            const modeValue = urlFilters.search_mode;
+            if (['hybrid', 'bm25', 'vector'].includes(modeValue)) {
+                document.getElementById('search-mode').value = modeValue;
+            }
         }
         if (urlFilters?.camera_id) {
             document.getElementById('camera-filter').value = urlFilters.camera_id;
@@ -671,7 +681,8 @@
             camera_id: document.getElementById('camera-filter')?.value || '',
             timeStart: document.getElementById('time-start')?.value || '',
             timeEnd: document.getElementById('time-end')?.value || '',
-            q: document.getElementById('search-filter')?.value || ''
+            q: document.getElementById('search-filter')?.value || '',
+            search_mode: document.getElementById('search-mode')?.value || 'hybrid'
         };
     }
 
@@ -698,6 +709,7 @@
             'time_start',
             'time_end',
             'q',
+            'search_mode',
             'range',
             'show_snippets'
         ];
@@ -725,6 +737,7 @@
         if (currentFilters.timeStart) params.set('time_start', currentFilters.timeStart);
         if (currentFilters.timeEnd) params.set('time_end', currentFilters.timeEnd);
         if (currentFilters.q) params.set('q', currentFilters.q);
+        if (currentFilters.search_mode && mode !== 'latest') params.set('search_mode', currentFilters.search_mode);
 
         if (mode === 'latest') {
             const rangeSelect = document.getElementById('range-preset');
@@ -763,6 +776,9 @@
         }
         if (currentFilters.q) {
             params.append('q', currentFilters.q);
+        }
+        if (mode !== 'latest' && currentFilters.search_mode) {
+            params.append('search_mode', currentFilters.search_mode);
         }
         params.append('limit', DEFAULT_LIMIT.toString());
         if (includeCursor && nextCursor) {

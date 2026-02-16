@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}Embeddings{% endblock %}
+
+{% block page_title %}Embeddings Operations{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">Embedding Pipeline Status</h5>
+                <span id="status-updated" class="text-muted small">-</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 mb-3">
+                    <div class="col-6 col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <div class="text-muted small">Transcript Units</div>
+                            <div id="metric-units" class="fs-4 fw-semibold">-</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <div class="text-muted small">Unit Embeddings</div>
+                            <div id="metric-embeddings" class="fs-4 fw-semibold">-</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <div class="text-muted small">Vec Index Rows</div>
+                            <div id="metric-vec" class="fs-4 fw-semibold">-</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <div class="text-muted small">Queued Jobs</div>
+                            <div id="metric-queued" class="fs-4 fw-semibold">-</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                        <div class="border rounded p-3 h-100">
+                            <div class="text-muted small">Failed Jobs</div>
+                            <div id="metric-failed" class="fs-4 fw-semibold">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <h6>Job Status Breakdown</h6>
+                <div id="job-breakdown" class="small text-muted">No rows yet.</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Backfill Date Range</h5>
+            </div>
+            <div class="card-body">
+                <form id="backfill-form" class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label" for="date-start">Date Start</label>
+                        <input id="date-start" class="form-control" type="date" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="date-end">Date End</label>
+                        <input id="date-end" class="form-control" type="date" required>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label" for="timezone">Timezone</label>
+                        <input id="timezone" class="form-control" type="text" value="{{ timezone | safe }}">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label" for="transcription-type">Transcription Type</label>
+                        <input id="transcription-type" class="form-control" type="text" value="whisper-local">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" for="max-jobs">Job Batch</label>
+                        <input id="max-jobs" class="form-control" type="number" min="1" value="1024">
+                    </div>
+                    <div class="col-12 d-flex gap-2">
+                        <button id="start-backfill" type="submit" class="btn btn-primary">Start Backfill</button>
+                        <span id="backfill-submit-status" class="text-muted align-self-center"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Backfill Run</h5>
+            </div>
+            <div class="card-body">
+                <pre id="backfill-status" class="mb-0 small" style="white-space: pre-wrap;">No backfill run recorded yet.</pre>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadEmbeddingStatus() {
+    try {
+        const res = await fetch('/api/embeddings/status', {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!res.ok) {
+            throw new Error(`status ${res.status}`);
+        }
+
+        const data = await res.json();
+        document.getElementById('metric-units').textContent = data.transcript_units;
+        document.getElementById('metric-embeddings').textContent = data.unit_embeddings;
+        document.getElementById('metric-vec').textContent = data.vec_index_rows;
+        document.getElementById('metric-queued').textContent = data.queued_jobs;
+        document.getElementById('metric-failed').textContent = data.failed_jobs;
+        document.getElementById('status-updated').textContent = new Date().toLocaleTimeString();
+
+        const breakdown = data.job_status_counts || [];
+        if (!breakdown.length) {
+            document.getElementById('job-breakdown').textContent = 'No rows yet.';
+        } else {
+            document.getElementById('job-breakdown').innerHTML = breakdown
+                .map(row => `<div><code>${row.status}</code>: ${row.count}</div>`)
+                .join('');
+        }
+
+        const run = data.running_backfill || data.latest_backfill;
+        if (!run) {
+            document.getElementById('backfill-status').textContent = 'No backfill run recorded yet.';
+            return;
+        }
+
+        const lines = [
+            `run_id: ${run.run_id}`,
+            `status: ${run.status}`,
+            `date range: ${run.date_start} -> ${run.date_end}`,
+            `timezone: ${run.timezone}`,
+            `transcription_type: ${run.transcription_type}`,
+            `started_at: ${new Date(run.started_at * 1000).toISOString()}`,
+            `finished_at: ${run.finished_at ? new Date(run.finished_at * 1000).toISOString() : '(running)'}`,
+            `scanned_rows: ${run.scanned_rows}`,
+            `indexed_rows: ${run.indexed_rows}`,
+            `parse_failures: ${run.parse_failures}`,
+            `processed_jobs: ${run.processed_jobs}`,
+            `error: ${run.error || '(none)'}`
+        ];
+        document.getElementById('backfill-status').textContent = lines.join('\n');
+    } catch (error) {
+        console.error('Failed loading embedding status', error);
+    }
+}
+
+document.getElementById('backfill-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const payload = {
+        date_start: document.getElementById('date-start').value,
+        date_end: document.getElementById('date-end').value,
+        timezone: document.getElementById('timezone').value,
+        transcription_type: document.getElementById('transcription-type').value,
+        max_jobs_per_cycle: Number(document.getElementById('max-jobs').value)
+    };
+
+    const statusEl = document.getElementById('backfill-submit-status');
+    statusEl.textContent = 'Submitting...';
+
+    try {
+        const res = await fetch('/api/embeddings/backfill', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+            const text = await res.text();
+            statusEl.textContent = `Failed (${res.status}): ${text}`;
+            return;
+        }
+
+        const data = await res.json();
+        statusEl.textContent = `Started run ${data.run_id}`;
+        await loadEmbeddingStatus();
+    } catch (error) {
+        statusEl.textContent = `Error: ${error}`;
+    }
+});
+
+loadEmbeddingStatus();
+setInterval(loadEmbeddingStatus, 3000);
+</script>
+{% endblock %}

@@ -3,10 +3,11 @@ use crate::bedrock_spend::{
     fetch_bedrock_pricing_from_aws, is_missing_pricing_error,
     record_bedrock_spend, upsert_bedrock_pricing, SpendLogRequest,
 };
+use crate::hybrid_search;
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -22,6 +23,8 @@ pub struct InvestigationRequest {
     pub question: String,
     #[serde(default)]
     pub chat_history: Vec<ChatMessage>,
+    #[serde(default)]
+    pub search_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -108,6 +111,11 @@ pub async fn investigate_question(
     state: &Arc<AppState>,
     request: InvestigationRequest,
 ) -> Result<InvestigationResponse> {
+    let search_mode =
+        hybrid_search::SearchMode::parse(request.search_mode.as_deref())
+            .ok_or_else(|| {
+                anyhow!("search_mode must be one of: hybrid, bm25, vector")
+            })?;
     let client = state
         .bedrock_client
         .as_ref()
@@ -189,6 +197,7 @@ Rules:
         window_end.timestamp() as f64,
         RETRIEVAL_POOL_LIMIT,
         state.timezone,
+        search_mode,
     )?;
 
     if candidates.is_empty() {
@@ -333,6 +342,11 @@ pub async fn investigate_question_streaming(
     on_tool_use: &mut (dyn FnMut(ToolUseEvent) + Send),
     on_delta: &mut (dyn FnMut(String) + Send),
 ) -> Result<InvestigationResponse> {
+    let search_mode =
+        hybrid_search::SearchMode::parse(request.search_mode.as_deref())
+            .ok_or_else(|| {
+                anyhow!("search_mode must be one of: hybrid, bm25, vector")
+            })?;
     let client = state
         .bedrock_client
         .as_ref()
@@ -447,6 +461,7 @@ Rules:
         window_end.timestamp() as f64,
         RETRIEVAL_POOL_LIMIT,
         state.timezone,
+        search_mode,
         |query_term, hit_count| {
             on_tool_use(ToolUseEvent {
                 tool_name: "transcript_search".to_string(),
@@ -670,24 +685,6 @@ fn parse_json_body<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     Ok(serde_json::from_str(trimmed)?)
 }
 
-fn prepare_search_match(term: &str) -> String {
-    let tokens: Vec<String> = term
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            let escaped = token.replace('"', "\"\"");
-            format!("\"{}\"", escaped)
-        })
-        .collect();
-
-    if tokens.is_empty() {
-        let escaped = term.replace('"', "\"\"");
-        format!("\"{}\"", escaped)
-    } else {
-        tokens.join(" AND ")
-    }
-}
-
 fn collect_candidates(
     state: &Arc<AppState>,
     search_queries: &[String],
@@ -695,6 +692,7 @@ fn collect_candidates(
     window_end: f64,
     limit: usize,
     timezone: chrono_tz::Tz,
+    search_mode: hybrid_search::SearchMode,
 ) -> Result<Vec<CandidateMoment>> {
     collect_candidates_with_progress(
         state,
@@ -703,6 +701,7 @@ fn collect_candidates(
         window_end,
         limit,
         timezone,
+        search_mode,
         |_query_term, _hit_count| {},
     )
 }
@@ -714,6 +713,7 @@ fn collect_candidates_with_progress<F>(
     window_end: f64,
     limit: usize,
     timezone: chrono_tz::Tz,
+    search_mode: hybrid_search::SearchMode,
     mut on_query_results: F,
 ) -> Result<Vec<CandidateMoment>>
 where
@@ -724,67 +724,82 @@ where
     let per_query_limit =
         usize::max(10, limit / usize::max(1, search_queries.len()));
 
-    let query = "SELECT
-            e.event_id,
-            e.camera_id,
-            e.video_path,
-            e.event_start,
-            e.event_end,
-            t.raw_response,
-            transcript_search.content,
-            bm25(transcript_search) AS rank
-        FROM transcript_search
-        JOIN events e ON e.event_id = transcript_search.event_id
-        JOIN transcriptions t ON t.event_id = e.event_id
-        WHERE transcript_search MATCH ?
-          AND t.transcription_type = ?
-          AND e.event_start BETWEEN ? AND ?
-        ORDER BY rank
-        LIMIT ?";
-
     for query_term in search_queries {
-        let fts = prepare_search_match(query_term);
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(
-            params![
-                fts,
-                state.transcription_service.as_str(),
-                window_start,
-                window_end,
-                per_query_limit as i64
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
-                ))
-            },
+        let filters = hybrid_search::EventFilters {
+            transcription_type: state.transcription_service.clone(),
+            start_ts: window_start,
+            end_ts: window_end,
+            camera_id: None,
+            cursor_start: None,
+            cursor_event_id: None,
+        };
+        let hits = hybrid_search::search_events(
+            &conn,
+            query_term,
+            &filters,
+            per_query_limit,
+            search_mode,
         )?;
 
         let mut query_hits = 0;
-        for row in rows {
-            let (
-                event_id,
+        for hit in hits {
+            let row = conn
+                .query_row(
+                    "SELECT
+                        e.camera_id,
+                        e.video_path,
+                        e.event_start,
+                        e.event_end,
+                        t.raw_response,
+                        transcript_search.content
+                     FROM events e
+                     JOIN transcriptions t ON t.event_id = e.event_id
+                     LEFT JOIN transcript_search
+                       ON transcript_search.event_id = e.event_id
+                     WHERE e.event_id = ?
+                       AND t.transcription_type = ?",
+                    params![
+                        hit.event_id,
+                        state.transcription_service.as_str(),
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?
+                                .unwrap_or_default(),
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
                 camera_id,
                 video_path,
                 event_start,
                 event_end,
                 raw_response,
                 indexed_content,
-                bm25_rank,
-            ) = row?;
+            )) = row
+            else {
+                continue;
+            };
+
             let (snippet, start_offset_sec, end_offset_sec) =
-                extract_best_snippet(&raw_response, query_term)
-                    .unwrap_or_else(|| fallback_snippet(&indexed_content));
+                match (hit.segment_start_ms, hit.segment_end_ms) {
+                    (Some(start_ms), Some(end_ms)) => (
+                        hit.snippet.clone(),
+                        start_ms as f64 / 1000.0,
+                        end_ms as f64 / 1000.0,
+                    ),
+                    _ => extract_best_snippet(&raw_response, query_term)
+                        .unwrap_or_else(|| fallback_snippet(&indexed_content)),
+                };
             candidates.push(CandidateMoment {
                 evidence: EvidenceMoment {
-                    event_id: event_id.clone(),
+                    event_id: hit.event_id.clone(),
                     camera_id,
                     video_path,
                     snippet,
@@ -801,10 +816,10 @@ where
                     end_offset_sec,
                     jump_url: format!(
                         "/video/{}#t={:.0}",
-                        event_id, start_offset_sec
+                        hit.event_id, start_offset_sec
                     ),
                 },
-                rank_score: -bm25_rank,
+                rank_score: hit.score,
             });
             query_hits += 1;
         }

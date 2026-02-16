@@ -2,6 +2,7 @@ use super::storyboard;
 use crate::bedrock_spend::{
     fetch_bedrock_pricing_from_aws, upsert_bedrock_pricing,
 };
+use crate::hybrid_search;
 use crate::investigation::{self, InvestigationRequest};
 use crate::process_events;
 use crate::prompt_context;
@@ -27,7 +28,7 @@ use clap::Parser;
 use fs2::FileExt as Fs2FileExt;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
@@ -75,6 +76,58 @@ struct StatusStats {
     error_count: u64,
     total_processing_time_ms: u64,
     average_processing_time_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingJobStatusCount {
+    status: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct BackfillRunStatus {
+    run_id: i64,
+    date_start: String,
+    date_end: String,
+    timezone: String,
+    transcription_type: String,
+    status: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    scanned_rows: i64,
+    indexed_rows: i64,
+    parse_failures: i64,
+    processed_jobs: i64,
+    error: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingsStatusResponse {
+    transcript_units: i64,
+    unit_embeddings: i64,
+    vec_index_rows: i64,
+    failed_jobs: i64,
+    queued_jobs: i64,
+    job_status_counts: Vec<EmbeddingJobStatusCount>,
+    running_backfill: Option<BackfillRunStatus>,
+    latest_backfill: Option<BackfillRunStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingsBackfillRequest {
+    date_start: String,
+    date_end: String,
+    timezone: Option<String>,
+    transcription_type: Option<String>,
+    max_jobs_per_cycle: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingsBackfillAccepted {
+    run_id: i64,
+    status: &'static str,
 }
 
 #[derive(Debug)]
@@ -266,6 +319,11 @@ fn init_templates() -> Tera {
         include_str!("templates/investigate.html"),
     )
     .unwrap();
+    tera.add_raw_template(
+        "embeddings.html",
+        include_str!("templates/embeddings.html"),
+    )
+    .unwrap();
     tera
 }
 
@@ -286,6 +344,22 @@ async fn get_status_page(State(state): State<Arc<AppState>>) -> Html<String> {
         .get()
         .unwrap()
         .render("status.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Html(rendered)
+}
+
+#[axum::debug_handler]
+async fn embeddings_page(State(state): State<Arc<AppState>>) -> Html<String> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/embeddings");
+    context.insert("timezone", &state.timezone.to_string().replace("::", "/"));
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("embeddings.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
     Html(rendered)
@@ -319,6 +393,254 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(status).into_response()
 }
 
+fn fetch_backfill_run(
+    conn: &Connection,
+    where_clause: &str,
+) -> Result<Option<BackfillRunStatus>, rusqlite::Error> {
+    let sql = format!(
+        "SELECT run_id, date_start, date_end, timezone, transcription_type,
+                status, started_at, finished_at, scanned_rows, indexed_rows,
+                parse_failures, processed_jobs, error, created_at, updated_at
+         FROM embedding_backfill_runs
+         WHERE {}
+         ORDER BY run_id DESC
+         LIMIT 1",
+        where_clause
+    );
+
+    conn.query_row(&sql, [], |row| {
+        Ok(BackfillRunStatus {
+            run_id: row.get(0)?,
+            date_start: row.get(1)?,
+            date_end: row.get(2)?,
+            timezone: row.get(3)?,
+            transcription_type: row.get(4)?,
+            status: row.get(5)?,
+            started_at: row.get(6)?,
+            finished_at: row.get(7)?,
+            scanned_rows: row.get(8)?,
+            indexed_rows: row.get(9)?,
+            parse_failures: row.get(10)?,
+            processed_jobs: row.get(11)?,
+            error: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
+        })
+    })
+    .optional()
+}
+
+#[axum::debug_handler]
+async fn get_embeddings_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<EmbeddingsStatusResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let transcript_units: i64 = conn
+        .query_row("SELECT COUNT(*) FROM transcript_units", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let unit_embeddings: i64 = conn
+        .query_row("SELECT COUNT(*) FROM unit_embeddings", [], |row| row.get(0))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let vec_index_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM unit_embedding_vec_index", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let failed_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs WHERE status = 'failed'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let queued_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs WHERE status IN ('pending', 'running')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT status, COUNT(*)
+             FROM embedding_jobs
+             GROUP BY status
+             ORDER BY status",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(EmbeddingJobStatusCount {
+                status: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let job_status_counts = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let running_backfill = fetch_backfill_run(&conn, "status = 'running'")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let latest_backfill = fetch_backfill_run(&conn, "1 = 1")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(EmbeddingsStatusResponse {
+        transcript_units,
+        unit_embeddings,
+        vec_index_rows,
+        failed_jobs,
+        queued_jobs,
+        job_status_counts,
+        running_backfill,
+        latest_backfill,
+    }))
+}
+
+#[axum::debug_handler]
+async fn start_embeddings_backfill(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EmbeddingsBackfillRequest>,
+) -> Result<(StatusCode, Json<EmbeddingsBackfillAccepted>), (StatusCode, String)>
+{
+    let timezone = if let Some(tz) = request.timezone.as_deref() {
+        time_util::get_local_timezone(Some(tz))
+    } else {
+        state.timezone
+    };
+    let timezone_str = timezone.to_string().replace("::", "/");
+    let transcription_type = request
+        .transcription_type
+        .clone()
+        .unwrap_or_else(|| state.transcription_service.clone());
+
+    let (start_ts, end_ts) =
+        time_util::parse_local_date_range_to_utc_range_with_time(
+            &request.date_start,
+            &request.date_end,
+            &None,
+            &None,
+            timezone,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let max_jobs_per_cycle = request.max_jobs_per_cycle.unwrap_or(1024).max(1);
+
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let running: Option<i64> = conn
+        .query_row(
+            "SELECT run_id FROM embedding_backfill_runs
+             WHERE status = 'running'
+             ORDER BY run_id DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if running.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "A backfill run is already in progress".to_string(),
+        ));
+    }
+
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO embedding_backfill_runs (
+            date_start, date_end, timezone, transcription_type, status,
+            started_at, finished_at, scanned_rows, indexed_rows, parse_failures,
+            processed_jobs, error, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'running', ?, NULL, 0, 0, 0, 0, NULL, ?, ?)",
+        params![
+            request.date_start,
+            request.date_end,
+            timezone_str,
+            transcription_type,
+            now,
+            now,
+            now
+        ],
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let run_id = conn.last_insert_rowid();
+    drop(conn);
+
+    let state_for_job = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let run = || -> Result<(), anyhow::Error> {
+            let conn = state_for_job.zumblezay_db.get()?;
+            let summary = hybrid_search::backfill_date_range(
+                &conn,
+                &hybrid_search::BackfillRangeParams {
+                    start_ts,
+                    end_ts,
+                    transcription_type: transcription_type.clone(),
+                    max_jobs_per_cycle,
+                },
+            )?;
+
+            let finished_at = Utc::now().timestamp();
+            conn.execute(
+                "UPDATE embedding_backfill_runs
+                 SET status = 'done',
+                     finished_at = ?,
+                     scanned_rows = ?,
+                     indexed_rows = ?,
+                     parse_failures = ?,
+                     processed_jobs = ?,
+                     updated_at = ?
+                 WHERE run_id = ?",
+                params![
+                    finished_at,
+                    summary.scanned_rows as i64,
+                    summary.indexed_rows as i64,
+                    summary.parse_failures as i64,
+                    summary.processed_jobs as i64,
+                    finished_at,
+                    run_id
+                ],
+            )?;
+            Ok(())
+        };
+
+        if let Err(error) = run() {
+            if let Ok(conn) = state_for_job.zumblezay_db.get() {
+                let now = Utc::now().timestamp();
+                let _ = conn.execute(
+                    "UPDATE embedding_backfill_runs
+                     SET status = 'failed',
+                         finished_at = ?,
+                         error = ?,
+                         updated_at = ?
+                     WHERE run_id = ?",
+                    params![now, error.to_string(), now, run_id],
+                );
+            }
+            error!("embedding backfill run {} failed: {}", run_id, error);
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EmbeddingsBackfillAccepted {
+            run_id,
+            status: "running",
+        }),
+    ))
+}
+
 // Add these new endpoint handlers
 #[derive(Debug, Deserialize)]
 struct EventFilters {
@@ -329,6 +651,7 @@ struct EventFilters {
     time_start: Option<String>,
     time_end: Option<String>,
     q: Option<String>,
+    search_mode: Option<String>,
     cursor_start: Option<f64>,
     cursor_event_id: Option<String>,
     limit: Option<usize>,
@@ -407,55 +730,17 @@ async fn get_completed_events(
         )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let mut query: String = String::from("");
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
     let has_search = search_term.is_some();
     let limit = filters.limit.unwrap_or(200).clamp(1, 500);
     let query_limit = limit.saturating_add(1);
     if has_search {
-        query.push_str(
-            "WITH hits AS (
-                 SELECT ts.event_id,
-                        snippet(
-                            transcript_search,
-                            1,
-                            '[[H]]',
-                            '[[/H]]',
-                            '…',
-                            12
-                        ) AS snippet
-                 FROM transcript_search ts
-                 WHERE transcript_search MATCH ?
-             )
-             SELECT e1.event_id,
-                    e1.camera_id,
-                    e1.event_start,
-                    e1.event_end,
-                    EXISTS(
-                       SELECT 1
-                       FROM transcriptions t
-                       WHERE t.event_id = e1.event_id
-                         AND t.transcription_type = ?
-                    ) AS has_transcript,
-                    h.snippet AS snippet
-             FROM hits h
-             JOIN events e1 ON e1.event_id = h.event_id
-             WHERE e1.event_start BETWEEN ? AND ?",
-        );
-
-        if let Some(query_string) = search_term.as_ref() {
-            params.push(Box::new(query_string.clone()));
-        }
-        params.push(Box::new(transcription_type));
-        params.push(Box::new(start_ts));
-        params.push(Box::new(end_ts));
-
-        if let Some(camera) = filters.camera_id.clone() {
-            query.push_str(" AND e1.camera_id = ?");
-            params.push(Box::new(camera));
-        }
-
+        let search_mode =
+            hybrid_search::SearchMode::parse(filters.search_mode.as_deref())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "search_mode must be one of: hybrid, bm25, vector"
+                        .to_string(),
+                ))?;
         let cursor_start = filters.cursor_start;
         let cursor_event_id = filters.cursor_event_id.clone();
         if cursor_start.is_some() ^ cursor_event_id.is_some() {
@@ -466,21 +751,95 @@ async fn get_completed_events(
             ));
         }
 
-        if let (Some(cursor_start), Some(cursor_event_id)) =
-            (cursor_start, cursor_event_id)
-        {
-            query.push_str(
-                " AND (e1.event_start < ? OR (e1.event_start = ? AND e1.event_id < ?))",
-            );
-            params.push(Box::new(cursor_start));
-            params.push(Box::new(cursor_start));
-            params.push(Box::new(cursor_event_id));
+        let raw_query = filters
+            .q
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let hybrid_filters = hybrid_search::EventFilters {
+            transcription_type: transcription_type.clone(),
+            start_ts,
+            end_ts,
+            camera_id: filters.camera_id.clone(),
+            cursor_start,
+            cursor_event_id,
+        };
+
+        let hits = hybrid_search::search_events(
+            &conn,
+            raw_query,
+            &hybrid_filters,
+            query_limit,
+            search_mode,
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let mut transcripts = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let row = conn
+                .query_row(
+                    "SELECT e.event_id, e.camera_id, e.event_start, e.event_end
+                     FROM events e
+                     WHERE e.event_id = ?",
+                    params![hit.event_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, f64>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?;
+            let Some((event_id, camera_id, event_start, event_end)) = row
+            else {
+                continue;
+            };
+            transcripts.push(TranscriptListItem {
+                event_id: event_id.clone(),
+                camera_id: camera_id.clone(),
+                camera_name: camera_names.get(&camera_id).cloned(),
+                event_start,
+                event_end,
+                has_transcript: true,
+                snippet: Some(hit.snippet),
+                search_unit_type: hit.unit_type,
+                search_segment_start_ms: hit.segment_start_ms,
+                search_segment_end_ms: hit.segment_end_ms,
+                match_sources: Some(hit.match_sources),
+                bm25_rank: hit.bm25_rank,
+                vector_rank: hit.vector_rank,
+                bm25_rrf_score: hit.bm25_rrf_score,
+                vector_rrf_score: hit.vector_rrf_score,
+            });
         }
 
-        query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
-        query.push_str(" LIMIT ?");
-        params.push(Box::new(query_limit as i64));
-    } else {
+        let mut next_cursor = None;
+        if transcripts.len() > limit {
+            transcripts.pop();
+            if let Some(last) = transcripts.last() {
+                next_cursor = Some(EventCursor {
+                    event_start: last.event_start,
+                    event_id: last.event_id.clone(),
+                });
+            }
+        }
+
+        return Ok(Json(EventPage {
+            events: transcripts,
+            next_cursor,
+            latency_ms: Some(request_started.elapsed().as_millis()),
+        }));
+    }
+
+    let mut query: String = String::from("");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if !has_search {
         query.push_str(
             "
           SELECT e1.event_id,
@@ -511,14 +870,11 @@ async fn get_completed_events(
         params.push(Box::new(end_ts));
         params.push(Box::new(start_ts));
         params.push(Box::new(end_ts));
-    }
-    if !has_search {
+
         if let Some(camera) = filters.camera_id {
             query.push_str(" AND (e1.camera_id = ?)");
             params.push(Box::new(camera));
         }
-    }
-    if !has_search {
         let cursor_start = filters.cursor_start;
         let cursor_event_id = filters.cursor_event_id.clone();
         if cursor_start.is_some() ^ cursor_event_id.is_some() {
@@ -538,10 +894,7 @@ async fn get_completed_events(
             params.push(Box::new(cursor_start));
             params.push(Box::new(cursor_event_id));
         }
-    }
-    if !has_search {
         query.push_str(" ORDER BY e1.event_start DESC, e1.event_id DESC");
-
         query.push_str(" LIMIT ?");
         params.push(Box::new(query_limit as i64));
     }
@@ -571,6 +924,14 @@ async fn get_completed_events(
                 event_end: row.get(3)?,
                 has_transcript: row.get(4)?,
                 snippet: if has_search { row.get(5)? } else { None },
+                search_unit_type: None,
+                search_segment_start_ms: None,
+                search_segment_end_ms: None,
+                match_sources: None,
+                bm25_rank: None,
+                vector_rank: None,
+                bm25_rrf_score: None,
+                vector_rrf_score: None,
             })
         })
         .map_err(|e| {
@@ -853,6 +1214,14 @@ struct TranscriptListItem {
     event_end: f64,
     has_transcript: bool,
     snippet: Option<String>,
+    search_unit_type: Option<String>,
+    search_segment_start_ms: Option<i64>,
+    search_segment_end_ms: Option<i64>,
+    match_sources: Option<Vec<String>>,
+    bm25_rank: Option<usize>,
+    vector_rank: Option<usize>,
+    bm25_rrf_score: Option<f64>,
+    vector_rrf_score: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -988,6 +1357,18 @@ struct Args {
     /// Interval in seconds between event sync attempts
     #[arg(long, default_value_t = 10)]
     sync_interval: u64,
+
+    /// Enable background embedding queue worker (enabled by default)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_embedding_worker: bool,
+
+    /// Interval in seconds between embedding queue drain attempts
+    #[arg(long, default_value_t = 2.0)]
+    embedding_worker_interval_secs: f64,
+
+    /// Max jobs to process per embedding worker drain cycle
+    #[arg(long, default_value_t = 256)]
+    embedding_worker_batch_size: usize,
 
     /// Default model to use for summary generation
     #[arg(long, default_value = "anthropic-claude-haiku")]
@@ -1442,6 +1823,53 @@ async fn sync_events(
     info!("Sync task terminated");
 }
 
+#[instrument(skip(state))]
+async fn drain_embedding_jobs_loop(
+    state: Arc<AppState>,
+    interval: Duration,
+    batch_size: usize,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    info!(
+        "Starting embedding queue drain loop with {}s interval and batch_size={}",
+        interval.as_secs_f64(),
+        batch_size
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                info!("Shutting down embedding queue drain task");
+                break;
+            }
+            _ = async {
+                let state_for_work = state.clone();
+                let result = tokio::task::spawn_blocking(move || -> Result<usize> {
+                    let conn = state_for_work.zumblezay_db.get()?;
+                    crate::hybrid_search::process_pending_embedding_jobs(&conn, batch_size)
+                }).await;
+
+                match result {
+                    Ok(Ok(processed)) => {
+                        if processed > 0 {
+                            info!("Processed {} embedding jobs", processed);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        error!("Embedding queue drain failed: {}", error);
+                    }
+                    Err(join_error) => {
+                        error!("Embedding queue drain join error: {}", join_error);
+                    }
+                }
+                time::sleep(interval).await;
+            } => {}
+        }
+    }
+
+    info!("Embedding queue drain task terminated");
+}
+
 #[axum::debug_handler]
 async fn list_daily_summaries(
     State(state): State<Arc<AppState>>,
@@ -1747,6 +2175,14 @@ async fn investigate_videos(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InvestigationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if hybrid_search::SearchMode::parse(request.search_mode.as_deref())
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "search_mode must be one of: hybrid, bm25, vector".to_string(),
+        ));
+    }
     let response = investigation::investigate_question(&state, request)
         .await
         .map_err(|error| {
@@ -1761,6 +2197,22 @@ async fn investigate_videos_stream(
     Json(request): Json<InvestigationRequest>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
     let (tx, rx) = mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
+
+    if hybrid_search::SearchMode::parse(request.search_mode.as_deref())
+        .is_none()
+    {
+        let _ = tx.send(Ok(SseEvent::default()
+            .event("error")
+            .data("search_mode must be one of: hybrid, bm25, vector")));
+        let _ = tx.send(Ok(SseEvent::default()
+            .event("done")
+            .data("{\"error\":\"invalid search_mode\"}")));
+        return Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(10))
+                .text("keep-alive"),
+        );
+    }
 
     tokio::spawn(async move {
         if tx
@@ -1876,6 +2328,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/events/search", get(events_search_page))
         .route("/health", get(health_check))
         .route("/status", get(get_status_page))
+        .route("/embeddings", get(embeddings_page))
         .route("/summary", get(summary_page))
         .route("/transcript", get(transcript_page))
         .route("/investigate", get(investigate_page))
@@ -1885,6 +2338,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/cameras", get(get_cameras))
         .route("/video/{event_id}", get(stream_video))
         .route("/api/status", get(get_status))
+        .route("/api/embeddings/status", get(get_embeddings_status))
+        .route("/api/embeddings/backfill", post(start_embeddings_backfill))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
         .route("/api/transcripts/json/{date}", get(get_transcripts_json))
         .route("/api/investigate", post(investigate_videos))
@@ -2102,6 +2557,28 @@ pub async fn serve() -> Result<()> {
         }))
     };
 
+    let embedding_worker_handle = if args.enable_embedding_worker {
+        info!("Starting background embedding queue drain task");
+        let worker_state = state.clone();
+        let worker_interval = Duration::from_secs_f64(
+            args.embedding_worker_interval_secs.max(0.1),
+        );
+        let worker_batch_size = args.embedding_worker_batch_size.max(1);
+        let worker_shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            drain_embedding_jobs_loop(
+                worker_state,
+                worker_interval,
+                worker_batch_size,
+                worker_shutdown_rx,
+            )
+            .await;
+        }))
+    } else {
+        info!("Background embedding queue drain task disabled");
+        None
+    };
+
     // Initialize templates
     ensure_templates();
 
@@ -2129,6 +2606,7 @@ pub async fn serve() -> Result<()> {
         ("sync", sync_handle),
         ("processing", processing_handle),
         ("pricing-refresh", pricing_refresh_handle),
+        ("embedding-worker", embedding_worker_handle),
     ] {
         if let Some(handle) = handle {
             match tokio::time::timeout(Duration::from_secs(30), handle).await {

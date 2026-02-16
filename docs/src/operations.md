@@ -15,3 +15,25 @@ All knobs are available as CLI flags with env var fallbacks (see `Args` in `src/
 Logging uses `tracing`. Override verbosity with `RUST_LOG=zumblezay=debug` or set it via the CLI flag (see `--log-level` if present in your build).
 
 Storyboards and cached camera names are safe to clear; they will be recomputed on demand. The application and events databases should be backed up if you need historical transcripts.
+
+## Hybrid Transcript Search
+
+Hybrid transcript retrieval (BM25 + vector fusion) is stored in the same SQLite app database.
+
+- New tables: `embedding_models`, `transcript_units`, `unit_embeddings`, `embedding_jobs`, `search_config`.
+- Fallback: if vectors are unavailable, transcript search stays available through BM25 (`transcript_search` FTS5).
+- Default active embedding model metadata: `amazon.nova-2-multimodal-embeddings-v1:0` (`model_key = nova2_text_v1`).
+
+Operator controls are SQL-driven in v1:
+
+- Trigger backfill/re-embed by inserting rows into `embedding_jobs`.
+- Adjust fusion knobs in `search_config`:
+  - `hybrid.rrf.k`
+  - `hybrid.weight.bm25`
+  - `hybrid.weight.vector`
+
+Web operations UI:
+
+- `GET /embeddings` shows queue coverage, failed job counts, and latest/running backfill run status.
+- `POST /api/embeddings/backfill` starts async backfill for a local-date range.
+- `GET /api/embeddings/status` returns live embedding metrics and backfill run state.

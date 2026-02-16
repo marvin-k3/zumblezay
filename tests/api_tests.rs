@@ -20,6 +20,7 @@ use tracing::debug;
 use zumblezay::bedrock::{
     BedrockCompletionResponse, BedrockUsage, FakeBedrockClient,
 };
+use zumblezay::hybrid_search;
 use zumblezay::investigation::INVESTIGATION_SPEND_CATEGORY;
 use zumblezay::openai::{fake::FakeOpenAIClient, OpenAIClientTrait};
 use zumblezay::test_utils::init_test_logging;
@@ -552,6 +553,71 @@ async fn test_events_api() {
 }
 
 #[tokio::test]
+async fn test_events_search_mode_and_match_source_attribution() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+
+    insert_event_with_transcript(
+        &app_state,
+        "event-search-mode-1",
+        "2024-03-15",
+        "12:00:00",
+        "camera-mode",
+        "child had lunch in kitchen",
+    );
+
+    let conn = app_state.zumblezay_db.get().unwrap();
+    let raw_response: String = conn
+        .query_row(
+            "SELECT raw_response FROM transcriptions WHERE event_id = ?",
+            params!["event-search-mode-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let raw_json: serde_json::Value =
+        serde_json::from_str(&raw_response).unwrap();
+    hybrid_search::index_transcript_units_for_event(
+        &conn,
+        "event-search-mode-1",
+        &raw_json,
+        0.0,
+    )
+    .unwrap();
+    hybrid_search::process_pending_embedding_jobs(&conn, 100).unwrap();
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/events?date=2024-03-15&q=child+lunch&search_mode=vector")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let first = payload["events"].as_array().unwrap().first().unwrap();
+    assert_eq!(first["event_id"], "event-search-mode-1");
+    assert_eq!(first["match_sources"], json!(["vector"]));
+    assert!(first["vector_rank"].is_number());
+    assert!(first["bm25_rank"].is_null());
+
+    let bad_response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/events?date=2024-03-15&q=child+lunch&search_mode=invalid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_cameras_api() {
     init_test_logging();
     let (app_state, app_router) = app();
@@ -996,6 +1062,105 @@ async fn test_transcript_summary_endpoints_return_cached_content() {
         specific_json_value,
         serde_json::json!([{"highlight": "Fireworks at night"}])
     );
+}
+
+#[tokio::test]
+async fn test_embeddings_status_endpoint_returns_metrics() {
+    init_test_logging();
+    let (_app_state, app_router) = app();
+
+    let response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/embeddings/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["transcript_units"].is_number());
+    assert!(payload["unit_embeddings"].is_number());
+    assert!(payload["job_status_counts"].is_array());
+}
+
+#[tokio::test]
+async fn test_embeddings_backfill_endpoint_runs_for_date_range() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+    insert_event_with_transcript(
+        &app_state,
+        "event-embed-backfill-1",
+        "2024-08-01",
+        "10:00:00",
+        "camera-backfill",
+        "child had lunch and played",
+    );
+
+    let start_response = app_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/embeddings/backfill")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "date_start": "2024-08-01",
+                        "date_end": "2024-08-01",
+                        "timezone": "Australia/Adelaide",
+                        "transcription_type": "whisper-local",
+                        "max_jobs_per_cycle": 128
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start_response.status(), StatusCode::ACCEPTED);
+
+    let mut done = false;
+    for _ in 0..30 {
+        let response = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/embeddings/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        if payload["latest_backfill"]["status"] == json!("done") {
+            done = true;
+            assert!(
+                payload["transcript_units"]
+                    .as_i64()
+                    .expect("transcript_units as i64")
+                    > 0
+            );
+            assert!(
+                payload["unit_embeddings"]
+                    .as_i64()
+                    .expect("unit_embeddings as i64")
+                    > 0
+            );
+            break;
+        }
+
+        time::sleep(time::Duration::from_millis(100)).await;
+    }
+
+    assert!(done, "backfill did not complete in expected time");
 }
 
 #[tokio::test]
@@ -1632,6 +1797,32 @@ async fn test_investigate_endpoint_fails_closed_when_spend_logging_fails() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_investigate_endpoint_rejects_invalid_search_mode() {
+    init_test_logging();
+    let (_app_state, app_router) = app();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "question": "did the child have lunch",
+                        "search_mode": "invalid-mode"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

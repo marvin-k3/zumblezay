@@ -1,7 +1,7 @@
 use crate::schema_registry::{SchemaArtifact, SchemaRegistry};
 use crate::time_util;
 use crate::AppState;
-use crate::Event;
+use crate::{hybrid_search, Event};
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use rusqlite::{params, Connection};
@@ -229,11 +229,39 @@ pub async fn save_transcript(
         ],
     )?;
 
-    if let Err(err) =
-        update_transcript_search_from_str(&conn, &event.id, raw_response)
-    {
+    let raw_json: Value = match serde_json::from_str(raw_response) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                "Failed to parse transcript JSON for {} while indexing: {}",
+                event.id, err
+            );
+            return Ok(());
+        }
+    };
+
+    if let Err(err) = update_transcript_search(&conn, &event.id, &raw_json) {
         warn!(
             "Failed to update transcript search index for {}: {}",
+            event.id, err
+        );
+    }
+
+    if let Err(err) = hybrid_search::index_transcript_units_for_event(
+        &conn,
+        &event.id,
+        &raw_json,
+        event.start,
+    ) {
+        warn!(
+            "Failed to update transcript units for event {}: {}",
+            event.id, err
+        );
+    }
+
+    if let Err(err) = hybrid_search::process_pending_embedding_jobs(&conn, 16) {
+        warn!(
+            "Failed to process embedding jobs after transcript save {}: {}",
             event.id, err
         );
     }
