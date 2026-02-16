@@ -37,6 +37,21 @@ pub struct BedrockEmbeddingResponse {
     pub request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingPurpose {
+    GenericIndex,
+    TextRetrieval,
+}
+
+impl EmbeddingPurpose {
+    fn as_nova_str(self) -> &'static str {
+        match self {
+            Self::GenericIndex => "GENERIC_INDEX",
+            Self::TextRetrieval => "TEXT_RETRIEVAL",
+        }
+    }
+}
+
 #[async_trait]
 pub trait BedrockClientTrait: Send + Sync {
     async fn complete_text(
@@ -61,6 +76,7 @@ pub trait BedrockClientTrait: Send + Sync {
         model_id: &str,
         text: &str,
         dimensions: i32,
+        purpose: EmbeddingPurpose,
     ) -> Result<BedrockEmbeddingResponse>;
 }
 
@@ -390,6 +406,7 @@ impl BedrockClientTrait for RealBedrockClient {
         model_id: &str,
         text: &str,
         dimensions: i32,
+        purpose: EmbeddingPurpose,
     ) -> Result<BedrockEmbeddingResponse> {
         let body = if model_id
             .to_ascii_lowercase()
@@ -398,7 +415,7 @@ impl BedrockClientTrait for RealBedrockClient {
             serde_json::json!({
                 "taskType": "SINGLE_EMBEDDING",
                 "singleEmbeddingParams": {
-                    "embeddingPurpose": "GENERIC_INDEX",
+                    "embeddingPurpose": purpose.as_nova_str(),
                     "embeddingDimension": dimensions,
                     "text": {
                         "value": text,
@@ -678,6 +695,7 @@ impl BedrockClientTrait for FakeBedrockClient {
         _model_id: &str,
         text: &str,
         dimensions: i32,
+        _purpose: EmbeddingPurpose,
     ) -> Result<BedrockEmbeddingResponse> {
         let dim = usize::try_from(dimensions)
             .ok()

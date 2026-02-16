@@ -601,6 +601,8 @@ async fn test_events_search_mode_and_match_source_attribution() {
     let first = payload["events"].as_array().unwrap().first().unwrap();
     assert_eq!(first["event_id"], "event-search-mode-1");
     assert_eq!(first["match_sources"], json!(["vector"]));
+    assert!(first["hybrid_score"].is_number());
+    assert!(first["vector_similarity"].is_number());
     assert!(first["vector_rank"].is_number());
     assert!(first["bm25_rank"].is_null());
 

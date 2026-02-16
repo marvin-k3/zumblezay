@@ -142,6 +142,9 @@ async fn hybrid_search_returns_results_from_events_endpoint() {
     let events = payload["events"].as_array().unwrap();
     assert!(!events.is_empty());
     assert_eq!(events[0]["event_id"], "evt-hybrid-1");
+    assert!(events[0]["hybrid_score"].is_number());
+    assert!(events[0]["bm25_rrf_score"].is_number());
+    assert!(events[0]["vector_similarity"].is_number());
 }
 
 #[tokio::test]
@@ -170,6 +173,9 @@ async fn bm25_fallback_works_when_vectors_are_missing() {
     let events = payload["events"].as_array().unwrap();
     assert!(!events.is_empty());
     assert_eq!(events[0]["event_id"], "evt-bm25-only");
+    assert!(events[0]["hybrid_score"].is_number());
+    assert!(events[0]["bm25_rrf_score"].is_number());
+    assert!(events[0]["vector_similarity"].is_null());
 }
 
 #[tokio::test]

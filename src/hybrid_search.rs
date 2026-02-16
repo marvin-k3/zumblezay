@@ -1,4 +1,4 @@
-use crate::bedrock::{BedrockClientTrait, BedrockUsage};
+use crate::bedrock::{BedrockClientTrait, BedrockUsage, EmbeddingPurpose};
 use crate::bedrock_spend::{
     fetch_bedrock_pricing_from_aws, is_missing_pricing_error,
     record_bedrock_spend, upsert_bedrock_pricing, BedrockPricingRate,
@@ -45,6 +45,7 @@ pub struct HybridSearchHit {
     pub event_id: String,
     pub snippet: String,
     pub score: f64,
+    pub vector_similarity: Option<f64>,
     pub unit_type: Option<String>,
     pub segment_start_ms: Option<i64>,
     pub segment_end_ms: Option<i64>,
@@ -119,6 +120,7 @@ struct TranscriptUnitDraft {
 struct SourceCandidate {
     event_id: String,
     snippet: String,
+    vector_similarity: Option<f64>,
     unit_type: Option<String>,
     segment_start_ms: Option<i64>,
     segment_end_ms: Option<i64>,
@@ -699,23 +701,27 @@ fn compute_embedding_for_job(
 
     let dim =
         usize::try_from(job.embedding_dim).unwrap_or(DEFAULT_EMBEDDING_DIM);
-    let result = embed_text(&content_text, dim, bedrock_client.as_ref()).map(
-        |embedding_result| {
-            let embedding_id = deterministic_embedding_id(
-                &unit_id,
-                ACTIVE_MODEL_KEY,
-                ACTIVE_EMBEDDING_KIND,
-                content_version,
-            );
-            Some(EmbeddingJobComputationWithMeta {
-                embedding_id,
-                content_version,
-                embedding: embedding_result.embedding,
-                usage: embedding_result.usage,
-                request_id: embedding_result.request_id,
-            })
-        },
-    );
+    let result = embed_text(
+        &content_text,
+        dim,
+        EmbeddingPurpose::GenericIndex,
+        bedrock_client.as_ref(),
+    )
+    .map(|embedding_result| {
+        let embedding_id = deterministic_embedding_id(
+            &unit_id,
+            ACTIVE_MODEL_KEY,
+            ACTIVE_EMBEDDING_KIND,
+            content_version,
+        );
+        Some(EmbeddingJobComputationWithMeta {
+            embedding_id,
+            content_version,
+            embedding: embedding_result.embedding,
+            usage: embedding_result.usage,
+            request_id: embedding_result.request_id,
+        })
+    });
 
     (job, result)
 }
@@ -1066,8 +1072,12 @@ fn upsert_current_embedding_for_unit(
         .optional()?
         .unwrap_or(DEFAULT_EMBEDDING_DIM as i64);
 
-    let embedding_result =
-        embed_text(&content_text, dim as usize, bedrock_client)?;
+    let embedding_result = embed_text(
+        &content_text,
+        dim as usize,
+        EmbeddingPurpose::GenericIndex,
+        bedrock_client,
+    )?;
     maybe_record_embedding_spend(
         conn,
         &embedding_result,
@@ -1168,6 +1178,7 @@ pub fn search_events_with_client(
 
     let mut bm25_ranks: HashMap<String, usize> = HashMap::new();
     let mut vector_ranks: HashMap<String, usize> = HashMap::new();
+    let mut vector_similarities: HashMap<String, f64> = HashMap::new();
     let mut best_source: HashMap<String, SourceCandidate> = HashMap::new();
 
     for (idx, candidate) in bm25_candidates.iter().enumerate() {
@@ -1182,6 +1193,16 @@ pub fn search_events_with_client(
         vector_ranks
             .entry(candidate.event_id.clone())
             .or_insert(idx + 1);
+        if let Some(similarity) = candidate.vector_similarity {
+            vector_similarities
+                .entry(candidate.event_id.clone())
+                .and_modify(|existing| {
+                    if similarity > *existing {
+                        *existing = similarity;
+                    }
+                })
+                .or_insert(similarity);
+        }
         best_source
             .entry(candidate.event_id.clone())
             .and_modify(|existing| {
@@ -1224,6 +1245,7 @@ pub fn search_events_with_client(
                 event_id: event_id.clone(),
                 snippet: source.snippet.clone(),
                 score,
+                vector_similarity: vector_similarities.get(&event_id).copied(),
                 unit_type: source.unit_type.clone(),
                 segment_start_ms: source.segment_start_ms,
                 segment_end_ms: source.segment_end_ms,
@@ -1245,6 +1267,7 @@ pub fn search_events_with_client(
                 event_id: source.event_id.clone(),
                 snippet: source.snippet.clone(),
                 score: cfg.bm25_weight / (cfg.rrf_k + (idx + 1) as f64),
+                vector_similarity: None,
                 unit_type: source.unit_type.clone(),
                 segment_start_ms: source.segment_start_ms,
                 segment_end_ms: source.segment_end_ms,
@@ -1319,6 +1342,7 @@ fn search_bm25(
         Ok(SourceCandidate {
             event_id: row.get::<_, String>(0)?,
             snippet: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            vector_similarity: None,
             unit_type: None,
             segment_start_ms: None,
             segment_end_ms: None,
@@ -1344,8 +1368,12 @@ fn search_vector(
         )
         .optional()?
         .unwrap_or(DEFAULT_EMBEDDING_DIM as i64);
-    let query_embedding_result =
-        embed_text(query, dim as usize, bedrock_client)?;
+    let query_embedding_result = embed_text(
+        query,
+        dim as usize,
+        EmbeddingPurpose::TextRetrieval,
+        bedrock_client,
+    )?;
     maybe_record_embedding_spend(
         conn,
         &query_embedding_result,
@@ -1417,6 +1445,7 @@ fn search_vector(
             SourceCandidate {
                 event_id,
                 snippet: content.chars().take(220).collect::<String>(),
+                vector_similarity: Some(score),
                 unit_type: Some(unit_type),
                 segment_start_ms: start_ms,
                 segment_end_ms: end_ms,
@@ -1544,6 +1573,7 @@ fn embed_text_deterministic(text: &str, dim: usize) -> Vec<f32> {
 fn embed_text(
     text: &str,
     dim: usize,
+    purpose: EmbeddingPurpose,
     bedrock_client: Option<&Arc<dyn BedrockClientTrait>>,
 ) -> Result<EmbeddingCallResult> {
     let Some(client) = bedrock_client else {
@@ -1577,6 +1607,7 @@ fn embed_text(
             &model_id,
             &text_owned,
             dim_i32,
+            purpose,
         ))?;
         if response.embedding.len() != dim {
             return Err(anyhow::anyhow!(

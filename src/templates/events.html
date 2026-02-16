@@ -78,6 +78,14 @@
         font-size: 0.9rem;
         color: var(--bs-secondary-color);
     }
+    .match-quality {
+        font-size: 0.8rem;
+        color: var(--bs-secondary-color);
+    }
+    .match-quality .label {
+        font-weight: 600;
+        color: var(--bs-body-color);
+    }
 
     /* Transcript styles */
     .transcript-container {
@@ -940,6 +948,7 @@
             const duration = Math.max(Math.round(t.event_end - t.event_start), 1);
             const cameraLabel = t.camera_name || t.camera_id;
             const snippet = t.snippet ? `<div class="event-snippet small text-muted mt-1" style="display:${showSnippets ? 'block' : 'none'}">${renderSnippet(t.snippet)}</div>` : '';
+            const matchQuality = renderMatchQuality(t);
             const embeddingTitle = t.has_embeddings ? 'Embeddings available' : 'Embeddings pending';
             return `
                 <div class="event-item p-2 border-bottom"
@@ -957,6 +966,7 @@
                     </div>
                     <div class="small text-muted">${formatTimestamp(t.event_start)} - ${duration} seconds</div>
                     ${snippet}
+                    ${matchQuality}
                     <div class="event-preview">
                         <img>
                     </div>
@@ -984,6 +994,34 @@
         return escaped
             .replaceAll('[[H]]', '<mark>')
             .replaceAll('[[/H]]', '</mark>');
+    }
+
+    function formatScore(value, decimals = 5) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+        return value.toFixed(decimals);
+    }
+
+    function renderMatchQuality(item) {
+        const hybridRaw = item.hybrid_score ?? item.score;
+        const bm25Raw = item.bm25_rrf_score ?? item.bm25_score;
+        const vectorSimRaw = item.vector_similarity;
+        const hybrid = formatScore(hybridRaw);
+        const bm25 = formatScore(bm25Raw);
+        const vectorSim = formatScore(vectorSimRaw, 4);
+        const bm25Rank = Number.isInteger(item.bm25_rank) ? `#${item.bm25_rank}` : null;
+        const vectorRank = Number.isInteger(item.vector_rank) ? `#${item.vector_rank}` : null;
+        const sources = Array.isArray(item.match_sources) && item.match_sources.length > 0
+            ? item.match_sources.join('+')
+            : null;
+        if (!hybrid && !bm25 && !vectorSim && !bm25Rank && !vectorRank && !sources) return '';
+        const parts = [];
+        if (hybrid) parts.push(`Hybrid ${hybrid}`);
+        if (bm25) parts.push(`BM25 ${bm25}`);
+        if (vectorSim) parts.push(`Vector sim ${vectorSim}`);
+        if (bm25Rank) parts.push(`BM25 rank ${bm25Rank}`);
+        if (vectorRank) parts.push(`Vector rank ${vectorRank}`);
+        if (sources) parts.push(`Sources ${escapeHtml(sources)}`);
+        return `<div class="match-quality mt-1"><span class="label">Match:</span> ${parts.join(' | ')}</div>`;
     }
 
     function loadCameras() {
@@ -1139,9 +1177,45 @@
         return new Date(epochSecs * 1000).toLocaleString();
     }
 
-    function copyEmbeddingId(id) {
+    async function copyEmbeddingId(event, buttonEl) {
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        const id = buttonEl?.dataset?.embeddingId || '';
         if (!id) return;
-        navigator.clipboard.writeText(id).catch(() => {});
+
+        let copied = false;
+        if (navigator.clipboard && window.isSecureContext) {
+            try {
+                await navigator.clipboard.writeText(id);
+                copied = true;
+            } catch (_) {
+                copied = false;
+            }
+        }
+
+        if (!copied) {
+            const textarea = document.createElement('textarea');
+            textarea.value = id;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                copied = document.execCommand('copy');
+            } catch (_) {
+                copied = false;
+            }
+            document.body.removeChild(textarea);
+        }
+
+        const originalLabel = buttonEl.textContent;
+        buttonEl.textContent = copied ? 'Copied' : 'Failed';
+        setTimeout(() => {
+            buttonEl.textContent = originalLabel;
+        }, 1000);
     }
 
     function loadEmbeddingInspector(eventId) {
@@ -1180,7 +1254,7 @@
                                 <span class="badge text-bg-light border">${escapeHtml(unit.model_key || 'model')}</span>
                                 <span class="badge text-bg-light border">${escapeHtml(unit.embedding_dim || '?')}d</span>
                                 <span class="embedding-id-pill" title="${escapeHtml(unit.embedding_id || '')}">${escapeHtml(formatEmbeddingId(unit.embedding_id || ''))}</span>
-                                <button class="btn btn-outline-secondary btn-sm embedding-copy" title="Copy embedding id" onclick="copyEmbeddingId('${escapeHtml(unit.embedding_id || '')}')">Copy</button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm embedding-copy" title="Copy embedding id" data-embedding-id="${escapeHtml(unit.embedding_id || '')}" onclick="copyEmbeddingId(event, this)">Copy</button>
                                 <div class="text-muted">${escapeHtml(formatEmbeddingTime(unit.embedding_created_at))}</div>
                               `
                             : '<span class="text-muted">queued / not generated</span>'}

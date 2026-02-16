@@ -17,7 +17,7 @@ use tokio::time::{sleep, Duration as TokioDuration};
 use zumblezay::app;
 use zumblezay::bedrock::{
     BedrockClientTrait, BedrockCompletionResponse, BedrockEmbeddingResponse,
-    BedrockUsage,
+    BedrockUsage, EmbeddingPurpose,
 };
 use zumblezay::transcripts;
 use zumblezay::AppState;
@@ -183,6 +183,7 @@ impl BedrockClientTrait for PlaywrightBedrockClient {
         _model_id: &str,
         text: &str,
         dimensions: i32,
+        _purpose: EmbeddingPurpose,
     ) -> Result<BedrockEmbeddingResponse> {
         let dim = usize::try_from(dimensions)
             .ok()
