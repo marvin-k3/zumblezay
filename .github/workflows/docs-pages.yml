@@ -1,0 +1,110 @@
+name: Docs Pages
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - feat/*
+      - feature/*
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mdBook
+        run: cargo install mdbook --locked
+
+      - name: Build mdBook
+        run: mdbook build docs
+
+      - name: Compute docs version path
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_NAME="${GITHUB_REF_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"
+          REF_SLUG="$(echo "${REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9._-]+#-#g; s#-+#-#g; s#(^-|-$)##g')"
+
+          if [[ "${REF_TYPE}" == "tag" ]]; then
+            VERSION_PATH="releases/${REF_SLUG}"
+            VERSION_LABEL="release ${REF_NAME}"
+          else
+            VERSION_PATH="branches/${REF_SLUG}"
+            VERSION_LABEL="branch ${REF_NAME}"
+          fi
+
+          echo "version_path=${VERSION_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "version_label=${VERSION_LABEL}" >> "${GITHUB_OUTPUT}"
+          echo "ref_slug=${REF_SLUG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage static site content
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "public/${{ steps.version.outputs.version_path }}"
+          cp -R docs/book/. "public/${{ steps.version.outputs.version_path }}/"
+
+          if [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "main" ]]; then
+            mkdir -p public/latest
+            cp -R docs/book/. public/latest/
+          fi
+
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Zumblezay Docs</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; line-height: 1.5; }
+              h1 { margin-bottom: 12px; }
+              ul { padding-left: 20px; }
+              code { background: #f2f2f2; padding: 2px 6px; border-radius: 6px; }
+            </style>
+          </head>
+          <body>
+            <h1>Zumblezay Documentation</h1>
+            <p>This site publishes mdBook builds per branch/release.</p>
+            <ul>
+              <li><a href="./latest/">latest</a> (updated from <code>main</code>)</li>
+              <li><a href="./branches/main/">branches/main</a></li>
+              <li><a href="./branches/dev/">branches/dev</a></li>
+              <li><a href="./releases/">releases/</a> (tagged versions under <code>v*</code>)</li>
+            </ul>
+            <p>Feature branch builds are published under <code>branches/&lt;branch-name&gt;</code>.</p>
+          </body>
+          </html>
+          HTML
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          keep_files: true
+

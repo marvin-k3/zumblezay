@@ -10,6 +10,10 @@ Zumblezay is an Axum-based service that collects camera events, transcripts, and
 
 - User/operator docs live in the mdBook under `docs/` (`book.toml` + `docs/src`). Serve locally with `mdbook serve docs --open` or build with `mdbook build docs` (install via `cargo install mdbook` if needed).
 - The mdBook covers getting started, API usage, data model, operations, testing, and troubleshooting. The AI Agent Guide stays as the contributor map.
+- GitHub Pages deployment publishes versioned docs from CI:
+  - `latest/` tracks `main`
+  - `branches/<branch-name>/` for branch builds (including `dev`, feature branches)
+  - `releases/<tag>/` for tags matching `v*`
 
 ## Quick start
 
