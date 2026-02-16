@@ -199,8 +199,9 @@ impl AppState {
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             openai_client,
-            bedrock_client: bedrock_client
-                .or_else(|| Some(create_bedrock_client(None))),
+            // Keep tests deterministic/offline by default; tests that need
+            // Bedrock behavior should inject a fake client explicitly.
+            bedrock_client,
             bedrock_region: None,
             runpod_api_key: None,
             transcription_service: "whisper-local".to_string(),

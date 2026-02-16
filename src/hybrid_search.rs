@@ -1,7 +1,8 @@
 use crate::bedrock::{BedrockClientTrait, BedrockUsage};
 use crate::bedrock_spend::{
     fetch_bedrock_pricing_from_aws, is_missing_pricing_error,
-    record_bedrock_spend, upsert_bedrock_pricing, SpendLogRequest,
+    record_bedrock_spend, upsert_bedrock_pricing, BedrockPricingRate,
+    SpendLogRequest,
 };
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -1629,24 +1630,45 @@ fn maybe_record_embedding_spend(
         Ok(_) => Ok(()),
         Err(error) if is_missing_pricing_error(&error) => {
             let aws_region = std::env::var("AWS_REGION").ok();
-            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
+            let fetched_rate = if tokio::runtime::Handle::try_current().is_ok()
             {
-                if let Ok(Some(rate)) =
-                    runtime.block_on(fetch_bedrock_pricing_from_aws(
+                let aws_region_for_thread = aws_region.clone();
+                std::thread::spawn(move || -> Option<BedrockPricingRate> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .ok()?;
+                    runtime
+                        .block_on(fetch_bedrock_pricing_from_aws(
+                            ACTIVE_PROVIDER_MODEL_ID,
+                            aws_region_for_thread.as_deref(),
+                        ))
+                        .ok()
+                        .flatten()
+                })
+                .join()
+                .ok()
+                .flatten()
+            } else if let Ok(runtime) =
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            {
+                runtime
+                    .block_on(fetch_bedrock_pricing_from_aws(
                         ACTIVE_PROVIDER_MODEL_ID,
                         aws_region.as_deref(),
                     ))
-                {
-                    upsert_bedrock_pricing(
-                        conn,
-                        ACTIVE_PROVIDER_MODEL_ID,
-                        rate,
-                    )?;
-                    record_bedrock_spend(conn, spend_request)?;
-                    return Ok(());
-                }
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            if let Some(rate) = fetched_rate {
+                upsert_bedrock_pricing(conn, ACTIVE_PROVIDER_MODEL_ID, rate)?;
+                record_bedrock_spend(conn, spend_request)?;
+                return Ok(());
             }
 
             warn!(
