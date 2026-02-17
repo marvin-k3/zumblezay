@@ -24,6 +24,14 @@
         padding: 0.75rem;
         border-bottom: 1px solid var(--bs-border-color);
     }
+    .chat-sidebar-header-controls {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .chat-history-toggle {
+        display: none;
+        white-space: nowrap;
+    }
     .chat-session-list {
         overflow-y: auto;
         padding: 0.5rem;
@@ -87,7 +95,13 @@
         padding: 0.75rem 0.9rem;
         border-radius: 14px;
         white-space: pre-wrap;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        word-break: break-word;
         border: 1px solid var(--bs-border-color);
+    }
+    .chat-bubble > :last-child {
+        margin-bottom: 0;
     }
     .chat-row.user .chat-bubble {
         background: var(--bs-primary);
@@ -106,10 +120,21 @@
     .tool-progress .tool-current {
         color: var(--bs-body-color);
         font-size: 0.95rem;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+    .tool-progress-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.4rem;
     }
     .tool-progress details summary {
         cursor: pointer;
         color: var(--bs-secondary-color);
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
     .tool-progress .tool-history-items {
         max-height: 180px;
@@ -120,6 +145,8 @@
     .tool-progress .tool-history-item {
         margin-bottom: 0.35rem;
         color: var(--bs-secondary-color);
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
     .evidence-wrap {
         margin-top: 0.75rem;
@@ -141,6 +168,11 @@
         color: var(--bs-secondary-color);
         margin-bottom: 0.35rem;
     }
+    .evidence-link {
+        width: 100%;
+        margin-top: 0.15rem;
+        font-weight: 600;
+    }
     .chat-footer {
         border-top: 1px solid var(--bs-border-color);
         padding: 0.75rem;
@@ -154,8 +186,81 @@
             grid-template-columns: 1fr;
         }
         .chat-sidebar {
-            min-height: 220px;
-            max-height: 280px;
+            min-height: 0;
+            max-height: none;
+        }
+        .chat-sidebar-header {
+            border-bottom: none;
+        }
+        .chat-history-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .chat-session-list {
+            display: none;
+            max-height: 230px;
+            border-top: 1px solid var(--bs-border-color);
+        }
+        .chat-sidebar.expanded .chat-sidebar-header {
+            border-bottom: 1px solid var(--bs-border-color);
+        }
+        .chat-sidebar.expanded .chat-session-list {
+            display: grid;
+        }
+        .chat-shell {
+            min-height: 0;
+            height: auto;
+        }
+        .chat-messages {
+            min-height: 50vh;
+        }
+        .chat-session-title {
+            white-space: normal;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+    }
+    @media (max-width: 576px) {
+        .chat-messages {
+            padding: 0.75rem;
+            min-height: 56vh;
+            padding-bottom: 6.5rem;
+        }
+        .chat-bubble {
+            max-width: 100%;
+            padding: 0.7rem 0.8rem;
+        }
+        .chat-footer {
+            padding: 0.65rem;
+            position: sticky;
+            bottom: 0;
+            z-index: 5;
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.18);
+        }
+        .chat-footer .input-group {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.5rem;
+        }
+        .chat-footer .input-group > .form-control,
+        .chat-footer .input-group > .btn {
+            width: 100%;
+            border-radius: 0.375rem !important;
+        }
+        .tool-progress-header {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        .tool-progress .badge {
+            font-size: 0.72rem;
+        }
+        .evidence-snippet {
+            font-size: 0.88rem;
+        }
+        .footer .text-muted {
+            display: none;
         }
     }
 </style>
@@ -165,7 +270,10 @@
 <div class="chat-layout">
     <aside class="chat-sidebar">
         <div class="chat-sidebar-header">
-            <button id="new-chat-button" class="btn btn-primary w-100" type="button">New chat</button>
+            <div class="chat-sidebar-header-controls">
+                <button id="new-chat-button" class="btn btn-primary flex-grow-1" type="button">New chat</button>
+                <button id="chat-history-toggle" class="btn btn-outline-secondary chat-history-toggle" type="button" aria-expanded="false">Chats</button>
+            </div>
         </div>
         <div id="chat-session-list" class="chat-session-list"></div>
     </aside>
@@ -198,6 +306,8 @@
     const sendButton = document.getElementById("send-button");
     const chatStatus = document.getElementById("chat-status");
     const newChatButton = document.getElementById("new-chat-button");
+    const chatHistoryToggle = document.getElementById("chat-history-toggle");
+    const chatSidebar = document.querySelector(".chat-sidebar");
 
     let activeRunId = null;
 
@@ -278,6 +388,7 @@
             link.href = item.jump_url || `/video/${item.event_id}`;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
+            link.className = "evidence-link btn btn-sm btn-outline-primary";
             link.textContent = "Open video at moment";
             card.appendChild(link);
 
@@ -300,7 +411,7 @@
         bubble.className = "chat-bubble tool-progress";
 
         const header = document.createElement("div");
-        header.className = "d-flex justify-content-between align-items-center mb-1";
+        header.className = "tool-progress-header";
 
         const title = document.createElement("span");
         title.className = "fw-semibold";
@@ -587,7 +698,31 @@
         window.location.href = `/investigate/${payload.chat_id}`;
     });
 
+    function setSidebarExpanded(expanded) {
+        if (!chatSidebar || !chatHistoryToggle) return;
+        chatSidebar.classList.toggle("expanded", expanded);
+        chatHistoryToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        chatHistoryToggle.textContent = expanded ? "Hide chats" : "Chats";
+    }
+
+    function setupSidebarForViewport() {
+        if (window.matchMedia("(max-width: 960px)").matches) {
+            setSidebarExpanded(false);
+        } else {
+            setSidebarExpanded(true);
+        }
+    }
+
+    if (chatHistoryToggle) {
+        chatHistoryToggle.addEventListener("click", () => {
+            const expanded = chatSidebar && chatSidebar.classList.contains("expanded");
+            setSidebarExpanded(!expanded);
+        });
+    }
+
     (async () => {
+        setupSidebarForViewport();
+        window.addEventListener("resize", setupSidebarForViewport);
         await loadSidebar();
         await loadThread();
         chatInput.focus();

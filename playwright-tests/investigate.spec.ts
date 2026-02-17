@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 async function waitForRunDone(request: Parameters<typeof test>[0]['request'], chatId: string, runId: string) {
   await expect
@@ -102,5 +104,39 @@ test.describe('Investigate Chat', () => {
 
     const sidebarLink = page.locator(`.chat-session-link[href="/investigate/${chatId}"]`).first();
     await expect(sidebarLink).toBeVisible();
+  });
+
+  test('captures mobile iPhone-style screenshot after search completes', async ({ browser }, testInfo) => {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+      userAgent:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+      deviceScaleFactor: 3,
+    });
+    const page = await context.newPage();
+
+    await page.goto('/investigate');
+    await expect(page).toHaveURL(/\/investigate\/chat_/);
+
+    const input = page.locator('#chat-input');
+    await input.fill('what happened with the package? include the detailed evidence and timeline');
+    await page.locator('#send-button').click();
+
+    await expect(page.locator('#chat-status')).toHaveText('Complete', { timeout: 30_000 });
+
+    const outputPath = testInfo.outputPath('investigate-mobile-after-search.png');
+    await page.screenshot({ path: outputPath, fullPage: true });
+
+    const copyTarget = path.resolve('test-results/investigate-mobile-after-search.png');
+    await testInfo.attach('investigate-mobile-after-search', {
+      path: outputPath,
+      contentType: 'image/png',
+    });
+    await context.close();
+
+    await fs.mkdir(path.dirname(copyTarget), { recursive: true });
+    await fs.copyFile(outputPath, copyTarget);
   });
 });
