@@ -200,6 +200,7 @@ struct ChatMessageView {
     id: i64,
     role: String,
     content: String,
+    evidence: Vec<Value>,
     run_id: Option<String>,
     created_at: i64,
 }
@@ -3273,18 +3274,25 @@ async fn get_chat_thread(
 
     let mut messages_stmt = conn
         .prepare(
-            "SELECT id, role, content, run_id, created_at
-             FROM chat_messages
-             WHERE session_id = ?1
-             ORDER BY id ASC",
+            "SELECT m.id, m.role, m.content, m.run_id, m.created_at, r.final_response_json
+             FROM chat_messages m
+             LEFT JOIN chat_runs r ON r.id = m.run_id
+             WHERE m.session_id = ?1
+             ORDER BY m.id ASC",
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let message_rows = messages_stmt
         .query_map(params![&chat_id], |row| {
+            let final_response_json: Option<String> = row.get(5)?;
+            let evidence = final_response_json
+                .as_deref()
+                .and_then(parse_evidence_from_final_response_json)
+                .unwrap_or_default();
             Ok(ChatMessageView {
                 id: row.get(0)?,
                 role: row.get(1)?,
                 content: row.get(2)?,
+                evidence,
                 run_id: row.get(3)?,
                 created_at: row.get(4)?,
             })
@@ -3312,6 +3320,14 @@ async fn get_chat_thread(
         messages,
         active_run,
     }))
+}
+
+fn parse_evidence_from_final_response_json(
+    final_response_json: &str,
+) -> Option<Vec<Value>> {
+    let parsed: Value = serde_json::from_str(final_response_json).ok()?;
+    let evidence = parsed.get("evidence")?.as_array()?.clone();
+    Some(evidence)
 }
 
 #[axum::debug_handler]

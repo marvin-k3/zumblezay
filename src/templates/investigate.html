@@ -550,6 +550,9 @@
                 const role = message.role === "user" ? "user" : "assistant";
                 const bubble = appendMessage(role, "");
                 setBubbleMarkdown(bubble, message.content || "");
+                if (role === "assistant") {
+                    appendEvidenceToBubble(bubble, message.evidence || []);
+                }
             }
         }
 

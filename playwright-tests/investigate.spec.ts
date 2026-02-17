@@ -56,6 +56,7 @@ test.describe('Investigate Chat', () => {
     await expect(page).toHaveURL(new RegExp(`/investigate/${chatId}$`));
     await expect(page.locator('.chat-row.user .chat-bubble')).toContainText('what happened with the package?');
     await expect(page.locator('.chat-row.assistant .chat-bubble').last()).toContainText('package');
+    await expect(page.locator('.chat-row.assistant .chat-bubble').last().locator('.evidence-card')).toHaveCount(1);
 
     const activeSidebarLink = page.locator('.chat-session-link.active');
     await expect(activeSidebarLink).toHaveAttribute('href', `/investigate/${chatId}`);
