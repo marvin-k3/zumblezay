@@ -473,6 +473,50 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
                 );
             "#,
         ),
+        M::up(
+            r#"
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_message_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                run_id TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                user_message_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                search_mode TEXT,
+                final_response_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                started_at INTEGER,
+                finished_at INTEGER,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at
+                ON chat_sessions(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id_id
+                ON chat_messages(session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_chat_runs_session_created
+                ON chat_runs(session_id, created_at DESC);
+            "#,
+        ),
     ]
 }
 
@@ -565,6 +609,9 @@ mod migration_tests {
         assert!(has_table(&conn, "unit_embeddings")?);
         assert!(has_table(&conn, "embedding_jobs")?);
         assert!(has_table(&conn, "search_config")?);
+        assert!(has_table(&conn, "chat_sessions")?);
+        assert!(has_table(&conn, "chat_messages")?);
+        assert!(has_table(&conn, "chat_runs")?);
         assert!(has_index(&conn, "idx_events_camera_start_end")?);
 
         Ok(())
@@ -594,6 +641,9 @@ mod migration_tests {
         assert!(has_table(&conn, "unit_embeddings")?);
         assert!(has_table(&conn, "embedding_jobs")?);
         assert!(has_table(&conn, "search_config")?);
+        assert!(has_table(&conn, "chat_sessions")?);
+        assert!(has_table(&conn, "chat_messages")?);
+        assert!(has_table(&conn, "chat_runs")?);
 
         Ok(())
     }

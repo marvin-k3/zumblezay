@@ -18,7 +18,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        Html, IntoResponse,
+        Html, IntoResponse, Redirect,
     },
     routing::{get, post},
     Json, Router,
@@ -45,7 +45,7 @@ use std::time::Duration;
 use tera::{Context as TeraContext, Tera};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::io::ReaderStream;
@@ -171,6 +171,78 @@ struct BedrockSpendResponse {
     by_model: Vec<BedrockSpendBreakdownRow>,
     recent_entries: Vec<BedrockSpendLedgerRow>,
 }
+
+#[derive(Debug, Deserialize)]
+struct CreateChatMessageRequest {
+    question: String,
+    #[serde(default)]
+    search_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateChatResponse {
+    chat_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ChatSessionSummary {
+    id: String,
+    title: String,
+    created_at: i64,
+    updated_at: i64,
+    last_message_at: Option<i64>,
+    active_run_id: Option<String>,
+    active_run_status: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ChatMessageView {
+    id: i64,
+    role: String,
+    content: String,
+    run_id: Option<String>,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ChatRunView {
+    id: String,
+    status: String,
+    error: Option<String>,
+    created_at: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatThreadResponse {
+    session: ChatSessionSummary,
+    messages: Vec<ChatMessageView>,
+    active_run: Option<ChatRunView>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateChatMessageAccepted {
+    run_id: String,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatRunStatusResponse {
+    run: ChatRunView,
+    final_response: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct RunStreamEvent {
+    event_type: String,
+    data: String,
+}
+
+type RunStreamHub = Mutex<HashMap<String, broadcast::Sender<RunStreamEvent>>>;
+static RUN_STREAM_HUB: OnceLock<RunStreamHub> = OnceLock::new();
+type RunEventLog = std::sync::Mutex<HashMap<String, Vec<RunStreamEvent>>>;
+static RUN_EVENT_LOG: OnceLock<RunEventLog> = OnceLock::new();
 
 #[derive(Debug)]
 struct DbAttacher {
@@ -2732,11 +2804,310 @@ async fn transcript_page(State(state): State<Arc<AppState>>) -> Html<String> {
     Html(rendered)
 }
 
+fn current_unix_ts() -> i64 {
+    Utc::now().timestamp()
+}
+
+fn create_entity_id(prefix: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        prefix,
+        Utc::now().timestamp_millis(),
+        rand::random::<u64>()
+    )
+}
+
+fn title_from_question(question: &str) -> String {
+    let trimmed = question.trim();
+    if trimmed.is_empty() {
+        return "New chat".to_string();
+    }
+    let mut chars = trimmed.chars();
+    let short: String = chars.by_ref().take(60).collect();
+    if chars.next().is_some() {
+        format!("{short}...")
+    } else {
+        short
+    }
+}
+
+fn run_stream_hub() -> &'static RunStreamHub {
+    RUN_STREAM_HUB.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn run_event_log() -> &'static RunEventLog {
+    RUN_EVENT_LOG.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn publish_run_event(
+    run_id: &str,
+    sender: &broadcast::Sender<RunStreamEvent>,
+    event_type: &str,
+    data: String,
+) {
+    let event = RunStreamEvent {
+        event_type: event_type.to_string(),
+        data,
+    };
+    {
+        let mut log = run_event_log()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let events = log.entry(run_id.to_string()).or_default();
+        events.push(event.clone());
+        if events.len() > 512 {
+            let to_drop = events.len().saturating_sub(512);
+            events.drain(0..to_drop);
+        }
+    }
+    let _ = sender.send(event);
+}
+
+async fn create_chat_session(
+    state: &Arc<AppState>,
+) -> Result<String, (StatusCode, String)> {
+    let chat_id = create_entity_id("chat");
+    let now = current_unix_ts();
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, created_at, updated_at, last_message_at)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![chat_id, "New chat", now, now],
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(chat_id)
+}
+
+fn load_chat_history_before(
+    conn: &Connection,
+    chat_id: &str,
+    before_message_id: i64,
+) -> Result<Vec<investigation::ChatMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content
+         FROM chat_messages
+         WHERE session_id = ?1
+           AND id < ?2
+           AND role IN ('user', 'assistant')
+         ORDER BY id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![chat_id, before_message_id], |row| {
+        Ok(investigation::ChatMessage {
+            role: row.get(0)?,
+            content: row.get(1)?,
+        })
+    })?;
+    let collected: Result<Vec<_>, _> = rows.collect();
+    Ok(collected?)
+}
+
+async fn run_chat_investigation(
+    state: Arc<AppState>,
+    chat_id: String,
+    run_id: String,
+    user_message_id: i64,
+    question: String,
+    search_mode: Option<String>,
+    sender: broadcast::Sender<RunStreamEvent>,
+) {
+    let now = current_unix_ts();
+    if let Ok(conn) = state.zumblezay_db.get() {
+        let _ = conn.execute(
+            "UPDATE chat_runs
+             SET status = 'running', started_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now, &run_id],
+        );
+    }
+    publish_run_event(&run_id, &sender, "status", "planning".to_string());
+
+    let history = match state.zumblezay_db.get() {
+        Ok(conn) => {
+            match load_chat_history_before(&conn, &chat_id, user_message_id) {
+                Ok(history) => history,
+                Err(error) => {
+                    let finished = current_unix_ts();
+                    let message =
+                        format!("failed to load chat history: {error}");
+                    let _ = conn.execute(
+                    "UPDATE chat_runs
+                     SET status = 'error', error = ?1, finished_at = ?2, updated_at = ?2
+                     WHERE id = ?3",
+                    params![&message, finished, &run_id],
+                );
+                    publish_run_event(&run_id, &sender, "error", message);
+                    return;
+                }
+            }
+        }
+        Err(error) => {
+            publish_run_event(&run_id, &sender, "error", error.to_string());
+            return;
+        }
+    };
+
+    let request = InvestigationRequest {
+        question,
+        chat_history: history,
+        search_mode,
+    };
+
+    let run_id_for_delta = run_id.clone();
+    let mut stream_delta = {
+        let sender = sender.clone();
+        move |delta: String| {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "delta": delta
+            }))
+            .unwrap_or_else(|_| "{\"delta\":\"\"}".to_string());
+            publish_run_event(
+                &run_id_for_delta,
+                &sender,
+                "answer_delta",
+                payload,
+            );
+        }
+    };
+    let run_id_for_search_plan = run_id.clone();
+    let mut stream_search_plan = {
+        let sender = sender.clone();
+        move |plan: investigation::SearchPlanEvent| {
+            let payload = serde_json::to_string(&plan).unwrap_or_else(|_| {
+                "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
+            });
+            publish_run_event(
+                &run_id_for_search_plan,
+                &sender,
+                "search_plan",
+                payload,
+            );
+        }
+    };
+    let run_id_for_tool_use = run_id.clone();
+    let mut stream_tool_use = {
+        let sender = sender.clone();
+        move |event: investigation::ToolUseEvent| {
+            let payload = serde_json::to_string(&event).unwrap_or_else(|_| {
+                "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
+            });
+            publish_run_event(
+                &run_id_for_tool_use,
+                &sender,
+                "tool_use",
+                payload,
+            );
+        }
+    };
+
+    match investigation::investigate_question_streaming(
+        &state,
+        request,
+        &mut stream_search_plan,
+        &mut stream_tool_use,
+        &mut stream_delta,
+    )
+    .await
+    {
+        Ok(response) => {
+            let finished = current_unix_ts();
+            let response_json = serde_json::to_string(&response)
+                .unwrap_or_else(|_| {
+                    "{\"error\":\"serialization\"}".to_string()
+                });
+
+            if let Ok(mut conn) = state.zumblezay_db.get() {
+                if let Ok(tx) = conn.transaction() {
+                    let _ = tx.execute(
+                        "INSERT INTO chat_messages (session_id, role, content, run_id, created_at)
+                         VALUES (?1, 'assistant', ?2, ?3, ?4)",
+                        params![&chat_id, &response.answer, &run_id, finished],
+                    );
+                    let _ = tx.execute(
+                        "UPDATE chat_runs
+                         SET status = 'done',
+                             final_response_json = ?1,
+                             error = NULL,
+                             finished_at = ?2,
+                             updated_at = ?2
+                         WHERE id = ?3",
+                        params![&response_json, finished, &run_id],
+                    );
+                    let _ = tx.execute(
+                        "UPDATE chat_sessions
+                         SET updated_at = ?1, last_message_at = ?1
+                         WHERE id = ?2",
+                        params![finished, &chat_id],
+                    );
+                    let _ = tx.commit();
+                }
+            }
+
+            publish_run_event(&run_id, &sender, "done", response_json);
+        }
+        Err(error) => {
+            let finished = current_unix_ts();
+            let error_message = error.to_string();
+            if let Ok(conn) = state.zumblezay_db.get() {
+                let _ = conn.execute(
+                    "UPDATE chat_runs
+                     SET status = 'error',
+                         error = ?1,
+                         finished_at = ?2,
+                         updated_at = ?2
+                     WHERE id = ?3",
+                    params![&error_message, finished, &run_id],
+                );
+            }
+            publish_run_event(&run_id, &sender, "error", error_message);
+        }
+    }
+
+    let mut hub = run_stream_hub().lock().await;
+    hub.remove(&run_id);
+    let mut log = run_event_log()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    log.remove(&run_id);
+}
+
 #[axum::debug_handler]
-async fn investigate_page() -> Html<String> {
+async fn investigate_page(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let chat_id = create_chat_session(&state).await?;
+    Ok(Redirect::to(&format!("/investigate/{chat_id}")))
+}
+
+#[axum::debug_handler]
+async fn investigate_chat_page(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM chat_sessions WHERE id = ?1",
+            params![&chat_id],
+            |_| Ok(1_i64),
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "chat not found".to_string()));
+    }
+
     let mut context = TeraContext::new();
     context.insert("build_info", &get_build_info());
     context.insert("request_path", &"/investigate");
+    context.insert("chat_id", &chat_id);
 
     let rendered = TEMPLATES
         .get()
@@ -2744,7 +3115,7 @@ async fn investigate_page() -> Html<String> {
         .render("investigate.html", &context)
         .unwrap_or_else(|e| format!("Template error: {}", e));
 
-    Html(rendered)
+    Ok(Html(rendered))
 }
 
 // Add a new API endpoint for transcripts with event IDs
@@ -2763,6 +3134,436 @@ async fn get_transcripts_json(
         "date": date,
         "transcripts": transcript_entries
     })))
+}
+
+#[axum::debug_handler]
+async fn create_chat(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CreateChatResponse>, (StatusCode, String)> {
+    let chat_id = create_chat_session(&state).await?;
+    Ok(Json(CreateChatResponse { chat_id }))
+}
+
+#[axum::debug_handler]
+async fn list_chats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ChatSessionSummary>>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, created_at, updated_at, last_message_at
+             FROM chat_sessions
+             ORDER BY updated_at DESC
+             LIMIT 100",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut summaries = Vec::new();
+    for row in rows {
+        let (id, title, created_at, updated_at, last_message_at) = row
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let active_run = conn
+            .query_row(
+                "SELECT id, status
+                 FROM chat_runs
+                 WHERE session_id = ?1
+                   AND status IN ('queued', 'running')
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![&id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let (active_run_id, active_run_status) = match active_run {
+            Some((run_id, run_status)) => (Some(run_id), Some(run_status)),
+            None => (None, None),
+        };
+
+        summaries.push(ChatSessionSummary {
+            id,
+            title,
+            created_at,
+            updated_at,
+            last_message_at,
+            active_run_id,
+            active_run_status,
+        });
+    }
+
+    Ok(Json(summaries))
+}
+
+#[axum::debug_handler]
+async fn get_chat_thread(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+) -> Result<Json<ChatThreadResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let session_row = conn
+        .query_row(
+            "SELECT id, title, created_at, updated_at, last_message_at
+             FROM chat_sessions
+             WHERE id = ?1",
+            params![&chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some((id, title, created_at, updated_at, last_message_at)) =
+        session_row
+    else {
+        return Err((StatusCode::NOT_FOUND, "chat not found".to_string()));
+    };
+
+    let active_run = conn
+        .query_row(
+            "SELECT id, status, error, created_at, started_at, finished_at
+             FROM chat_runs
+             WHERE session_id = ?1
+               AND status IN ('queued', 'running')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![&chat_id],
+            |row| {
+                Ok(ChatRunView {
+                    id: row.get(0)?,
+                    status: row.get(1)?,
+                    error: row.get(2)?,
+                    created_at: row.get(3)?,
+                    started_at: row.get(4)?,
+                    finished_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (active_run_id, active_run_status) = match &active_run {
+        Some(run) => (Some(run.id.clone()), Some(run.status.clone())),
+        None => (None, None),
+    };
+
+    let mut messages_stmt = conn
+        .prepare(
+            "SELECT id, role, content, run_id, created_at
+             FROM chat_messages
+             WHERE session_id = ?1
+             ORDER BY id ASC",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let message_rows = messages_stmt
+        .query_map(params![&chat_id], |row| {
+            Ok(ChatMessageView {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                run_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut messages = Vec::new();
+    for row in message_rows {
+        messages.push(
+            row.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?,
+        );
+    }
+
+    Ok(Json(ChatThreadResponse {
+        session: ChatSessionSummary {
+            id,
+            title,
+            created_at,
+            updated_at,
+            last_message_at,
+            active_run_id,
+            active_run_status,
+        },
+        messages,
+        active_run,
+    }))
+}
+
+#[axum::debug_handler]
+async fn create_chat_message(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+    Json(request): Json<CreateChatMessageRequest>,
+) -> Result<Json<CreateChatMessageAccepted>, (StatusCode, String)> {
+    if hybrid_search::SearchMode::parse(request.search_mode.as_deref())
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "search_mode must be one of: hybrid, bm25, vector".to_string(),
+        ));
+    }
+    let question = request.question.trim().to_string();
+    if question.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "question is required".to_string(),
+        ));
+    }
+
+    let now = current_unix_ts();
+    let run_id = create_entity_id("run");
+    let mut conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user_message_id = {
+        let tx = conn
+            .transaction()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM chat_sessions WHERE id = ?1",
+                params![&chat_id],
+                |_| Ok(1_i64),
+            )
+            .optional()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .is_some();
+        if !exists {
+            return Err((StatusCode::NOT_FOUND, "chat not found".to_string()));
+        }
+        tx.execute(
+            "INSERT INTO chat_messages (session_id, role, content, run_id, created_at)
+             VALUES (?1, 'user', ?2, NULL, ?3)",
+            params![&chat_id, &question, now],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let user_message_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO chat_runs (
+                id, session_id, user_message_id, status, error, search_mode,
+                final_response_json, created_at, updated_at, started_at, finished_at
+             ) VALUES (?1, ?2, ?3, 'queued', NULL, ?4, NULL, ?5, ?5, NULL, NULL)",
+            params![
+                &run_id,
+                &chat_id,
+                user_message_id,
+                request.search_mode.as_deref(),
+                now
+            ],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        tx.execute(
+            "UPDATE chat_sessions
+             SET title = CASE WHEN title = 'New chat' THEN ?1 ELSE title END,
+                 updated_at = ?2,
+                 last_message_at = ?2
+             WHERE id = ?3",
+            params![title_from_question(&question), now, &chat_id],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        tx.commit()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        user_message_id
+    };
+
+    let sender = {
+        let mut hub = run_stream_hub().lock().await;
+        hub.entry(run_id.clone())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(256);
+                tx
+            })
+            .clone()
+    };
+
+    tokio::spawn(run_chat_investigation(
+        state.clone(),
+        chat_id,
+        run_id.clone(),
+        user_message_id,
+        question,
+        request.search_mode,
+        sender,
+    ));
+
+    Ok(Json(CreateChatMessageAccepted {
+        run_id,
+        status: "queued",
+    }))
+}
+
+#[axum::debug_handler]
+async fn get_chat_run(
+    State(state): State<Arc<AppState>>,
+    Path((chat_id, run_id)): Path<(String, String)>,
+) -> Result<Json<ChatRunStatusResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let run_row = conn
+        .query_row(
+            "SELECT id, status, error, created_at, started_at, finished_at, final_response_json
+             FROM chat_runs
+             WHERE id = ?1 AND session_id = ?2",
+            params![&run_id, &chat_id],
+            |row| {
+                Ok((
+                    ChatRunView {
+                        id: row.get(0)?,
+                        status: row.get(1)?,
+                        error: row.get(2)?,
+                        created_at: row.get(3)?,
+                        started_at: row.get(4)?,
+                        finished_at: row.get(5)?,
+                    },
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some((run, final_response_json)) = run_row else {
+        return Err((StatusCode::NOT_FOUND, "run not found".to_string()));
+    };
+
+    let final_response = final_response_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+
+    Ok(Json(ChatRunStatusResponse {
+        run,
+        final_response,
+    }))
+}
+
+#[axum::debug_handler]
+async fn stream_chat_run(
+    State(state): State<Arc<AppState>>,
+    Path((chat_id, run_id)): Path<(String, String)>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let (tx, rx) = mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
+
+    let run_state = state.zumblezay_db.get().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT status, error, final_response_json
+                 FROM chat_runs
+                 WHERE id = ?1 AND session_id = ?2",
+            params![&run_id, &chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    });
+
+    match run_state {
+        None => {
+            let _ = tx.send(Ok(SseEvent::default()
+                .event("error")
+                .data("run not found")));
+        }
+        Some((status, error, final_response_json))
+            if status == "done" || status == "error" =>
+        {
+            if status == "done" {
+                if let Some(payload) = final_response_json {
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("done")
+                        .data(payload)));
+                } else {
+                    let _ = tx.send(Ok(SseEvent::default()
+                        .event("error")
+                        .data("run completed with no payload")));
+                }
+            } else {
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event("error")
+                    .data(error.unwrap_or_else(|| "run failed".to_string()))));
+            }
+        }
+        Some((_status, _error, _final_response_json)) => {
+            let run_id_for_task = run_id.clone();
+            tokio::spawn(async move {
+                let replay_events = {
+                    let log = run_event_log()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    log.get(&run_id_for_task).cloned().unwrap_or_default()
+                };
+                for event in replay_events {
+                    if tx
+                        .send(Ok(SseEvent::default()
+                            .event(&event.event_type)
+                            .data(event.data)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                let sender = {
+                    let hub = run_stream_hub().lock().await;
+                    hub.get(&run_id_for_task).cloned()
+                };
+
+                if let Some(sender) = sender {
+                    let mut receiver = sender.subscribe();
+                    while let Ok(event) = receiver.recv().await {
+                        if tx
+                            .send(Ok(SseEvent::default()
+                                .event(&event.event_type)
+                                .data(event.data)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    )
 }
 
 #[axum::debug_handler]
@@ -2882,13 +3683,7 @@ async fn investigate_videos_stream(
             }
         });
 
-        tokio::select! {
-            _ = tx.closed() => {
-                worker.abort();
-                let _ = worker.await;
-            }
-            _ = &mut worker => {}
-        }
+        let _ = (&mut worker).await;
     });
 
     Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
@@ -2928,6 +3723,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/summary", get(summary_page))
         .route("/transcript", get(transcript_page))
         .route("/investigate", get(investigate_page))
+        .route("/investigate/{chat_id}", get(investigate_chat_page))
         .route("/api/events", get(get_completed_events))
         .route("/api/event/{event_id}", get(get_event))
         .route(
@@ -2943,6 +3739,20 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/embeddings/backfill", post(start_embeddings_backfill))
         .route("/api/transcripts/csv/{date}", get(get_transcripts_csv))
         .route("/api/transcripts/json/{date}", get(get_transcripts_json))
+        .route("/api/chats", get(list_chats).post(create_chat))
+        .route("/api/chats/{chat_id}", get(get_chat_thread))
+        .route(
+            "/api/chats/{chat_id}/messages",
+            post(create_chat_message),
+        )
+        .route(
+            "/api/chats/{chat_id}/runs/{run_id}",
+            get(get_chat_run),
+        )
+        .route(
+            "/api/chats/{chat_id}/runs/{run_id}/stream",
+            get(stream_chat_run),
+        )
         .route("/api/investigate", post(investigate_videos))
         .route("/api/investigate/stream", post(investigate_videos_stream))
         .route(

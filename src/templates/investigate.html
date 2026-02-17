@@ -6,16 +6,62 @@
 
 {% block extra_head %}
 <style>
-    .chat-shell {
-        max-width: 920px;
-        margin: 0 auto;
+    .chat-layout {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        gap: 1rem;
+        min-height: calc(100vh - 240px);
+    }
+    .chat-sidebar {
         border: 1px solid var(--bs-border-color);
         border-radius: 12px;
         background: var(--bs-body-bg);
         display: flex;
         flex-direction: column;
-        height: calc(100vh - 240px);
+        overflow: hidden;
+    }
+    .chat-sidebar-header {
+        padding: 0.75rem;
+        border-bottom: 1px solid var(--bs-border-color);
+    }
+    .chat-session-list {
+        overflow-y: auto;
+        padding: 0.5rem;
+        display: grid;
+        gap: 0.4rem;
+    }
+    .chat-session-link {
+        display: block;
+        text-decoration: none;
+        color: inherit;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        padding: 0.55rem 0.65rem;
+        background: var(--bs-secondary-bg);
+    }
+    .chat-session-link.active {
+        border-color: var(--bs-primary);
+        background: rgba(13, 110, 253, 0.08);
+    }
+    .chat-session-title {
+        font-size: 0.93rem;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .chat-session-meta {
+        font-size: 0.78rem;
+        color: var(--bs-secondary-color);
+    }
+    .chat-shell {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 12px;
+        background: var(--bs-body-bg);
+        display: flex;
+        flex-direction: column;
         min-height: 520px;
+        height: calc(100vh - 240px);
     }
     .chat-messages {
         flex: 1;
@@ -33,6 +79,9 @@
     .chat-row.assistant {
         justify-content: flex-start;
     }
+    .chat-row.system {
+        justify-content: center;
+    }
     .chat-bubble {
         max-width: min(760px, 88%);
         padding: 0.75rem 0.9rem;
@@ -44,22 +93,15 @@
         background: var(--bs-primary);
         color: #fff;
         border-color: var(--bs-primary);
-        border-bottom-right-radius: 4px;
     }
     .chat-row.assistant .chat-bubble {
         background: var(--bs-body-bg);
-        color: var(--bs-body-color);
-        border-bottom-left-radius: 4px;
-    }
-    .chat-row.system {
-        justify-content: center;
     }
     .chat-row.system .chat-bubble {
         max-width: min(820px, 95%);
         background: var(--bs-tertiary-bg);
         color: var(--bs-secondary-color);
         font-size: 0.9rem;
-        border-radius: 10px;
     }
     .tool-progress .tool-current {
         color: var(--bs-body-color);
@@ -78,20 +120,6 @@
     .tool-progress .tool-history-item {
         margin-bottom: 0.35rem;
         color: var(--bs-secondary-color);
-    }
-    .chat-bubble p:last-child {
-        margin-bottom: 0;
-    }
-    .chat-bubble pre {
-        background: rgba(0, 0, 0, 0.08);
-        border: 1px solid var(--bs-border-color);
-        border-radius: 8px;
-        padding: 0.6rem;
-    }
-    .chat-bubble code {
-        background: rgba(0, 0, 0, 0.08);
-        padding: 0.05rem 0.25rem;
-        border-radius: 4px;
     }
     .evidence-wrap {
         margin-top: 0.75rem;
@@ -121,24 +149,38 @@
     .chat-status {
         min-height: 1.1rem;
     }
+    @media (max-width: 960px) {
+        .chat-layout {
+            grid-template-columns: 1fr;
+        }
+        .chat-sidebar {
+            min-height: 220px;
+            max-height: 280px;
+        }
+    }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="chat-shell">
-    <div id="chat-messages" class="chat-messages">
-        <div class="chat-row assistant">
-            <div class="chat-bubble">Ask about events and I will answer with matching video moments you can open directly.</div>
+<div class="chat-layout">
+    <aside class="chat-sidebar">
+        <div class="chat-sidebar-header">
+            <button id="new-chat-button" class="btn btn-primary w-100" type="button">New chat</button>
         </div>
-    </div>
-    <div class="chat-footer">
-        <form id="chat-form">
-            <div class="input-group">
-                <input id="chat-input" type="text" class="form-control" placeholder="Ask about your videos..." required>
-                <button id="send-button" class="btn btn-primary" type="submit">Send</button>
-            </div>
-        </form>
-        <div id="chat-status" class="chat-status small text-muted mt-2"></div>
+        <div id="chat-session-list" class="chat-session-list"></div>
+    </aside>
+
+    <div class="chat-shell">
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-footer">
+            <form id="chat-form">
+                <div class="input-group">
+                    <input id="chat-input" type="text" class="form-control" placeholder="Ask about your videos..." required>
+                    <button id="send-button" class="btn btn-primary" type="submit">Send</button>
+                </div>
+            </form>
+            <div id="chat-status" class="chat-status small text-muted mt-2"></div>
+        </div>
     </div>
 </div>
 {% endblock %}
@@ -148,29 +190,19 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 <script>
 (() => {
+    const currentChatId = "{{ chat_id | default(value='') }}";
     const chatMessages = document.getElementById("chat-messages");
+    const chatSessionList = document.getElementById("chat-session-list");
     const chatForm = document.getElementById("chat-form");
     const chatInput = document.getElementById("chat-input");
     const sendButton = document.getElementById("send-button");
     const chatStatus = document.getElementById("chat-status");
-    const conversation = [];
+    const newChatButton = document.getElementById("new-chat-button");
+
+    let activeRunId = null;
 
     function scrollToBottom() {
         chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    function appendMessage(role, text = "") {
-        const row = document.createElement("div");
-        row.className = `chat-row ${role}`;
-
-        const bubble = document.createElement("div");
-        bubble.className = "chat-bubble";
-        bubble.textContent = text;
-
-        row.appendChild(bubble);
-        chatMessages.appendChild(row);
-        scrollToBottom();
-        return bubble;
     }
 
     function escapeHtml(text) {
@@ -196,8 +228,21 @@
         return escapeHtml(markdownText || "").replaceAll("\n", "<br>");
     }
 
+    function appendMessage(role, text = "") {
+        const row = document.createElement("div");
+        row.className = `chat-row ${role}`;
+
+        const bubble = document.createElement("div");
+        bubble.className = "chat-bubble";
+        bubble.textContent = text;
+
+        row.appendChild(bubble);
+        chatMessages.appendChild(row);
+        scrollToBottom();
+        return bubble;
+    }
+
     function setBubbleMarkdown(bubble, markdownText) {
-        bubble.dataset.rawText = markdownText;
         bubble.innerHTML = renderMarkdown(markdownText);
         scrollToBottom();
     }
@@ -241,6 +286,10 @@
 
         bubble.appendChild(wrap);
         scrollToBottom();
+    }
+
+    function updateStatus(text) {
+        chatStatus.textContent = text || "";
     }
 
     function createProgressTracker() {
@@ -337,21 +386,164 @@
         return `transcript_search plan: ${parts.join(" | ")}`;
     }
 
-    function updateStatus(text) {
-        chatStatus.textContent = text || "";
+    function formatRelative(unixSeconds) {
+        if (!unixSeconds) return "";
+        const d = new Date(unixSeconds * 1000);
+        return d.toLocaleString();
     }
 
-    function parseSseBlock(block) {
-        let eventType = "message";
-        const dataLines = [];
-        for (const line of block.split("\n")) {
-            if (line.startsWith("event:")) {
-                eventType = line.slice(6).trim();
-            } else if (line.startsWith("data:")) {
-                dataLines.push(line.slice(5));
+    async function loadSidebar() {
+        const response = await fetch("/api/chats");
+        if (!response.ok) return;
+        const sessions = await response.json();
+        chatSessionList.innerHTML = "";
+
+        for (const session of sessions) {
+            const link = document.createElement("a");
+            link.className = "chat-session-link";
+            if (session.id === currentChatId) {
+                link.classList.add("active");
+            }
+            link.href = `/investigate/${session.id}`;
+
+            const title = document.createElement("div");
+            title.className = "chat-session-title";
+            title.textContent = session.title || "New chat";
+
+            const meta = document.createElement("div");
+            meta.className = "chat-session-meta";
+            const updated = formatRelative(session.updated_at);
+            const running = session.active_run_status ? ` • ${session.active_run_status}` : "";
+            meta.textContent = `${updated}${running}`;
+
+            link.appendChild(title);
+            link.appendChild(meta);
+            chatSessionList.appendChild(link);
+        }
+    }
+
+    async function loadThread() {
+        const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}`);
+        if (!response.ok) {
+            updateStatus("Failed to load chat");
+            return;
+        }
+
+        const thread = await response.json();
+        chatMessages.innerHTML = "";
+
+        if (!Array.isArray(thread.messages) || thread.messages.length === 0) {
+            appendMessage("assistant", "Ask about events and I will answer with matching video moments you can open directly.");
+        } else {
+            for (const message of thread.messages) {
+                const role = message.role === "user" ? "user" : "assistant";
+                const bubble = appendMessage(role, "");
+                setBubbleMarkdown(bubble, message.content || "");
             }
         }
-        return { eventType, data: dataLines.join("\n") };
+
+        if (thread.active_run && thread.active_run.id) {
+            activeRunId = thread.active_run.id;
+            startRunStream(activeRunId);
+        }
+        scrollToBottom();
+    }
+
+    async function startRunStream(runId, assistantBubble) {
+        updateStatus("Working...");
+        const progressTracker = createProgressTracker();
+        const bubble = assistantBubble || appendMessage("assistant", "");
+        let assistantText = "";
+
+        const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/runs/${encodeURIComponent(runId)}/stream`);
+        if (!response.ok || !response.body) {
+            updateStatus("Failed to stream response");
+            progressTracker.fail("Failed to connect stream");
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            let splitIndex;
+            while ((splitIndex = buffer.indexOf("\n\n")) !== -1) {
+                const block = buffer.slice(0, splitIndex);
+                buffer = buffer.slice(splitIndex + 2);
+                if (!block.trim()) continue;
+
+                let eventType = "message";
+                const dataLines = [];
+                for (const line of block.split("\n")) {
+                    if (line.startsWith("event:")) {
+                        eventType = line.slice(6).trim();
+                    } else if (line.startsWith("data:")) {
+                        dataLines.push(line.slice(5));
+                    }
+                }
+                const data = dataLines.join("\n");
+
+                if (eventType === "status") {
+                    updateStatus(data || "Working...");
+                    if (data) {
+                        progressTracker.update(`status: ${data}`);
+                    }
+                } else if (eventType === "search_plan") {
+                    try {
+                        const plan = JSON.parse(data);
+                        progressTracker.update(formatSearchPlan(plan));
+                    } catch (_e) {
+                        // Ignore malformed payloads.
+                    }
+                } else if (eventType === "tool_use") {
+                    try {
+                        const event = JSON.parse(data);
+                        const name = event && event.tool_name ? event.tool_name : "tool";
+                        const stage = event && event.stage ? event.stage : "update";
+                        const message = event && event.message ? event.message : "";
+                        progressTracker.update(`[${name}] ${stage}: ${message}`);
+                    } catch (_e) {
+                        // Ignore malformed payloads.
+                    }
+                } else if (eventType === "answer_delta") {
+                    try {
+                        const payload = JSON.parse(data);
+                        assistantText += payload.delta || "";
+                    } catch (_e) {
+                        assistantText += data;
+                    }
+                    setBubbleMarkdown(bubble, assistantText);
+                } else if (eventType === "done") {
+                    let donePayload = null;
+                    try {
+                        donePayload = JSON.parse(data);
+                    } catch (_e) {
+                        donePayload = { answer: data, evidence: [] };
+                    }
+                    if (donePayload && typeof donePayload.answer === "string") {
+                        assistantText = donePayload.answer;
+                        setBubbleMarkdown(bubble, assistantText);
+                        appendEvidenceToBubble(bubble, donePayload.evidence || []);
+                    }
+                    updateStatus("Complete");
+                    progressTracker.complete("Answer ready");
+                    await loadSidebar();
+                    return;
+                } else if (eventType === "error") {
+                    const errorText = data || "Run failed";
+                    setBubbleMarkdown(bubble, `Error: ${errorText}`);
+                    updateStatus("Failed");
+                    progressTracker.fail(`Error: ${errorText}`);
+                    await loadSidebar();
+                    return;
+                }
+            }
+        }
     }
 
     chatForm.addEventListener("submit", async (event) => {
@@ -360,112 +552,46 @@
         if (!question) return;
 
         appendMessage("user", question);
-        conversation.push({ role: "user", content: question });
         chatInput.value = "";
         sendButton.disabled = true;
-        updateStatus("Working...");
-
-        const progressTracker = createProgressTracker();
-        const assistantBubble = appendMessage("assistant", "");
-        let assistantText = "";
-        let donePayload = null;
 
         try {
-            const response = await fetch("/api/investigate/stream", {
+            const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/messages`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    question,
-                    chat_history: conversation
-                })
+                body: JSON.stringify({ question })
             });
-
-            if (!response.ok || !response.body) {
+            if (!response.ok) {
                 const text = await response.text();
                 throw new Error(text || `HTTP ${response.status}`);
             }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-
-                let splitIndex;
-                while ((splitIndex = buffer.indexOf("\n\n")) !== -1) {
-                    const block = buffer.slice(0, splitIndex);
-                    buffer = buffer.slice(splitIndex + 2);
-                    if (!block.trim()) continue;
-
-                    const parsed = parseSseBlock(block);
-                    if (parsed.eventType === "status") {
-                        updateStatus(parsed.data);
-                        if (parsed.data) {
-                            progressTracker.update(`status: ${parsed.data}`);
-                        }
-                    } else if (parsed.eventType === "search_plan") {
-                        try {
-                            const plan = JSON.parse(parsed.data);
-                            progressTracker.update(formatSearchPlan(plan));
-                        } catch (_e) {
-                            // Ignore malformed status payloads.
-                        }
-                    } else if (parsed.eventType === "tool_use") {
-                        try {
-                            const event = JSON.parse(parsed.data);
-                            const name = event && event.tool_name ? event.tool_name : "tool";
-                            const stage = event && event.stage ? event.stage : "update";
-                            const message = event && event.message ? event.message : "";
-                            progressTracker.update(`[${name}] ${stage}: ${message}`);
-                        } catch (_e) {
-                            // Ignore malformed tool payloads.
-                        }
-                    } else if (parsed.eventType === "answer_delta") {
-                        let delta = parsed.data;
-                        try {
-                            const payload = JSON.parse(parsed.data);
-                            if (payload && typeof payload.delta === "string") {
-                                delta = payload.delta;
-                            }
-                        } catch (_e) {
-                            // Fallback for older/non-JSON delta events.
-                        }
-                        assistantText += delta;
-                        setBubbleMarkdown(assistantBubble, assistantText);
-                    } else if (parsed.eventType === "done") {
-                        donePayload = JSON.parse(parsed.data);
-                    } else if (parsed.eventType === "error") {
-                        throw new Error(parsed.data || "Stream failed");
-                    }
-                }
-            }
-
-            if (donePayload) {
-                if (typeof donePayload.answer === "string" && donePayload.answer.length > 0) {
-                    assistantText = donePayload.answer;
-                    setBubbleMarkdown(assistantBubble, assistantText);
-                    conversation.push({ role: "assistant", content: donePayload.answer });
-                }
-                appendEvidenceToBubble(assistantBubble, donePayload.evidence || []);
-                updateStatus("Complete");
-                progressTracker.complete("Answer ready");
-            } else {
-                updateStatus("No response payload returned");
-                progressTracker.fail("No final response payload returned");
-            }
+            const payload = await response.json();
+            activeRunId = payload.run_id;
+            const sidebarRefresh = loadSidebar();
+            await startRunStream(payload.run_id);
+            await sidebarRefresh;
         } catch (error) {
-            assistantText = `Error: ${error.message}`;
-            setBubbleMarkdown(assistantBubble, assistantText);
+            const bubble = appendMessage("assistant", "");
+            setBubbleMarkdown(bubble, `Error: ${error.message}`);
             updateStatus("Failed");
-            progressTracker.fail(`Error: ${error.message}`);
         } finally {
             sendButton.disabled = false;
             chatInput.focus();
         }
     });
+
+    newChatButton.addEventListener("click", async () => {
+        const response = await fetch("/api/chats", { method: "POST" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        window.location.href = `/investigate/${payload.chat_id}`;
+    });
+
+    (async () => {
+        await loadSidebar();
+        await loadThread();
+        chatInput.focus();
+    })();
 })();
 </script>
 {% endblock %}
