@@ -3354,60 +3354,113 @@ async fn create_chat_message(
 
     let now = current_unix_ts();
     let run_id = create_entity_id("run");
-    let mut conn = state
-        .zumblezay_db
-        .get()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let user_message_id = {
-        let tx = conn
-            .transaction()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let exists = tx
-            .query_row(
-                "SELECT 1 FROM chat_sessions WHERE id = ?1",
-                params![&chat_id],
-                |_| Ok(1_i64),
-            )
-            .optional()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .is_some();
-        if !exists {
-            return Err((StatusCode::NOT_FOUND, "chat not found".to_string()));
+    const CHAT_WRITE_ATTEMPTS: u32 = 3;
+    let mut user_message_id = None;
+    let mut last_locked_error = None;
+    for attempt in 1..=CHAT_WRITE_ATTEMPTS {
+        enum AttemptOutcome {
+            Success(i64),
+            Retry(String),
+            Fatal((StatusCode, String)),
         }
-        tx.execute(
-            "INSERT INTO chat_messages (session_id, role, content, run_id, created_at)
-             VALUES (?1, 'user', ?2, NULL, ?3)",
-            params![&chat_id, &question, now],
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let user_message_id = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO chat_runs (
-                id, session_id, user_message_id, status, error, search_mode,
-                final_response_json, created_at, updated_at, started_at, finished_at
-             ) VALUES (?1, ?2, ?3, 'queued', NULL, ?4, NULL, ?5, ?5, NULL, NULL)",
-            params![
-                &run_id,
-                &chat_id,
-                user_message_id,
-                request.search_mode.as_deref(),
-                now
-            ],
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        tx.execute(
-            "UPDATE chat_sessions
-             SET title = CASE WHEN title = 'New chat' THEN ?1 ELSE title END,
-                 updated_at = ?2,
-                 last_message_at = ?2
-             WHERE id = ?3",
-            params![title_from_question(&question), now, &chat_id],
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        tx.commit()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        user_message_id
+
+        let attempt_outcome = {
+            let mut conn = state.zumblezay_db.get().map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?;
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM chat_sessions WHERE id = ?1",
+                    params![&chat_id],
+                    |_| Ok(1_i64),
+                )
+                .optional()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .is_some();
+            if !exists {
+                AttemptOutcome::Fatal((
+                    StatusCode::NOT_FOUND,
+                    "chat not found".to_string(),
+                ))
+            } else {
+                let write_result = (|| -> Result<i64, rusqlite::Error> {
+                    tx.execute(
+                        "INSERT INTO chat_messages (session_id, role, content, run_id, created_at)
+                         VALUES (?1, 'user', ?2, NULL, ?3)",
+                        params![&chat_id, &question, now],
+                    )?;
+                    let inserted_message_id = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO chat_runs (
+                            id, session_id, user_message_id, status, error, search_mode,
+                            final_response_json, created_at, updated_at, started_at, finished_at
+                         ) VALUES (?1, ?2, ?3, 'queued', NULL, ?4, NULL, ?5, ?5, NULL, NULL)",
+                        params![
+                            &run_id,
+                            &chat_id,
+                            inserted_message_id,
+                            request.search_mode.as_deref(),
+                            now
+                        ],
+                    )?;
+                    tx.execute(
+                        "UPDATE chat_sessions
+                         SET title = CASE WHEN title = 'New chat' THEN ?1 ELSE title END,
+                             updated_at = ?2,
+                             last_message_at = ?2
+                         WHERE id = ?3",
+                        params![title_from_question(&question), now, &chat_id],
+                    )?;
+                    tx.commit()?;
+                    Ok(inserted_message_id)
+                })();
+
+                match write_result {
+                    Ok(inserted_message_id) => {
+                        AttemptOutcome::Success(inserted_message_id)
+                    }
+                    Err(error) => {
+                        let error_text = error.to_string();
+                        if error_text.contains("database is locked")
+                            && attempt < CHAT_WRITE_ATTEMPTS
+                        {
+                            AttemptOutcome::Retry(error_text)
+                        } else {
+                            AttemptOutcome::Fatal((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                error_text,
+                            ))
+                        }
+                    }
+                }
+            }
+        };
+
+        match attempt_outcome {
+            AttemptOutcome::Success(inserted_message_id) => {
+                user_message_id = Some(inserted_message_id);
+                break;
+            }
+            AttemptOutcome::Retry(error_text) => {
+                last_locked_error = Some(error_text);
+                time::sleep(Duration::from_millis(75 * u64::from(attempt)))
+                    .await;
+            }
+            AttemptOutcome::Fatal(error) => return Err(error),
+        }
+    }
+    let user_message_id = match user_message_id {
+        Some(id) => id,
+        None => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                last_locked_error
+                    .unwrap_or_else(|| "database write failed".to_string()),
+            ));
+        }
     };
 
     let sender = {

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -137,6 +138,20 @@ impl AppState {
         openai_client: Option<Arc<dyn OpenAIClientTrait>>,
         bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
     ) -> Self {
+        #[derive(Debug, Default)]
+        struct TestBusyTimeout;
+        impl r2d2::CustomizeConnection<Connection, rusqlite::Error>
+            for TestBusyTimeout
+        {
+            fn on_acquire(
+                &self,
+                conn: &mut Connection,
+            ) -> Result<(), rusqlite::Error> {
+                conn.busy_timeout(Duration::from_secs(10))?;
+                Ok(())
+            }
+        }
+
         // Create temporary files for SQLite databases
         let temp_events_file = tempfile::NamedTempFile::new()
             .expect("Failed to create temporary events database file");
@@ -164,16 +179,22 @@ impl AppState {
 
         // Create connection managers with the temp file paths
         let events_manager = SqliteConnectionManager::file(&events_path);
-        let events_pool =
-            Pool::new(events_manager).expect("Failed to create events pool");
+        let events_pool = Pool::builder()
+            .connection_customizer(Box::new(TestBusyTimeout))
+            .build(events_manager)
+            .expect("Failed to create events pool");
 
         let zumblezay_manager = SqliteConnectionManager::file(&zumblezay_path);
-        let zumblezay_pool = Pool::new(zumblezay_manager)
+        let zumblezay_pool = Pool::builder()
+            .connection_customizer(Box::new(TestBusyTimeout))
+            .build(zumblezay_manager)
             .expect("Failed to create zumblezay pool");
 
         let cache_manager = SqliteConnectionManager::file(&cache_path);
-        let cache_pool =
-            Pool::new(cache_manager).expect("Failed to create cache pool");
+        let cache_pool = Pool::builder()
+            .connection_customizer(Box::new(TestBusyTimeout))
+            .build(cache_manager)
+            .expect("Failed to create cache pool");
 
         let mut zumblezay_conn =
             zumblezay_pool.get().expect("Failed to get connection");
