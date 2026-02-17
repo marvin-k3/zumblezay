@@ -70,6 +70,27 @@ The Playwright config spins up `cargo run --bin playwright_server`, which seeds 
 
 If a test fails you can rerun it in headed mode with `npm run test:ui:headed` and inspect the captured trace via `npx playwright show-trace <path-to-trace.zip>`.
 
+## Git pre-commit hook
+
+This repo includes a pre-commit hook at `.githooks/pre-commit` that runs:
+
+- `cargo test --lib`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `npm run test:ui`
+
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+You can bypass it for an emergency commit with:
+
+```bash
+SKIP_PRECOMMIT_CHECKS=1 git commit -m "..."
+```
+
 ## Manually seeding data
 
 When you run the service locally you can seed the SQLite databases with the same shape the tests expect:

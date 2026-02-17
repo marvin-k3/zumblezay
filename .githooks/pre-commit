@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${SKIP_PRECOMMIT_CHECKS:-0}" == "1" ]]; then
+  echo "Skipping pre-commit checks because SKIP_PRECOMMIT_CHECKS=1"
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo is required but was not found in PATH" >&2
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "pre-commit: npm is required but was not found in PATH" >&2
+  exit 1
+fi
+
+echo "pre-commit: running cargo unit tests"
+cargo test --lib
+
+echo "pre-commit: running clippy"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-commit: running Playwright tests"
+npm run test:ui
+
+echo "pre-commit: all checks passed"

@@ -2004,7 +2004,12 @@ mod tests {
         let mut conn = Connection::open_in_memory()?;
         init_zumblezay_db(&mut conn)?;
 
-        let raw = sample_transcript_json();
+        let raw = serde_json::json!({
+            "text": "first version",
+            "segments": [
+                {"start": 0.0, "end": 5.0, "text": "first version"}
+            ]
+        });
         index_transcript_units_for_event(&conn, "evt-emb", &raw, 0.0)?;
         process_pending_embedding_jobs(&conn, 100)?;
 
@@ -2019,9 +2024,9 @@ mod tests {
             &conn,
             "evt-emb",
             &serde_json::json!({
-                "text": "completely different",
+                "text": "second version",
                 "segments": [
-                    {"start": 0.0, "end": 5.0, "text": "completely different"}
+                    {"start": 0.0, "end": 5.0, "text": "second version"}
                 ]
             }),
             0.0,
@@ -2034,6 +2039,12 @@ mod tests {
             |row| row.get(0),
         )?;
         assert!(second_count > first_count);
+        let full_clip_versions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM unit_embeddings WHERE unit_id = ?",
+            params!["evt-emb:full_clip"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(full_clip_versions, 2);
 
         Ok(())
     }
