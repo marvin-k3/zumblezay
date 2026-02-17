@@ -516,6 +516,60 @@
         return d.toLocaleString();
     }
 
+    function decodeJsonStringPrefix(source, startIndex) {
+        let decoded = "";
+        let i = startIndex;
+        while (i < source.length) {
+            const ch = source[i];
+            if (ch === "\"") {
+                return decoded;
+            }
+            if (ch !== "\\") {
+                decoded += ch;
+                i += 1;
+                continue;
+            }
+
+            i += 1;
+            if (i >= source.length) break;
+            const escaped = source[i];
+            if (escaped === "n") decoded += "\n";
+            else if (escaped === "r") decoded += "\r";
+            else if (escaped === "t") decoded += "\t";
+            else if (escaped === "b") decoded += "\b";
+            else if (escaped === "f") decoded += "\f";
+            else if (escaped === "\"" || escaped === "\\" || escaped === "/") decoded += escaped;
+            else if (escaped === "u") {
+                const hex = source.slice(i + 1, i + 5);
+                if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                    decoded += String.fromCharCode(parseInt(hex, 16));
+                    i += 4;
+                } else {
+                    break;
+                }
+            } else {
+                decoded += escaped;
+            }
+            i += 1;
+        }
+        return decoded;
+    }
+
+    function extractAnswerTextFromPartialJson(rawText) {
+        const keyIndex = rawText.indexOf("\"answer\"");
+        if (keyIndex === -1) return null;
+
+        let cursor = keyIndex + "\"answer\"".length;
+        while (cursor < rawText.length && /\s/.test(rawText[cursor])) cursor += 1;
+        if (rawText[cursor] !== ":") return null;
+        cursor += 1;
+        while (cursor < rawText.length && /\s/.test(rawText[cursor])) cursor += 1;
+        if (rawText[cursor] !== "\"") return null;
+        cursor += 1;
+
+        return decodeJsonStringPrefix(rawText, cursor);
+    }
+
     async function loadSidebar() {
         const response = await fetch("/api/chats");
         if (!response.ok) return;
@@ -581,6 +635,7 @@
         const progressTracker = createProgressTracker();
         const bubble = assistantBubble || appendMessage("assistant", "");
         let assistantText = "";
+        let assistantRawJson = "";
 
         const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/runs/${encodeURIComponent(runId)}/stream`);
         if (!response.ok || !response.body) {
@@ -640,10 +695,12 @@
                 } else if (eventType === "answer_delta") {
                     try {
                         const payload = JSON.parse(data);
-                        assistantText += payload.delta || "";
+                        assistantRawJson += payload.delta || "";
                     } catch (_e) {
-                        assistantText += data;
+                        assistantRawJson += data;
                     }
+                    const extractedText = extractAnswerTextFromPartialJson(assistantRawJson);
+                    assistantText = extractedText !== null ? extractedText : assistantRawJson;
                     setBubbleMarkdown(bubble, assistantText);
                 } else if (eventType === "done") {
                     let donePayload = null;
