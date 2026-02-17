@@ -286,8 +286,71 @@
         padding: 0.75rem;
         background: var(--bs-body-bg);
     }
+    .chat-input {
+        resize: none;
+        min-height: 2.5rem;
+        max-height: 9rem;
+        line-height: 1.35;
+    }
+    .chat-input-group {
+        align-items: flex-end;
+        gap: 0.5rem;
+    }
+    .chat-input-actions {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+    }
+    .chat-message-actions {
+        display: flex;
+        gap: 0.35rem;
+        margin-top: 0.3rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        opacity: 0;
+        transform: translateY(-2px);
+        pointer-events: none;
+        transition: opacity 0.14s ease, transform 0.14s ease;
+    }
+    .chat-row.assistant:hover .chat-message-actions,
+    .chat-row.assistant:focus-within .chat-message-actions,
+    .chat-row.assistant .chat-message-actions.persist {
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: auto;
+    }
+    .chat-message-actions .btn.icon {
+        width: 1.95rem;
+        height: 1.95rem;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        --bs-btn-font-size: 0.88rem;
+        --bs-btn-border-radius: 999px;
+        --bs-btn-line-height: 1;
+    }
     .chat-status {
         min-height: 1.1rem;
+    }
+    .evidence-reference-links {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.45rem;
+    }
+    .evidence-card.highlight {
+        border-color: var(--bs-primary);
+        box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.22);
+    }
+    .evidence-ref-label {
+        font-size: 0.78rem;
+        color: var(--bs-secondary-color);
+    }
+    .evidence-citation-link {
+        text-decoration: none;
+        font-weight: 600;
+        margin: 0 0.05rem;
     }
     @media (max-width: 960px) {
         .chat-layout {
@@ -346,12 +409,20 @@
             box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.18);
         }
         .chat-footer .input-group {
+            display: block;
+        }
+        .chat-input-group {
             display: grid;
             grid-template-columns: 1fr;
             gap: 0.5rem;
         }
-        .chat-footer .input-group > .form-control,
-        .chat-footer .input-group > .btn {
+        .chat-input-actions {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.5rem;
+        }
+        .chat-input-actions > .btn,
+        .chat-footer .input-group > .form-control {
             width: 100%;
             border-radius: 0.375rem !important;
         }
@@ -361,6 +432,11 @@
         }
         .tool-progress .badge {
             font-size: 0.72rem;
+        }
+        .chat-message-actions {
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: auto;
         }
         .evidence-snippet {
             font-size: 0.88rem;
@@ -388,9 +464,12 @@
         <div id="chat-messages" class="chat-messages"></div>
         <div class="chat-footer">
             <form id="chat-form">
-                <div class="input-group">
-                    <input id="chat-input" type="text" class="form-control" placeholder="Ask about your videos..." required>
-                    <button id="send-button" class="btn btn-primary" type="submit">Send</button>
+                <div class="input-group chat-input-group">
+                    <textarea id="chat-input" class="form-control chat-input" rows="1" placeholder="Ask about your videos..." required></textarea>
+                    <div class="chat-input-actions">
+                        <button id="stop-button" class="btn btn-outline-danger d-none" type="button">Stop</button>
+                        <button id="send-button" class="btn btn-primary" type="submit">Send</button>
+                    </div>
                 </div>
             </form>
             <div id="chat-status" class="chat-status small text-muted mt-2"></div>
@@ -410,17 +489,48 @@
     const chatForm = document.getElementById("chat-form");
     const chatInput = document.getElementById("chat-input");
     const sendButton = document.getElementById("send-button");
+    const stopButton = document.getElementById("stop-button");
     const chatStatus = document.getElementById("chat-status");
     const newChatButton = document.getElementById("new-chat-button");
     const chatHistoryToggle = document.getElementById("chat-history-toggle");
     const chatSidebar = document.querySelector(".chat-sidebar");
 
     let activeRunId = null;
+    let activeStreamController = null;
+    let isStreaming = false;
+    let autoScroll = true;
+    let compositionActive = false;
+    let compositionEndedAt = 0;
     let currentPreviewInterval = null;
     const previewVttData = {};
 
-    function scrollToBottom() {
+    function shouldIgnoreEnterForComposition(event) {
+        if (event.isComposing || compositionActive) return true;
+        return (event.timeStamp - compositionEndedAt) < 8;
+    }
+
+    function updateStreamingState(running) {
+        isStreaming = running;
+        if (stopButton) {
+            stopButton.classList.toggle("d-none", !running);
+        }
+        sendButton.disabled = running;
+    }
+
+    function refreshAutoScrollState() {
+        const threshold = 24;
+        autoScroll = (chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight) <= threshold;
+    }
+
+    function scrollToBottom(force = false) {
+        if (!force && !autoScroll) return;
         chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function autoResizeInput() {
+        if (!chatInput) return;
+        chatInput.style.height = "auto";
+        chatInput.style.height = `${Math.min(chatInput.scrollHeight, 144)}px`;
     }
 
     function escapeHtml(text) {
@@ -446,9 +556,15 @@
         return escapeHtml(markdownText || "").replaceAll("\n", "<br>");
     }
 
-    function appendMessage(role, text = "") {
+    function appendMessage(role, text = "", options = {}) {
         const row = document.createElement("div");
         row.className = `chat-row ${role}`;
+        if (options.messageId !== undefined && options.messageId !== null) {
+            row.dataset.messageId = String(options.messageId);
+        }
+        if (options.relatedQuestion) {
+            row.dataset.relatedQuestion = options.relatedQuestion;
+        }
 
         const bubble = document.createElement("div");
         bubble.className = "chat-bubble";
@@ -456,13 +572,154 @@
 
         row.appendChild(bubble);
         chatMessages.appendChild(row);
-        scrollToBottom();
-        return bubble;
+        scrollToBottom(options.forceScroll === true);
+        return { row, bubble };
     }
 
     function setBubbleMarkdown(bubble, markdownText) {
         bubble.innerHTML = renderMarkdown(markdownText);
         scrollToBottom();
+    }
+
+    function setInputText(text) {
+        if (!chatInput) return;
+        chatInput.value = text || "";
+        autoResizeInput();
+    }
+
+    function copyTextToClipboard(text) {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            return navigator.clipboard.writeText(text);
+        }
+        const fallback = document.createElement("textarea");
+        fallback.value = text || "";
+        fallback.style.position = "fixed";
+        fallback.style.opacity = "0";
+        document.body.appendChild(fallback);
+        fallback.focus();
+        fallback.select();
+        document.execCommand("copy");
+        document.body.removeChild(fallback);
+        return Promise.resolve();
+    }
+
+    function buildActionButton({ label, iconClass, className, onClick, title }) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = className;
+        button.setAttribute("aria-label", label);
+        button.title = title || label;
+        button.innerHTML = `<i class="${iconClass}" aria-hidden="true"></i><span class="visually-hidden">${label}</span>`;
+        button.addEventListener("click", onClick);
+        return button;
+    }
+
+    function ensureAssistantActions(row, bubble) {
+        if (!row || !bubble || row.querySelector(".chat-message-actions")) return;
+        const actions = document.createElement("div");
+        actions.className = "chat-message-actions";
+        const relatedQuestion = row.dataset.relatedQuestion || "";
+
+        actions.appendChild(
+            buildActionButton({
+                label: "Copy",
+                iconClass: "bi bi-clipboard",
+                className: "btn btn-outline-secondary icon",
+                title: "Copy answer",
+                onClick: async () => {
+                const copyText = bubble.innerText || "";
+                try {
+                    await copyTextToClipboard(copyText);
+                    updateStatus("Copied answer");
+                } catch (_error) {
+                    updateStatus("Copy failed");
+                }
+                },
+            }),
+        );
+
+        actions.appendChild(
+            buildActionButton({
+                label: "Edit prompt",
+                iconClass: "bi bi-pencil-square",
+                className: "btn btn-outline-secondary icon",
+                title: "Edit prompt",
+                onClick: () => {
+                if (!relatedQuestion) return;
+                setInputText(relatedQuestion);
+                chatInput.focus();
+                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                },
+            }),
+        );
+
+        actions.appendChild(
+            buildActionButton({
+                label: "Regenerate",
+                iconClass: "bi bi-arrow-repeat",
+                className: "btn btn-outline-primary icon",
+                title: "Regenerate answer",
+                onClick: async () => {
+                if (!relatedQuestion || isStreaming) return;
+                await submitQuestion(relatedQuestion);
+                },
+            }),
+        );
+
+        bubble.after(actions);
+    }
+
+    function highlightEvidenceCard(card) {
+        if (!card) return;
+        card.classList.add("highlight");
+        window.setTimeout(() => card.classList.remove("highlight"), 1400);
+    }
+
+    function addCitationLinksInText(container, cardMap) {
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+        const textNodes = [];
+        let current = walker.nextNode();
+        while (current) {
+            if (!current.parentElement || current.parentElement.closest("a, code, pre")) {
+                current = walker.nextNode();
+                continue;
+            }
+            if (/\[\d+\]/.test(current.textContent || "")) {
+                textNodes.push(current);
+            }
+            current = walker.nextNode();
+        }
+
+        for (const textNode of textNodes) {
+            const text = textNode.textContent || "";
+            const pieces = text.split(/(\[\d+\])/g);
+            if (pieces.length <= 1) continue;
+            const frag = document.createDocumentFragment();
+            for (const part of pieces) {
+                const match = part.match(/^\[(\d+)\]$/);
+                if (!match) {
+                    frag.appendChild(document.createTextNode(part));
+                    continue;
+                }
+                const index = Number(match[1]);
+                const targetCard = cardMap.get(index);
+                if (!targetCard) {
+                    frag.appendChild(document.createTextNode(part));
+                    continue;
+                }
+                const link = document.createElement("a");
+                link.href = `#${targetCard.id}`;
+                link.className = "evidence-citation-link";
+                link.textContent = `[${index}]`;
+                link.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    targetCard.scrollIntoView({ behavior: "smooth", block: "center" });
+                    highlightEvidenceCard(targetCard);
+                });
+                frag.appendChild(link);
+            }
+            textNode.parentNode.replaceChild(frag, textNode);
+        }
     }
 
     function appendEvidenceToBubble(bubble, evidenceItems) {
@@ -473,13 +730,22 @@
         heading.textContent = "Relevant video moments";
         bubble.appendChild(heading);
 
+        const refLinks = document.createElement("div");
+        refLinks.className = "evidence-reference-links";
+        bubble.appendChild(refLinks);
+
         const wrap = document.createElement("div");
         wrap.className = "evidence-wrap";
+        const evidenceIdPrefix = `evidence-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        const cardMap = new Map();
 
-        for (const item of evidenceItems) {
+        for (const [index, item] of evidenceItems.entries()) {
+            const refNumber = index + 1;
             const card = document.createElement("div");
             card.className = "evidence-card";
+            card.id = `${evidenceIdPrefix}-${refNumber}`;
             const eventDurationSeconds = getEventDurationSeconds(item);
+            cardMap.set(refNumber, card);
 
             const dateLabel = formatDateYYYYMMDD(item.event_start_local || item.event_end_local);
             const cameraLabel = prettifyCameraLabel(item.camera_name || item.camera_id);
@@ -496,6 +762,10 @@
                 meta.textContent = startTime && endTime ? `${startTime} to ${endTime}` : (startTime || endTime || "");
                 card.appendChild(meta);
             }
+            const refLabel = document.createElement("div");
+            refLabel.className = "evidence-ref-label";
+            refLabel.textContent = `Ref [${refNumber}]`;
+            card.appendChild(refLabel);
 
             const body = document.createElement("div");
             body.className = "evidence-body";
@@ -588,10 +858,21 @@
                 stopPreview(card);
             });
 
+            const refButton = document.createElement("button");
+            refButton.type = "button";
+            refButton.className = "btn btn-sm btn-outline-secondary";
+            refButton.textContent = `[${refNumber}]`;
+            refButton.addEventListener("click", () => {
+                card.scrollIntoView({ behavior: "smooth", block: "center" });
+                highlightEvidenceCard(card);
+            });
+            refLinks.appendChild(refButton);
+
             wrap.appendChild(card);
         }
 
         bubble.appendChild(wrap);
+        addCitationLinksInText(bubble, cardMap);
         scrollToBottom();
     }
 
@@ -599,7 +880,7 @@
         chatStatus.textContent = text || "";
     }
 
-    function createProgressTracker() {
+    function createProgressTracker(insertBeforeRow = null) {
         const row = document.createElement("div");
         row.className = "chat-row system";
 
@@ -638,7 +919,11 @@
         bubble.appendChild(current);
         bubble.appendChild(historyDetails);
         row.appendChild(bubble);
-        chatMessages.appendChild(row);
+        if (insertBeforeRow && insertBeforeRow.parentElement === chatMessages) {
+            chatMessages.insertBefore(row, insertBeforeRow);
+        } else {
+            chatMessages.appendChild(row);
+        }
         scrollToBottom();
 
         let count = 0;
@@ -960,16 +1245,28 @@
 
         const thread = await response.json();
         chatMessages.innerHTML = "";
+        let lastUserQuestion = "";
 
         if (!Array.isArray(thread.messages) || thread.messages.length === 0) {
-            appendMessage("assistant", "Ask about events and I will answer with matching video moments you can open directly.");
+            const welcome = appendMessage(
+                "assistant",
+                "Ask about events and I will answer with matching video moments you can open directly.",
+                { forceScroll: true },
+            );
+            ensureAssistantActions(welcome.row, welcome.bubble);
         } else {
             for (const message of thread.messages) {
                 const role = message.role === "user" ? "user" : "assistant";
-                const bubble = appendMessage(role, "");
-                setBubbleMarkdown(bubble, message.content || "");
+                const rendered = appendMessage(role, "", {
+                    messageId: message.id,
+                    relatedQuestion: role === "assistant" ? lastUserQuestion : "",
+                });
+                setBubbleMarkdown(rendered.bubble, message.content || "");
                 if (role === "assistant") {
-                    appendEvidenceToBubble(bubble, message.evidence || []);
+                    appendEvidenceToBubble(rendered.bubble, message.evidence || []);
+                    ensureAssistantActions(rendered.row, rendered.bubble);
+                } else {
+                    lastUserQuestion = message.content || "";
                 }
             }
         }
@@ -978,118 +1275,160 @@
             activeRunId = thread.active_run.id;
             startRunStream(activeRunId);
         }
-        scrollToBottom();
+        scrollToBottom(true);
     }
 
-    async function startRunStream(runId, assistantBubble) {
+    async function startRunStream(runId, assistantRender = null) {
         updateStatus("Working...");
-        const progressTracker = createProgressTracker();
-        const bubble = assistantBubble || appendMessage("assistant", "");
+        updateStreamingState(true);
+        activeStreamController = new AbortController();
+        const rendered = assistantRender || appendMessage("assistant", "", { forceScroll: true });
+        const bubble = rendered.bubble;
+        const assistantRow = rendered.row;
+        const progressTracker = createProgressTracker(assistantRow);
         let assistantText = "";
         let assistantRawJson = "";
 
-        const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/runs/${encodeURIComponent(runId)}/stream`);
+        let response;
+        try {
+            response = await fetch(
+                `/api/chats/${encodeURIComponent(currentChatId)}/runs/${encodeURIComponent(runId)}/stream`,
+                { signal: activeStreamController.signal },
+            );
+        } catch (error) {
+            const aborted = error && (error.name === "AbortError" || String(error).includes("aborted"));
+            if (aborted) {
+                updateStatus("Stopped");
+                progressTracker.fail("Stopped by user");
+            } else {
+                updateStatus("Failed to stream response");
+                progressTracker.fail("Failed to connect stream");
+            }
+            ensureAssistantActions(assistantRow, bubble);
+            updateStreamingState(false);
+            activeStreamController = null;
+            return;
+        }
         if (!response.ok || !response.body) {
             updateStatus("Failed to stream response");
             progressTracker.fail("Failed to connect stream");
+            ensureAssistantActions(assistantRow, bubble);
+            updateStreamingState(false);
+            activeStreamController = null;
             return;
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
+                let splitIndex;
+                while ((splitIndex = buffer.indexOf("\n\n")) !== -1) {
+                    const block = buffer.slice(0, splitIndex);
+                    buffer = buffer.slice(splitIndex + 2);
+                    if (!block.trim()) continue;
 
-            let splitIndex;
-            while ((splitIndex = buffer.indexOf("\n\n")) !== -1) {
-                const block = buffer.slice(0, splitIndex);
-                buffer = buffer.slice(splitIndex + 2);
-                if (!block.trim()) continue;
+                    let eventType = "message";
+                    const dataLines = [];
+                    for (const line of block.split("\n")) {
+                        if (line.startsWith("event:")) {
+                            eventType = line.slice(6).trim();
+                        } else if (line.startsWith("data:")) {
+                            dataLines.push(line.slice(5));
+                        }
+                    }
+                    const data = dataLines.join("\n");
 
-                let eventType = "message";
-                const dataLines = [];
-                for (const line of block.split("\n")) {
-                    if (line.startsWith("event:")) {
-                        eventType = line.slice(6).trim();
-                    } else if (line.startsWith("data:")) {
-                        dataLines.push(line.slice(5));
-                    }
-                }
-                const data = dataLines.join("\n");
-
-                if (eventType === "status") {
-                    updateStatus(data || "Working...");
-                    if (data) {
-                        progressTracker.update(`status: ${data}`);
-                    }
-                } else if (eventType === "search_plan") {
-                    try {
-                        const plan = JSON.parse(data);
-                        progressTracker.update(formatSearchPlan(plan));
-                    } catch (_e) {
-                        // Ignore malformed payloads.
-                    }
-                } else if (eventType === "tool_use") {
-                    try {
-                        const event = JSON.parse(data);
-                        const name = event && event.tool_name ? event.tool_name : "tool";
-                        const stage = event && event.stage ? event.stage : "update";
-                        const message = event && event.message ? event.message : "";
-                        progressTracker.update(`[${name}] ${stage}: ${message}`);
-                    } catch (_e) {
-                        // Ignore malformed payloads.
-                    }
-                } else if (eventType === "answer_delta") {
-                    try {
-                        const payload = JSON.parse(data);
-                        assistantRawJson += payload.delta || "";
-                    } catch (_e) {
-                        assistantRawJson += data;
-                    }
-                    const extractedText = extractAnswerTextFromPartialJson(assistantRawJson);
-                    assistantText = extractedText !== null ? extractedText : assistantRawJson;
-                    setBubbleMarkdown(bubble, assistantText);
-                } else if (eventType === "done") {
-                    let donePayload = null;
-                    try {
-                        donePayload = JSON.parse(data);
-                    } catch (_e) {
-                        donePayload = { answer: data, evidence: [] };
-                    }
-                    if (donePayload && typeof donePayload.answer === "string") {
-                        assistantText = donePayload.answer;
+                    if (eventType === "status") {
+                        updateStatus(data || "Working...");
+                        if (data) {
+                            progressTracker.update(`status: ${data}`);
+                        }
+                    } else if (eventType === "search_plan") {
+                        try {
+                            const plan = JSON.parse(data);
+                            progressTracker.update(formatSearchPlan(plan));
+                        } catch (_e) {
+                            // Ignore malformed payloads.
+                        }
+                    } else if (eventType === "tool_use") {
+                        try {
+                            const event = JSON.parse(data);
+                            const name = event && event.tool_name ? event.tool_name : "tool";
+                            const stage = event && event.stage ? event.stage : "update";
+                            const message = event && event.message ? event.message : "";
+                            progressTracker.update(`[${name}] ${stage}: ${message}`);
+                        } catch (_e) {
+                            // Ignore malformed payloads.
+                        }
+                    } else if (eventType === "answer_delta") {
+                        try {
+                            const payload = JSON.parse(data);
+                            assistantRawJson += payload.delta || "";
+                        } catch (_e) {
+                            assistantRawJson += data;
+                        }
+                        const extractedText = extractAnswerTextFromPartialJson(assistantRawJson);
+                        assistantText = extractedText !== null ? extractedText : assistantRawJson;
                         setBubbleMarkdown(bubble, assistantText);
-                        appendEvidenceToBubble(bubble, donePayload.evidence || []);
+                    } else if (eventType === "done") {
+                        let donePayload = null;
+                        try {
+                            donePayload = JSON.parse(data);
+                        } catch (_e) {
+                            donePayload = { answer: data, evidence: [] };
+                        }
+                        if (donePayload && typeof donePayload.answer === "string") {
+                            assistantText = donePayload.answer;
+                            setBubbleMarkdown(bubble, assistantText);
+                            appendEvidenceToBubble(bubble, donePayload.evidence || []);
+                        }
+                        ensureAssistantActions(assistantRow, bubble);
+                        updateStatus("Complete");
+                        progressTracker.complete("Answer ready");
+                        updateStreamingState(false);
+                        activeStreamController = null;
+                        await loadSidebar();
+                        return;
+                    } else if (eventType === "error") {
+                        const errorText = data || "Run failed";
+                        setBubbleMarkdown(bubble, `Error: ${errorText}`);
+                        updateStatus("Failed");
+                        progressTracker.fail(`Error: ${errorText}`);
+                        ensureAssistantActions(assistantRow, bubble);
+                        updateStreamingState(false);
+                        activeStreamController = null;
+                        await loadSidebar();
+                        return;
                     }
-                    updateStatus("Complete");
-                    progressTracker.complete("Answer ready");
-                    await loadSidebar();
-                    return;
-                } else if (eventType === "error") {
-                    const errorText = data || "Run failed";
-                    setBubbleMarkdown(bubble, `Error: ${errorText}`);
-                    updateStatus("Failed");
-                    progressTracker.fail(`Error: ${errorText}`);
-                    await loadSidebar();
-                    return;
                 }
             }
+        } catch (error) {
+            const aborted = error && (error.name === "AbortError" || String(error).includes("aborted"));
+            if (aborted) {
+                updateStatus("Stopped");
+                progressTracker.fail("Stopped by user");
+            } else {
+                updateStatus("Failed");
+                progressTracker.fail("Stream interrupted");
+            }
         }
+        ensureAssistantActions(assistantRow, bubble);
+        updateStreamingState(false);
+        activeStreamController = null;
     }
 
-    chatForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const question = chatInput.value.trim();
-        if (!question) return;
-
-        appendMessage("user", question);
-        chatInput.value = "";
-        sendButton.disabled = true;
-
+    async function submitQuestion(rawQuestion) {
+        const question = (rawQuestion || "").trim();
+        if (!question || isStreaming) return;
+        appendMessage("user", question, { forceScroll: true });
+        setInputText("");
+        updateStreamingState(true);
         try {
             const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/messages`, {
                 method: "POST",
@@ -1103,17 +1442,60 @@
             const payload = await response.json();
             activeRunId = payload.run_id;
             const sidebarRefresh = loadSidebar();
-            await startRunStream(payload.run_id);
+            const assistantRender = appendMessage("assistant", "", {
+                relatedQuestion: question,
+                forceScroll: true,
+            });
+            await startRunStream(payload.run_id, assistantRender);
             await sidebarRefresh;
         } catch (error) {
-            const bubble = appendMessage("assistant", "");
-            setBubbleMarkdown(bubble, `Error: ${error.message}`);
+            const rendered = appendMessage("assistant", "", {
+                relatedQuestion: question,
+                forceScroll: true,
+            });
+            setBubbleMarkdown(rendered.bubble, `Error: ${error.message}`);
+            ensureAssistantActions(rendered.row, rendered.bubble);
             updateStatus("Failed");
         } finally {
-            sendButton.disabled = false;
+            updateStreamingState(false);
             chatInput.focus();
         }
+    }
+
+    chatForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await submitQuestion(chatInput.value);
     });
+
+    chatInput.addEventListener("compositionstart", () => {
+        compositionActive = true;
+    });
+    chatInput.addEventListener("compositionend", (event) => {
+        compositionActive = false;
+        compositionEndedAt = event.timeStamp || 0;
+    });
+    chatInput.addEventListener("input", autoResizeInput);
+    chatInput.addEventListener("keydown", async (event) => {
+        if (event.key !== "Enter") return;
+        if (event.shiftKey) return;
+        if (shouldIgnoreEnterForComposition(event)) return;
+        const isSendShortcut = event.ctrlKey || event.metaKey || !event.shiftKey;
+        if (!isSendShortcut) return;
+        event.preventDefault();
+        await submitQuestion(chatInput.value);
+    });
+
+    chatMessages.addEventListener("scroll", refreshAutoScrollState);
+
+    if (stopButton) {
+        stopButton.addEventListener("click", () => {
+            if (!activeStreamController) return;
+            activeStreamController.abort();
+            activeStreamController = null;
+            updateStreamingState(false);
+            updateStatus("Stopped");
+        });
+    }
 
     newChatButton.addEventListener("click", async () => {
         const response = await fetch("/api/chats", { method: "POST" });
@@ -1149,6 +1531,8 @@
         window.addEventListener("resize", setupSidebarForViewport);
         await loadSidebar();
         await loadThread();
+        autoResizeInput();
+        refreshAutoScrollState();
         chatInput.focus();
     })();
 })();
