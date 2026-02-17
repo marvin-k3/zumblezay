@@ -190,6 +190,11 @@
         font-weight: 600;
         margin-bottom: 0.25rem;
     }
+    .evidence-meta {
+        font-size: 0.82rem;
+        color: var(--bs-secondary-color);
+        margin-bottom: 0.35rem;
+    }
     .evidence-snippet {
         font-size: 0.9rem;
         color: var(--bs-secondary-color);
@@ -399,10 +404,21 @@
             const card = document.createElement("div");
             card.className = "evidence-card";
 
+            const dateLabel = formatDateYYYYMMDD(item.event_start_local || item.event_end_local);
+            const cameraLabel = prettifyCameraLabel(item.camera_name || item.camera_id);
             const title = document.createElement("div");
             title.className = "evidence-title";
-            title.textContent = `${item.camera_id} • ${item.event_id}`;
+            title.textContent = `${dateLabel || "Clip"} ${cameraLabel}`.trim();
             card.appendChild(title);
+
+            if (item.event_start_local || item.event_end_local) {
+                const meta = document.createElement("div");
+                meta.className = "evidence-meta";
+                const startTime = formatTimeShort(item.event_start_local);
+                const endTime = formatTimeShort(item.event_end_local);
+                meta.textContent = startTime && endTime ? `${startTime} to ${endTime}` : (startTime || endTime || "");
+                card.appendChild(meta);
+            }
 
             if (item.snippet) {
                 const snippet = document.createElement("div");
@@ -528,6 +544,36 @@
         if (!unixSeconds) return "";
         const d = new Date(unixSeconds * 1000);
         return d.toLocaleString();
+    }
+
+    function formatDateYYYYMMDD(value) {
+        if (!value) return "";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            const raw = String(value);
+            return raw.includes("T") ? raw.split("T")[0] : raw;
+        }
+        const year = parsed.getFullYear();
+        const month = String(parsed.getMonth() + 1).padStart(2, "0");
+        const day = String(parsed.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+    }
+
+    function formatTimeShort(value) {
+        if (!value) return "";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return "";
+        return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    }
+
+    function prettifyCameraLabel(cameraId) {
+        if (!cameraId) return "Camera";
+        return String(cameraId)
+            .replaceAll("_", " ")
+            .replaceAll("-", " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .replace(/\b\w/g, (c) => c.toUpperCase());
     }
 
     function decodeJsonStringPrefix(source, startIndex) {
