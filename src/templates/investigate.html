@@ -74,12 +74,14 @@
     .chat-messages {
         flex: 1;
         overflow-y: auto;
+        overflow-x: hidden;
         padding: 1rem;
         background: var(--bs-secondary-bg);
     }
     .chat-row {
         display: flex;
         margin-bottom: 0.75rem;
+        min-width: 0;
     }
     .chat-row.user {
         justify-content: flex-end;
@@ -92,6 +94,7 @@
     }
     .chat-bubble {
         max-width: min(760px, 88%);
+        min-width: 0;
         padding: 0.75rem 0.9rem;
         border-radius: 14px;
         white-space: pre-wrap;
@@ -99,6 +102,16 @@
         overflow-wrap: anywhere;
         word-break: break-word;
         border: 1px solid var(--bs-border-color);
+    }
+    .chat-bubble pre,
+    .chat-bubble code {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+    .chat-bubble pre {
+        max-width: 100%;
+        overflow-x: auto;
     }
     .chat-bubble > :last-child {
         margin-bottom: 0;
