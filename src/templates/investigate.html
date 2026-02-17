@@ -536,11 +536,11 @@
             actions.appendChild(playButton);
 
             const link = document.createElement("a");
-            link.href = item.jump_url || `/video/${item.event_id}`;
+            link.href = `/events/latest?video=${encodeURIComponent(item.event_id)}`;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
             link.className = "evidence-link btn btn-sm btn-outline-primary";
-            link.textContent = "Open video at moment";
+            link.textContent = "View video elsewhere";
             actions.appendChild(link);
             textCol.appendChild(actions);
 

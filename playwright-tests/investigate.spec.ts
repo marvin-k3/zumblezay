@@ -46,7 +46,7 @@ test.describe('Investigate Chat', () => {
     await expect(assistant.locator('.evidence-card')).toHaveCount(1);
     await expect(assistant.locator('.evidence-card a')).toHaveAttribute(
       'href',
-      /\/video\/event-alpha#t=\d+/,
+      /\/events\/latest\?video=event-alpha/,
     );
 
     await expect(page.locator('#chat-status')).toHaveText('Complete');
