@@ -210,6 +210,7 @@
         border-radius: 10px;
         background: var(--bs-body-bg);
         padding: 0.65rem 0.75rem;
+        position: relative;
     }
     .evidence-title {
         font-weight: 600;
@@ -220,6 +221,15 @@
         color: var(--bs-secondary-color);
         margin-bottom: 0.35rem;
     }
+    .evidence-body {
+        display: grid;
+        grid-template-columns: 160px 1fr;
+        gap: 0.65rem;
+        align-items: start;
+    }
+    .evidence-text {
+        min-width: 0;
+    }
     .evidence-snippet {
         font-size: 0.9rem;
         color: var(--bs-secondary-color);
@@ -229,6 +239,47 @@
         width: 100%;
         margin-top: 0.15rem;
         font-weight: 600;
+    }
+    .evidence-actions {
+        display: grid;
+        gap: 0.35rem;
+        margin-top: 0.2rem;
+    }
+    .evidence-inline-player {
+        display: none;
+        margin-top: 0.5rem;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #000;
+    }
+    .evidence-inline-player.open {
+        display: block;
+    }
+    .evidence-inline-player video {
+        width: 100%;
+        max-height: 260px;
+        display: block;
+        background: #000;
+    }
+    .evidence-preview {
+        position: relative;
+        width: 160px;
+        height: 90px;
+        background: #000;
+        overflow: hidden;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 6px;
+        margin-bottom: 0.5rem;
+    }
+    .evidence-preview img {
+        position: absolute;
+        max-width: none;
+    }
+    @media (max-width: 576px) {
+        .evidence-body {
+            grid-template-columns: 1fr;
+        }
     }
     .chat-footer {
         border-top: 1px solid var(--bs-border-color);
@@ -365,6 +416,8 @@
     const chatSidebar = document.querySelector(".chat-sidebar");
 
     let activeRunId = null;
+    let currentPreviewInterval = null;
+    const previewVttData = {};
 
     function scrollToBottom() {
         chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -426,6 +479,7 @@
         for (const item of evidenceItems) {
             const card = document.createElement("div");
             card.className = "evidence-card";
+            const eventDurationSeconds = getEventDurationSeconds(item);
 
             const dateLabel = formatDateYYYYMMDD(item.event_start_local || item.event_end_local);
             const cameraLabel = prettifyCameraLabel(item.camera_name || item.camera_id);
@@ -443,12 +497,43 @@
                 card.appendChild(meta);
             }
 
+            const body = document.createElement("div");
+            body.className = "evidence-body";
+            card.appendChild(body);
+
+            const preview = document.createElement("div");
+            preview.className = "evidence-preview";
+            preview.dataset.eventId = item.event_id;
+            preview.dataset.previewTime = Number.isFinite(Number(item.start_offset_sec))
+                ? String(Math.max(0, Number(item.start_offset_sec)))
+                : "0";
+            preview.innerHTML = `<img src="" alt="Video preview">`;
+            body.appendChild(preview);
+            const previewImg = preview.querySelector("img");
+            if (previewImg) {
+                previewImg.src = `/api/storyboard/image/${encodeURIComponent(item.event_id)}`;
+            }
+            setPreviewFrameForOffset(item.event_id, preview, Number(preview.dataset.previewTime || "0"));
+
+            const textCol = document.createElement("div");
+            textCol.className = "evidence-text";
+            body.appendChild(textCol);
+
             if (item.snippet) {
                 const snippet = document.createElement("div");
                 snippet.className = "evidence-snippet";
                 snippet.textContent = item.snippet;
-                card.appendChild(snippet);
+                textCol.appendChild(snippet);
             }
+
+            const actions = document.createElement("div");
+            actions.className = "evidence-actions";
+
+            const playButton = document.createElement("button");
+            playButton.type = "button";
+            playButton.className = "btn btn-sm btn-primary";
+            playButton.textContent = "Play here";
+            actions.appendChild(playButton);
 
             const link = document.createElement("a");
             link.href = item.jump_url || `/video/${item.event_id}`;
@@ -456,7 +541,52 @@
             link.rel = "noopener noreferrer";
             link.className = "evidence-link btn btn-sm btn-outline-primary";
             link.textContent = "Open video at moment";
-            card.appendChild(link);
+            actions.appendChild(link);
+            textCol.appendChild(actions);
+
+            const inlinePlayer = document.createElement("div");
+            inlinePlayer.className = "evidence-inline-player";
+            const video = document.createElement("video");
+            video.controls = true;
+            video.preload = "metadata";
+            inlinePlayer.appendChild(video);
+            textCol.appendChild(inlinePlayer);
+
+            playButton.addEventListener("click", () => {
+                const isOpen = inlinePlayer.classList.contains("open");
+                if (isOpen) {
+                    video.pause();
+                    inlinePlayer.classList.remove("open");
+                    playButton.textContent = "Play here";
+                    return;
+                }
+
+                const startAt = Number.isFinite(Number(item.start_offset_sec))
+                    ? Math.max(0, Number(item.start_offset_sec))
+                    : 0;
+                inlinePlayer.classList.add("open");
+                playButton.textContent = "Hide player";
+
+                if (!video.src) {
+                    video.src = `/video/${encodeURIComponent(item.event_id)}`;
+                }
+                const seekAndPlay = () => {
+                    video.currentTime = startAt;
+                    video.play().catch(() => {});
+                };
+                if (video.readyState >= 1) {
+                    seekAndPlay();
+                } else {
+                    video.addEventListener("loadedmetadata", seekAndPlay, { once: true });
+                }
+            });
+
+            preview.addEventListener("mouseenter", () => {
+                startPreview(item.event_id, card, eventDurationSeconds);
+            });
+            preview.addEventListener("mouseleave", () => {
+                stopPreview(card);
+            });
 
             wrap.appendChild(card);
         }
@@ -597,6 +727,142 @@
             .replace(/\s+/g, " ")
             .trim()
             .replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function parseVttTimestamp(timeText) {
+        const parts = String(timeText).trim().split(":");
+        if (parts.length !== 3) return 0;
+        const hours = Number(parts[0]) || 0;
+        const minutes = Number(parts[1]) || 0;
+        const seconds = Number(parts[2]) || 0;
+        return (hours * 3600) + (minutes * 60) + seconds;
+    }
+
+    function parseVTT(vttText) {
+        const frames = [];
+        const lines = String(vttText || "").split("\n");
+        let currentFrame = null;
+
+        for (const line of lines) {
+            if (line.includes("-->")) {
+                const [startText, endText] = line.split("-->");
+                currentFrame = {
+                    startTime: parseVttTimestamp(startText),
+                    endTime: parseVttTimestamp(endText)
+                };
+            } else if (line.includes("#xywh=") && currentFrame) {
+                const xywh = line.split("#xywh=")[1].split(",").map(Number);
+                currentFrame.position = xywh;
+                frames.push(currentFrame);
+                currentFrame = null;
+            }
+        }
+
+        return frames;
+    }
+
+    function getEventDurationSeconds(item) {
+        const start = new Date(item.event_start_utc || item.event_start_local || "");
+        const end = new Date(item.event_end_utc || item.event_end_local || "");
+        if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+            return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 1000));
+        }
+        const endOffset = Number(item.end_offset_sec);
+        if (Number.isFinite(endOffset) && endOffset > 0) return Math.ceil(endOffset);
+        return 15;
+    }
+
+    async function startPreview(eventId, element, durationSeconds) {
+        const preview = element.querySelector(".evidence-preview");
+        const previewImg = preview ? preview.querySelector("img") : null;
+        if (!preview || !previewImg || !eventId) return;
+
+        previewImg.src = `/api/storyboard/image/${encodeURIComponent(eventId)}`;
+
+        if (currentPreviewInterval) {
+            clearInterval(currentPreviewInterval);
+        }
+
+        if (!previewVttData[eventId]) {
+            try {
+                const response = await fetch(`/api/storyboard/vtt/${encodeURIComponent(eventId)}`);
+                if (!response.ok) return;
+                const vttText = await response.text();
+                previewVttData[eventId] = parseVTT(vttText);
+            } catch (_error) {
+                return;
+            }
+        }
+
+        const frames = await loadPreviewFrames(eventId);
+        if (frames.length === 0) return;
+        const startTime = Number(preview.dataset.previewTime || "0");
+        const initialFrame = findFrameForTime(frames, startTime);
+        if (initialFrame && Array.isArray(initialFrame.position)) {
+            const [x, y] = initialFrame.position;
+            previewImg.style.left = `-${x}px`;
+            previewImg.style.top = `-${y}px`;
+        }
+
+        let currentTime = Number.isFinite(startTime) ? startTime : 0;
+        const fps = 4;
+        currentPreviewInterval = setInterval(() => {
+            currentTime = (currentTime + 1) % Math.max(1, Math.ceil(durationSeconds));
+            const frame = findFrameForTime(frames, currentTime);
+            if (!frame || !Array.isArray(frame.position)) return;
+
+            const [x, y] = frame.position;
+            previewImg.style.left = `-${x}px`;
+            previewImg.style.top = `-${y}px`;
+        }, 1000 / fps);
+    }
+
+    function stopPreview(element) {
+        const preview = element.querySelector(".evidence-preview");
+        if (currentPreviewInterval) {
+            clearInterval(currentPreviewInterval);
+            currentPreviewInterval = null;
+        }
+        if (!preview) return;
+        const eventId = preview.dataset.eventId || "";
+        if (!eventId) return;
+        const previewTime = Number(preview.dataset.previewTime || "0");
+        setPreviewFrameForOffset(eventId, preview, previewTime);
+    }
+
+    async function loadPreviewFrames(eventId) {
+        if (previewVttData[eventId]) {
+            return previewVttData[eventId];
+        }
+        try {
+            const response = await fetch(`/api/storyboard/vtt/${encodeURIComponent(eventId)}`);
+            if (!response.ok) return [];
+            const vttText = await response.text();
+            previewVttData[eventId] = parseVTT(vttText);
+            return previewVttData[eventId];
+        } catch (_error) {
+            return [];
+        }
+    }
+
+    function findFrameForTime(frames, time) {
+        if (!Array.isArray(frames) || frames.length === 0) return null;
+        const clampedTime = Number.isFinite(time) ? Math.max(0, time) : 0;
+        return frames.find((frame) => clampedTime >= frame.startTime && clampedTime <= frame.endTime)
+            || frames[frames.length - 1];
+    }
+
+    async function setPreviewFrameForOffset(eventId, preview, timeSeconds) {
+        if (!preview) return;
+        const previewImg = preview.querySelector("img");
+        if (!previewImg) return;
+        const frames = await loadPreviewFrames(eventId);
+        if (frames.length === 0) return;
+        const frame = findFrameForTime(frames, timeSeconds);
+        if (!frame || !Array.isArray(frame.position)) return;
+        const [x, y] = frame.position;
+        previewImg.style.left = `-${x}px`;
+        previewImg.style.top = `-${y}px`;
     }
 
     function decodeJsonStringPrefix(source, startIndex) {
