@@ -3641,6 +3641,8 @@ async fn stream_chat_run(
         }
         Some((_status, _error, _final_response_json)) => {
             let run_id_for_task = run_id.clone();
+            let chat_id_for_task = chat_id.clone();
+            let state_for_task = state.clone();
             tokio::spawn(async move {
                 let replay_events = {
                     let log = run_event_log()
@@ -3648,7 +3650,13 @@ async fn stream_chat_run(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     log.get(&run_id_for_task).cloned().unwrap_or_default()
                 };
+                let mut replay_has_terminal_event = false;
                 for event in replay_events {
+                    if event.event_type == "done"
+                        || event.event_type == "error"
+                    {
+                        replay_has_terminal_event = true;
+                    }
                     if tx
                         .send(Ok(SseEvent::default()
                             .event(&event.event_type)
@@ -3657,6 +3665,9 @@ async fn stream_chat_run(
                     {
                         return;
                     }
+                }
+                if replay_has_terminal_event {
+                    return;
                 }
 
                 let sender = {
@@ -3675,6 +3686,60 @@ async fn stream_chat_run(
                         {
                             break;
                         }
+                    }
+                    return;
+                }
+
+                let fallback_state =
+                    state_for_task.zumblezay_db.get().ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT status, error, final_response_json
+                             FROM chat_runs
+                             WHERE id = ?1 AND session_id = ?2",
+                            params![&run_id_for_task, &chat_id_for_task],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, Option<String>>(1)?,
+                                    row.get::<_, Option<String>>(2)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                    });
+
+                match fallback_state {
+                    Some((status, _error, final_response_json))
+                        if status == "done" =>
+                    {
+                        if let Some(payload) = final_response_json {
+                            let _ = tx.send(Ok(SseEvent::default()
+                                .event("done")
+                                .data(payload)));
+                        } else {
+                            let _ = tx.send(Ok(SseEvent::default()
+                                .event("error")
+                                .data("run completed with no payload")));
+                        }
+                    }
+                    Some((status, error, _final_response_json))
+                        if status == "error" =>
+                    {
+                        let _ = tx.send(Ok(SseEvent::default()
+                            .event("error")
+                            .data(error.unwrap_or_else(|| "run failed".to_string()))));
+                    }
+                    Some((_status, _error, _final_response_json)) => {
+                        let _ = tx.send(Ok(SseEvent::default()
+                            .event("error")
+                            .data("run stream unavailable")));
+                    }
+                    None => {
+                        let _ = tx.send(Ok(SseEvent::default()
+                            .event("error")
+                            .data("run not found")));
                     }
                 }
             });

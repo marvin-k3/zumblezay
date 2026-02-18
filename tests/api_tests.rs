@@ -1973,3 +1973,70 @@ async fn test_investigate_stream_endpoint_emits_stream_events() {
     );
     assert!(text.contains("event: done"), "missing done event: {}", text);
 }
+
+#[tokio::test]
+async fn test_chat_run_stream_returns_error_for_orphaned_active_run() {
+    init_test_logging();
+    let (app_state, app_router) = app();
+    let conn = app_state.zumblezay_db.get().unwrap();
+    let now = Utc::now().timestamp();
+    let chat_id = "chat_orphaned_stream".to_string();
+    let run_id = "run_orphaned_stream".to_string();
+
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, created_at, updated_at, last_message_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&chat_id, "New chat", now, now, now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, run_id, created_at)
+         VALUES (?1, 'user', ?2, NULL, ?3)",
+        params![&chat_id, "hello", now],
+    )
+    .unwrap();
+    let user_message_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO chat_runs (
+            id, session_id, user_message_id, status, error, search_mode,
+            final_response_json, created_at, updated_at, started_at, finished_at
+         ) VALUES (?1, ?2, ?3, 'running', NULL, NULL, NULL, ?4, ?4, ?4, NULL)",
+        params![&run_id, &chat_id, user_message_id, now],
+    )
+    .unwrap();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/chats/{}/runs/{}/stream",
+                    chat_id, run_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = time::timeout(
+        time::Duration::from_secs(2),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("stream response timed out")
+    .unwrap()
+    .to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("event: error"),
+        "expected error event, got: {}",
+        text
+    );
+    assert!(
+        text.contains("run stream unavailable"),
+        "expected orphaned stream error, got: {}",
+        text
+    );
+}
