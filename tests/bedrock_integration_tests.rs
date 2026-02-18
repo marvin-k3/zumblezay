@@ -20,6 +20,13 @@ fn is_live_bedrock_enabled() -> bool {
     )
 }
 
+fn is_live_bedrock_rerank_enabled() -> bool {
+    matches!(
+        env::var("RUN_BEDROCK_RERANK_INTEGRATION").ok().as_deref(),
+        Some("1")
+    )
+}
+
 #[tokio::test]
 async fn test_live_bedrock_investigation_integration() {
     init_test_logging();
@@ -433,5 +440,56 @@ async fn test_live_bedrock_embed_transcript_unit_spend_has_non_zero_tokens() {
         rows.iter().any(|(_, estimated_cost_usd)| *estimated_cost_usd > 0.0),
         "expected at least one embed_transcript_unit spend row with non-zero estimated_cost_usd; rows={:?}",
         rows
+    );
+}
+
+#[tokio::test]
+#[ignore = "live Bedrock rerank integration test; run manually with RUN_BEDROCK_INTEGRATION=1 RUN_BEDROCK_RERANK_INTEGRATION=1"]
+async fn test_live_bedrock_rerank_api_schema_integration() {
+    init_test_logging();
+    if !is_live_bedrock_enabled() || !is_live_bedrock_rerank_enabled() {
+        return;
+    }
+
+    let model_id = env::var("BEDROCK_INVESTIGATION_RERANKER_MODEL")
+        .unwrap_or_else(|_| "cohere.rerank-v3-5:0".to_string());
+    let client = create_bedrock_client(env::var("AWS_REGION").ok());
+    let documents = vec![
+        "A delivery driver places a package near the front porch.".to_string(),
+        "A child is eating lunch in the kitchen.".to_string(),
+        "The front door remains closed and no package is visible.".to_string(),
+    ];
+
+    let response = client
+        .rerank_documents(
+            &model_id,
+            "when was a package delivered to the porch",
+            &documents,
+            2,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "live rerank request failed for model {}: {}",
+                model_id, error
+            )
+        });
+
+    assert!(
+        !response.results.is_empty(),
+        "expected at least one rerank result from live API"
+    );
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.index < documents.len()),
+        "rerank returned out-of-range document index: {:?}",
+        response.results
+    );
+    assert!(
+        response.usage.input_tokens > 0,
+        "expected non-zero input_tokens for live rerank call, usage={:?}",
+        response.usage
     );
 }

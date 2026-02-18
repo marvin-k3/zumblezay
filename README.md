@@ -77,6 +77,7 @@ This repo includes a pre-commit hook at `.githooks/pre-commit` that runs:
 - `cargo test --lib`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `npm run test:ui`
+- Live Bedrock integration tests from `tests/bedrock_integration_tests.rs` when `RUN_BEDROCK_INTEGRATION=1` (including ignored tests)
 
 Enable it once per clone:
 
@@ -89,6 +90,18 @@ You can bypass it for an emergency commit with:
 
 ```bash
 SKIP_PRECOMMIT_CHECKS=1 git commit -m "..."
+```
+
+To include live Bedrock checks in pre-commit:
+
+```bash
+RUN_BEDROCK_INTEGRATION=1 git commit -m "..."
+```
+
+For reranker coverage as well:
+
+```bash
+RUN_BEDROCK_INTEGRATION=1 RUN_BEDROCK_RERANK_INTEGRATION=1 git commit -m "..."
 ```
 
 ## Manually seeding data

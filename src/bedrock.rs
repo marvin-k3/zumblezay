@@ -657,12 +657,7 @@ impl BedrockClientTrait for RealBedrockClient {
             });
         }
 
-        let body = serde_json::json!({
-            "query": query,
-            "documents": documents,
-            "top_n": top_n.min(documents.len()),
-            "return_documents": false
-        });
+        let body = build_rerank_request_body(query, documents, top_n);
         let body_bytes = serde_json::to_vec(&body)
             .context("serialize bedrock rerank body")?;
         let response = tokio::time::timeout(
@@ -757,6 +752,19 @@ fn estimate_embedding_input_tokens(text: &str) -> i64 {
     }
     // Heuristic token estimate (~4 chars/token) with a minimum of 1 token.
     ((text.chars().count() as i64 + 3) / 4).max(1)
+}
+
+fn build_rerank_request_body(
+    query: &str,
+    documents: &[String],
+    top_n: usize,
+) -> Value {
+    serde_json::json!({
+        "api_version": 2,
+        "query": query,
+        "documents": documents,
+        "top_n": top_n.min(documents.len())
+    })
 }
 
 pub fn create_bedrock_client(
@@ -927,4 +935,28 @@ fn embed_text_deterministic(text: &str, dim: usize) -> Vec<f32> {
         }
     }
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_rerank_request_body;
+
+    #[test]
+    fn rerank_request_matches_expected_bedrock_schema() {
+        let documents = vec!["doc one".to_string(), "doc two".to_string()];
+        let body =
+            build_rerank_request_body("where is the package", &documents, 99);
+
+        assert_eq!(body.get("api_version").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(
+            body.get("query").and_then(|v| v.as_str()),
+            Some("where is the package")
+        );
+        assert_eq!(body.get("documents"), Some(&serde_json::json!(documents)));
+        assert_eq!(body.get("top_n").and_then(|v| v.as_u64()), Some(2));
+        assert!(
+            body.get("return_documents").is_none(),
+            "request body must not include deprecated return_documents field"
+        );
+    }
 }

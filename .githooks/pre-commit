@@ -31,4 +31,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 echo "pre-commit: running Playwright tests"
 npm run test:ui
 
+if [[ "${RUN_BEDROCK_INTEGRATION:-0}" == "1" ]]; then
+  echo "pre-commit: running live Bedrock integration tests (non-ignored)"
+  cargo test --test bedrock_integration_tests -- --nocapture
+
+  echo "pre-commit: running live Bedrock integration tests (ignored)"
+  cargo test --test bedrock_integration_tests -- --ignored --nocapture
+else
+  echo "pre-commit: skipping live Bedrock integration tests (set RUN_BEDROCK_INTEGRATION=1 to enable)"
+fi
+
 echo "pre-commit: all checks passed"

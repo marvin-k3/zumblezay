@@ -606,6 +606,7 @@ Rules:
         payload: json!({
             "model_id": state.investigation_reranker_model,
             "request_json": {
+                "api_version": 2,
                 "query": &request.question,
                 "documents": candidates.iter().map(|candidate| {
                     format!(
@@ -616,8 +617,7 @@ Rules:
                         candidate.evidence.snippet
                     )
                 }).collect::<Vec<String>>(),
-                "top_n": candidates.len(),
-                "return_documents": false
+                "top_n": candidates.len()
             }
         }),
     });
