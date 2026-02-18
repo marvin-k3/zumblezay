@@ -483,7 +483,7 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 <script>
 (() => {
-    const currentChatId = "{{ chat_id | default(value='') }}";
+    let activeChatId = "{{ chat_id | default(value='') }}";
     const chatMessages = document.getElementById("chat-messages");
     const chatSessionList = document.getElementById("chat-session-list");
     const chatForm = document.getElementById("chat-form");
@@ -1213,7 +1213,7 @@
         for (const session of sessions) {
             const link = document.createElement("a");
             link.className = "chat-session-link";
-            if (session.id === currentChatId) {
+            if (session.id === activeChatId) {
                 link.classList.add("active");
             }
             link.href = `/investigate/${session.id}`;
@@ -1237,14 +1237,24 @@
     }
 
     async function loadThread() {
-        const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}`);
+        chatMessages.innerHTML = "";
+        if (!activeChatId) {
+            const welcome = appendMessage(
+                "assistant",
+                "Ask about events and I will answer with matching video moments you can open directly.",
+                { forceScroll: true },
+            );
+            ensureAssistantActions(welcome.row, welcome.bubble);
+            return;
+        }
+
+        const response = await fetch(`/api/chats/${encodeURIComponent(activeChatId)}`);
         if (!response.ok) {
             updateStatus("Failed to load chat");
             return;
         }
 
         const thread = await response.json();
-        chatMessages.innerHTML = "";
         let lastUserQuestion = "";
 
         if (!Array.isArray(thread.messages) || thread.messages.length === 0) {
@@ -1292,7 +1302,7 @@
         let response;
         try {
             response = await fetch(
-                `/api/chats/${encodeURIComponent(currentChatId)}/runs/${encodeURIComponent(runId)}/stream`,
+                `/api/chats/${encodeURIComponent(activeChatId)}/runs/${encodeURIComponent(runId)}/stream`,
                 { signal: activeStreamController.signal },
             );
         } catch (error) {
@@ -1423,14 +1433,32 @@
         activeStreamController = null;
     }
 
+    async function ensureActiveChatId() {
+        if (activeChatId) return activeChatId;
+        const response = await fetch("/api/chats", { method: "POST" });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!payload || !payload.chat_id) {
+            throw new Error("Missing chat id");
+        }
+        activeChatId = payload.chat_id;
+        window.history.replaceState({}, "", `/investigate/${encodeURIComponent(activeChatId)}`);
+        await loadSidebar();
+        return activeChatId;
+    }
+
     async function submitQuestion(rawQuestion) {
         const question = (rawQuestion || "").trim();
         if (!question || isStreaming) return;
-        appendMessage("user", question, { forceScroll: true });
-        setInputText("");
-        updateStreamingState(true);
         try {
-            const response = await fetch(`/api/chats/${encodeURIComponent(currentChatId)}/messages`, {
+            const chatId = await ensureActiveChatId();
+            appendMessage("user", question, { forceScroll: true });
+            setInputText("");
+            updateStreamingState(true);
+            const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ question })

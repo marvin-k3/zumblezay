@@ -21,7 +21,7 @@ async function waitForRunDone(request: Parameters<typeof test>[0]['request'], ch
 test.describe('Investigate Chat', () => {
   test('supports multiline input with Shift+Enter and submits on Enter', async ({ page }) => {
     await page.goto('/investigate');
-    await expect(page).toHaveURL(/\/investigate\/chat_/);
+    await expect(page).toHaveURL(/\/investigate$/);
 
     const input = page.locator('#chat-input');
     await input.fill('first line');
@@ -30,6 +30,7 @@ test.describe('Investigate Chat', () => {
     await expect(input).toHaveValue('first line\nsecond line');
 
     await input.press('Enter');
+    await expect(page).toHaveURL(/\/investigate\/chat_/);
     const lastUserBubble = page.locator('.chat-row.user .chat-bubble').last();
     await expect(lastUserBubble).toContainText('first line');
     await expect(lastUserBubble).toContainText('second line');
@@ -38,14 +39,15 @@ test.describe('Investigate Chat', () => {
   test('creates bookmarkable chat URLs and restores persisted conversation', async ({ page }) => {
     await page.goto('/investigate');
 
-    await expect(page).toHaveURL(/\/investigate\/chat_/);
-    const currentUrl = new URL(page.url());
-    const chatId = currentUrl.pathname.split('/').pop();
-    expect(chatId).toBeTruthy();
+    await expect(page).toHaveURL(/\/investigate$/);
 
     const input = page.locator('#chat-input');
     await input.fill('what happened with the package?');
     await page.locator('#send-button').click();
+    await expect(page).toHaveURL(/\/investigate\/chat_/);
+    const currentUrl = new URL(page.url());
+    const chatId = currentUrl.pathname.split('/').pop();
+    expect(chatId).toBeTruthy();
 
     await expect(page.locator('.chat-row.user .chat-bubble').last()).toContainText(
       'what happened with the package?',
@@ -206,11 +208,12 @@ test.describe('Investigate Chat', () => {
 
   test('shows assistant action bar and evidence reference affordances', async ({ page }) => {
     await page.goto('/investigate');
-    await expect(page).toHaveURL(/\/investigate\/chat_/);
+    await expect(page).toHaveURL(/\/investigate$/);
 
     const question = 'what happened with the package?';
     await page.locator('#chat-input').fill(question);
     await page.locator('#send-button').click();
+    await expect(page).toHaveURL(/\/investigate\/chat_/);
     await expect(page.locator('#chat-status')).toHaveText('Complete');
 
     const assistantRow = page.locator('.chat-row.assistant').last();
@@ -292,11 +295,12 @@ test.describe('Investigate Chat', () => {
     const page = await context.newPage();
 
     await page.goto('/investigate');
-    await expect(page).toHaveURL(/\/investigate\/chat_/);
+    await expect(page).toHaveURL(/\/investigate$/);
 
     const input = page.locator('#chat-input');
     await input.fill('what happened with the package? include the detailed evidence and timeline');
     await page.locator('#send-button').click();
+    await expect(page).toHaveURL(/\/investigate\/chat_/);
 
     await expect(page.locator('#chat-status')).toHaveText('Complete', { timeout: 30_000 });
 

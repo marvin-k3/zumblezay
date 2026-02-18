@@ -18,7 +18,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        Html, IntoResponse, Redirect,
+        Html, IntoResponse,
     },
     routing::{get, post},
     Json, Router,
@@ -3130,10 +3130,20 @@ async fn run_chat_investigation(
 
 #[axum::debug_handler]
 async fn investigate_page(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let chat_id = create_chat_session(&state).await?;
-    Ok(Redirect::to(&format!("/investigate/{chat_id}")))
+    _state: State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let mut context = TeraContext::new();
+    context.insert("build_info", &get_build_info());
+    context.insert("request_path", &"/investigate");
+    context.insert("chat_id", "");
+
+    let rendered = TEMPLATES
+        .get()
+        .unwrap()
+        .render("investigate.html", &context)
+        .unwrap_or_else(|e| format!("Template error: {}", e));
+
+    Ok(Html(rendered))
 }
 
 #[axum::debug_handler]
