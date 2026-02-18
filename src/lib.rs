@@ -542,6 +542,26 @@ fn zumblezay_migration_steps() -> Vec<M<'static>> {
                 ON chat_runs(session_id, created_at DESC);
             "#,
         ),
+        M::up(
+            r#"
+            CREATE TABLE IF NOT EXISTS chat_run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES chat_runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_run_events_run_seq
+                ON chat_run_events(run_id, seq);
+            CREATE INDEX IF NOT EXISTS idx_chat_run_events_session_created
+                ON chat_run_events(session_id, created_at, id);
+            "#,
+        ),
     ]
 }
 

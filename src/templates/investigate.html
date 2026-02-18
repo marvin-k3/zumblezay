@@ -96,6 +96,90 @@
         min-height: 520px;
         height: calc(100vh - 240px);
     }
+    .chat-shell-header {
+        border-bottom: 1px solid var(--bs-border-color);
+        padding: 0.65rem 0.75rem;
+        background: var(--bs-body-bg);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+    }
+    .trace-view {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        background: var(--bs-secondary-bg);
+    }
+    .trace-layout {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 0.75rem;
+        height: 100%;
+        padding: 0.75rem;
+    }
+    .trace-timeline {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 10px;
+        background: var(--bs-body-bg);
+        overflow-y: auto;
+        min-height: 0;
+        padding: 0.45rem;
+        display: grid;
+        gap: 0.35rem;
+        align-content: start;
+    }
+    .trace-item {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        background: var(--bs-secondary-bg);
+        padding: 0.5rem 0.55rem;
+        cursor: pointer;
+    }
+    .trace-item.active {
+        border-color: var(--bs-primary);
+        background: rgba(13, 110, 253, 0.1);
+    }
+    .trace-item-type {
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+    .trace-item-meta {
+        font-size: 0.76rem;
+        color: var(--bs-secondary-color);
+        margin-top: 0.2rem;
+    }
+    .trace-detail {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 10px;
+        background: var(--bs-body-bg);
+        overflow-y: auto;
+        min-height: 0;
+        padding: 0.7rem;
+    }
+    .json-block {
+        margin: 0;
+        max-height: 420px;
+        overflow: auto;
+        background: #111;
+        color: #f2f4f8;
+        border-radius: 8px;
+        border: 1px solid #1f2328;
+        padding: 0.55rem 0.6rem;
+        font-size: 0.82rem;
+    }
+    .trace-diff-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem;
+    }
+    .trace-empty {
+        border: 1px dashed var(--bs-border-color);
+        border-radius: 8px;
+        color: var(--bs-secondary-color);
+        padding: 0.8rem;
+        text-align: center;
+    }
     .chat-messages {
         flex: 1;
         overflow-y: auto;
@@ -386,6 +470,15 @@
         .chat-messages {
             min-height: 50vh;
         }
+        .trace-layout {
+            grid-template-columns: 1fr;
+        }
+        .trace-timeline {
+            max-height: 240px;
+        }
+        .trace-diff-grid {
+            grid-template-columns: 1fr;
+        }
         .chat-session-title {
             overflow: hidden;
             text-overflow: ellipsis;
@@ -461,7 +554,20 @@
     </aside>
 
     <div class="chat-shell">
+        <div class="chat-shell-header">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Investigate view mode">
+                <button id="view-chat-button" type="button" class="btn btn-outline-primary active">Chat</button>
+                <button id="view-trace-button" type="button" class="btn btn-outline-primary">Trace</button>
+            </div>
+            <small id="trace-summary" class="text-muted"></small>
+        </div>
         <div id="chat-messages" class="chat-messages"></div>
+        <div id="trace-view" class="trace-view d-none">
+            <div class="trace-layout">
+                <div id="trace-timeline" class="trace-timeline"></div>
+                <div id="trace-detail" class="trace-detail"></div>
+            </div>
+        </div>
         <div class="chat-footer">
             <form id="chat-form">
                 <div class="input-group chat-input-group">
@@ -485,6 +591,13 @@
 (() => {
     let activeChatId = "{{ chat_id | default(value='') }}";
     const chatMessages = document.getElementById("chat-messages");
+    const traceView = document.getElementById("trace-view");
+    const traceTimeline = document.getElementById("trace-timeline");
+    const traceDetail = document.getElementById("trace-detail");
+    const traceSummary = document.getElementById("trace-summary");
+    const viewChatButton = document.getElementById("view-chat-button");
+    const viewTraceButton = document.getElementById("view-trace-button");
+    const chatFooter = document.querySelector(".chat-footer");
     const chatSessionList = document.getElementById("chat-session-list");
     const chatForm = document.getElementById("chat-form");
     const chatInput = document.getElementById("chat-input");
@@ -503,6 +616,8 @@
     let compositionEndedAt = 0;
     let currentPreviewInterval = null;
     const previewVttData = {};
+    let traceEvents = [];
+    let selectedTraceEventId = null;
 
     function shouldIgnoreEnterForComposition(event) {
         if (event.isComposing || compositionActive) return true;
@@ -880,6 +995,143 @@
         chatStatus.textContent = text || "";
     }
 
+    function formatJson(value) {
+        return JSON.stringify(value ?? {}, null, 2);
+    }
+
+    function setViewMode(mode) {
+        const traceMode = mode === "trace";
+        chatMessages.classList.toggle("d-none", traceMode);
+        if (chatFooter) {
+            chatFooter.classList.toggle("d-none", traceMode);
+        }
+        traceView.classList.toggle("d-none", !traceMode);
+        viewChatButton.classList.toggle("active", !traceMode);
+        viewTraceButton.classList.toggle("active", traceMode);
+    }
+
+    function buildTraceDiffSection(leftTitle, leftValue, rightTitle, rightValue) {
+        const details = document.createElement("details");
+        details.className = "mb-3";
+        const summary = document.createElement("summary");
+        summary.textContent = `${leftTitle} vs ${rightTitle}`;
+        details.appendChild(summary);
+
+        const wrap = document.createElement("div");
+        wrap.className = "trace-diff-grid mt-2";
+        const left = document.createElement("div");
+        left.innerHTML = `<div class="small text-muted mb-1">${escapeHtml(leftTitle)}</div><pre class="json-block">${escapeHtml(formatJson(leftValue))}</pre>`;
+        const right = document.createElement("div");
+        right.innerHTML = `<div class="small text-muted mb-1">${escapeHtml(rightTitle)}</div><pre class="json-block">${escapeHtml(formatJson(rightValue))}</pre>`;
+        wrap.appendChild(left);
+        wrap.appendChild(right);
+        details.appendChild(wrap);
+        return details;
+    }
+
+    function renderTraceDetail(eventItem) {
+        traceDetail.innerHTML = "";
+        if (!eventItem) {
+            traceDetail.innerHTML = `<div class="trace-empty">Select a trace event to inspect details.</div>`;
+            return;
+        }
+
+        const title = document.createElement("div");
+        title.className = "fw-semibold mb-2";
+        title.textContent = `${eventItem.event_type} • ${formatRelative(eventItem.created_at)}`;
+        traceDetail.appendChild(title);
+
+        const details = document.createElement("details");
+        details.open = false;
+        const summary = document.createElement("summary");
+        summary.textContent = "Payload JSON";
+        details.appendChild(summary);
+        const pre = document.createElement("pre");
+        pre.className = "json-block mt-2";
+        pre.textContent = formatJson(eventItem.payload);
+        details.appendChild(pre);
+        traceDetail.appendChild(details);
+    }
+
+    function renderTraceTimeline() {
+        traceTimeline.innerHTML = "";
+        traceDetail.innerHTML = "";
+
+        if (!Array.isArray(traceEvents) || traceEvents.length === 0) {
+            traceTimeline.innerHTML = `<div class="trace-empty">No persisted trace events for this thread yet.</div>`;
+            traceDetail.innerHTML = `<div class="trace-empty">Run a question to capture model/retrieval traces.</div>`;
+            if (traceSummary) traceSummary.textContent = "";
+            return;
+        }
+
+        if (traceSummary) {
+            traceSummary.textContent = `${traceEvents.length} events`;
+        }
+
+        const latestRaw = [...traceEvents].reverse().find((event) => event.event_type === "search_results_raw");
+        const latestPruned = [...traceEvents].reverse().find((event) => event.event_type === "search_results_pruned");
+        const latestRerankInput = [...traceEvents].reverse().find((event) => event.event_type === "rerank_input");
+        const latestRerankOutput = [...traceEvents].reverse().find((event) => event.event_type === "rerank_output");
+        if (latestRaw && latestPruned) {
+            traceDetail.appendChild(buildTraceDiffSection(
+                "search_results_raw",
+                latestRaw.payload,
+                "search_results_pruned",
+                latestPruned.payload,
+            ));
+        }
+        if (latestRerankInput && latestRerankOutput) {
+            traceDetail.appendChild(buildTraceDiffSection(
+                "rerank_input",
+                latestRerankInput.payload,
+                "rerank_output",
+                latestRerankOutput.payload,
+            ));
+        }
+
+        for (const eventItem of traceEvents) {
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "trace-item";
+            if (selectedTraceEventId === eventItem.id) {
+                row.classList.add("active");
+            }
+            row.innerHTML = `
+                <div class="trace-item-type">${escapeHtml(eventItem.event_type)}</div>
+                <div class="trace-item-meta">${escapeHtml(formatRelative(eventItem.created_at))} • ${escapeHtml(eventItem.run_id)}</div>
+            `;
+            row.addEventListener("click", () => {
+                selectedTraceEventId = eventItem.id;
+                renderTraceTimeline();
+                renderTraceDetail(eventItem);
+            });
+            traceTimeline.appendChild(row);
+        }
+
+        const selected = traceEvents.find((event) => event.id === selectedTraceEventId) || traceEvents[traceEvents.length - 1];
+        selectedTraceEventId = selected ? selected.id : null;
+        const activeRow = traceTimeline.querySelectorAll(".trace-item")[traceEvents.findIndex((event) => event.id === selectedTraceEventId)];
+        if (activeRow) activeRow.classList.add("active");
+        renderTraceDetail(selected);
+    }
+
+    async function loadTrace() {
+        traceEvents = [];
+        selectedTraceEventId = null;
+        if (!activeChatId) {
+            renderTraceTimeline();
+            return;
+        }
+        const response = await fetch(`/api/chats/${encodeURIComponent(activeChatId)}/trace`);
+        if (!response.ok) {
+            renderTraceTimeline();
+            return;
+        }
+        const payload = await response.json();
+        traceEvents = Array.isArray(payload.events) ? payload.events : [];
+        renderTraceTimeline();
+    }
+
     function createProgressTracker(insertBeforeRow = null) {
         const row = document.createElement("div");
         row.className = "chat-row system";
@@ -1245,6 +1497,7 @@
                 { forceScroll: true },
             );
             ensureAssistantActions(welcome.row, welcome.bubble);
+            await loadTrace();
             return;
         }
 
@@ -1286,6 +1539,7 @@
             startRunStream(activeRunId);
         }
         scrollToBottom(true);
+        await loadTrace();
     }
 
     async function startRunStream(runId, assistantRender = null) {
@@ -1404,6 +1658,7 @@
                         updateStreamingState(false);
                         activeStreamController = null;
                         await loadSidebar();
+                        await loadTrace();
                         return;
                     } else if (eventType === "error") {
                         const errorText = data || "Run failed";
@@ -1414,6 +1669,7 @@
                         updateStreamingState(false);
                         activeStreamController = null;
                         await loadSidebar();
+                        await loadTrace();
                         return;
                     }
                 }
@@ -1554,9 +1810,20 @@
         });
     }
 
+    if (viewChatButton) {
+        viewChatButton.addEventListener("click", () => setViewMode("chat"));
+    }
+    if (viewTraceButton) {
+        viewTraceButton.addEventListener("click", async () => {
+            setViewMode("trace");
+            await loadTrace();
+        });
+    }
+
     (async () => {
         setupSidebarForViewport();
         window.addEventListener("resize", setupSidebarForViewport);
+        setViewMode("chat");
         await loadSidebar();
         await loadThread();
         autoResizeInput();

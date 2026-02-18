@@ -7,6 +7,7 @@ use crate::bedrock_spend::{
 use anyhow::{Context, Result};
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -39,7 +40,7 @@ pub struct SearchConfig {
     pub vector_weight: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HybridSearchHit {
     pub event_id: String,
     pub snippet: String,

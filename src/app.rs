@@ -237,6 +237,22 @@ struct ChatRunStatusResponse {
     final_response: Option<Value>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct ChatTraceEventView {
+    id: i64,
+    run_id: String,
+    event_type: String,
+    payload: Value,
+    created_at: i64,
+    seq: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatTraceResponse {
+    chat_id: String,
+    events: Vec<ChatTraceEventView>,
+}
+
 #[derive(Debug, Clone)]
 struct RunStreamEvent {
     event_type: String,
@@ -2921,6 +2937,30 @@ fn publish_run_event(
     let _ = sender.send(event);
 }
 
+fn persist_chat_run_event(
+    state: &Arc<AppState>,
+    chat_id: &str,
+    run_id: &str,
+    event_type: &str,
+    payload: &Value,
+) {
+    let payload_json =
+        serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let now = current_unix_ts();
+    if let Ok(conn) = state.zumblezay_db.get() {
+        let _ = conn.execute(
+            "INSERT INTO chat_run_events (
+                run_id, session_id, seq, event_type, payload_json, created_at
+             ) VALUES (
+                ?1, ?2,
+                COALESCE((SELECT MAX(seq) + 1 FROM chat_run_events WHERE run_id = ?1), 1),
+                ?3, ?4, ?5
+             )",
+            params![run_id, chat_id, event_type, payload_json, now],
+        );
+    }
+}
+
 async fn create_chat_session(
     state: &Arc<AppState>,
 ) -> Result<String, (StatusCode, String)> {
@@ -2982,6 +3022,13 @@ async fn run_chat_investigation(
         );
     }
     publish_run_event(&run_id, &sender, "status", "planning".to_string());
+    persist_chat_run_event(
+        &state,
+        &chat_id,
+        &run_id,
+        "status",
+        &json!({ "status": "planning" }),
+    );
 
     let history = match state.zumblezay_db.get() {
         Ok(conn) => {
@@ -3033,6 +3080,8 @@ async fn run_chat_investigation(
     let run_id_for_search_plan = run_id.clone();
     let mut stream_search_plan = {
         let sender = sender.clone();
+        let state = state.clone();
+        let chat_id = chat_id.clone();
         move |plan: investigation::SearchPlanEvent| {
             let payload = serde_json::to_string(&plan).unwrap_or_else(|_| {
                 "{\"search_queries\":[],\"time_window_start_utc\":\"\",\"time_window_end_utc\":\"\"}".to_string()
@@ -3043,11 +3092,20 @@ async fn run_chat_investigation(
                 "search_plan",
                 payload,
             );
+            persist_chat_run_event(
+                &state,
+                &chat_id,
+                &run_id_for_search_plan,
+                "search_plan",
+                &serde_json::to_value(plan).unwrap_or_else(|_| json!({})),
+            );
         }
     };
     let run_id_for_tool_use = run_id.clone();
     let mut stream_tool_use = {
         let sender = sender.clone();
+        let state = state.clone();
+        let chat_id = chat_id.clone();
         move |event: investigation::ToolUseEvent| {
             let payload = serde_json::to_string(&event).unwrap_or_else(|_| {
                 "{\"tool_name\":\"unknown\",\"stage\":\"error\",\"message\":\"tool event serialization failed\"}".to_string()
@@ -3058,6 +3116,32 @@ async fn run_chat_investigation(
                 "tool_use",
                 payload,
             );
+            let event_type = if event.stage == "started" {
+                "tool_call"
+            } else {
+                "tool_result"
+            };
+            persist_chat_run_event(
+                &state,
+                &chat_id,
+                &run_id_for_tool_use,
+                event_type,
+                &serde_json::to_value(event).unwrap_or_else(|_| json!({})),
+            );
+        }
+    };
+    let run_id_for_trace = run_id.clone();
+    let mut stream_trace = {
+        let state = state.clone();
+        let chat_id = chat_id.clone();
+        move |event: investigation::TraceEvent| {
+            persist_chat_run_event(
+                &state,
+                &chat_id,
+                &run_id_for_trace,
+                &event.event_type,
+                &event.payload,
+            );
         }
     };
 
@@ -3067,6 +3151,7 @@ async fn run_chat_investigation(
         &mut stream_search_plan,
         &mut stream_tool_use,
         &mut stream_delta,
+        &mut stream_trace,
     )
     .await
     {
@@ -3105,6 +3190,16 @@ async fn run_chat_investigation(
             }
 
             publish_run_event(&run_id, &sender, "done", response_json);
+            persist_chat_run_event(
+                &state,
+                &chat_id,
+                &run_id,
+                "assistant_message",
+                &json!({
+                    "answer": response.answer,
+                    "evidence_count": response.evidence.len()
+                }),
+            );
         }
         Err(error) => {
             let finished = current_unix_ts();
@@ -3120,7 +3215,14 @@ async fn run_chat_investigation(
                     params![&error_message, finished, &run_id],
                 );
             }
-            publish_run_event(&run_id, &sender, "error", error_message);
+            publish_run_event(&run_id, &sender, "error", error_message.clone());
+            persist_chat_run_event(
+                &state,
+                &chat_id,
+                &run_id,
+                "error",
+                &json!({ "message": error_message }),
+            );
         }
     }
 
@@ -3542,6 +3644,14 @@ async fn create_chat_message(
             .clone()
     };
 
+    persist_chat_run_event(
+        &state,
+        &chat_id,
+        &run_id,
+        "user_message",
+        &json!({ "question": question }),
+    );
+
     tokio::spawn(run_chat_investigation(
         state.clone(),
         chat_id,
@@ -3602,6 +3712,65 @@ async fn get_chat_run(
         run,
         final_response,
     }))
+}
+
+#[axum::debug_handler]
+async fn get_chat_trace(
+    State(state): State<Arc<AppState>>,
+    Path(chat_id): Path<String>,
+) -> Result<Json<ChatTraceResponse>, (StatusCode, String)> {
+    let conn = state
+        .zumblezay_db
+        .get()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM chat_sessions WHERE id = ?1",
+            params![&chat_id],
+            |_| Ok(1_i64),
+        )
+        .optional()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "chat not found".to_string()));
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, run_id, event_type, payload_json, created_at, seq
+             FROM chat_run_events
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows = stmt
+        .query_map(params![&chat_id], |row| {
+            let payload_json: String = row.get(3)?;
+            let payload = serde_json::from_str::<Value>(&payload_json)
+                .unwrap_or_else(|_| json!({}));
+            Ok(ChatTraceEventView {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                event_type: row.get(2)?,
+                payload,
+                created_at: row.get(4)?,
+                seq: row.get(5)?,
+            })
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(
+            row.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?,
+        );
+    }
+
+    Ok(Json(ChatTraceResponse { chat_id, events }))
 }
 
 #[axum::debug_handler]
@@ -3861,6 +4030,7 @@ async fn investigate_videos_stream(
                         .data(payload)));
                 }
             };
+            let mut stream_trace = |_event: investigation::TraceEvent| {};
 
             match investigation::investigate_question_streaming(
                 &state,
@@ -3868,6 +4038,7 @@ async fn investigate_videos_stream(
                 &mut stream_search_plan,
                 &mut stream_tool_use,
                 &mut stream_delta,
+                &mut stream_trace,
             )
             .await
             {
@@ -3946,6 +4117,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/transcripts/json/{date}", get(get_transcripts_json))
         .route("/api/chats", get(list_chats).post(create_chat))
         .route("/api/chats/{chat_id}", get(get_chat_thread))
+        .route("/api/chats/{chat_id}/trace", get(get_chat_trace))
         .route(
             "/api/chats/{chat_id}/messages",
             post(create_chat_message),

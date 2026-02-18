@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub struct EvidenceMoment {
     pub jump_url: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CandidateMoment {
     evidence: EvidenceMoment,
     rank_score: f64,
@@ -106,6 +106,12 @@ pub struct ToolUseEvent {
     pub tool_name: String,
     pub stage: String,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TraceEvent {
+    pub event_type: String,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +168,6 @@ Rules:
         history_prompt,
         request.question
     );
-
     let planner_completion = invoke_and_log_bedrock(
         state,
         client.clone(),
@@ -369,6 +374,7 @@ pub async fn investigate_question_streaming(
     on_search_plan: &mut (dyn FnMut(SearchPlanEvent) + Send),
     on_tool_use: &mut (dyn FnMut(ToolUseEvent) + Send),
     on_delta: &mut (dyn FnMut(String) + Send),
+    on_trace: &mut (dyn FnMut(TraceEvent) + Send),
 ) -> Result<InvestigationResponse> {
     let search_mode =
         hybrid_search::SearchMode::parse(request.search_mode.as_deref())
@@ -384,6 +390,22 @@ pub async fn investigate_question_streaming(
 
     let now = Utc::now();
     let timezone = state.timezone.to_string().replace("::", "/");
+    let to_model_payload =
+        |system_prompt: &str, user_prompt: &str, max_tokens: i32| {
+            serde_json::json!({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "temperature": 0,
+                "system": system_prompt,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": user_prompt
+                    }]
+                }]
+            })
+        };
     let planner_system_prompt =
         "You are an investigation planner for home video transcripts.
 Return only JSON with:
@@ -411,6 +433,14 @@ Rules:
         history_prompt,
         request.question
     );
+    on_trace(TraceEvent {
+        event_type: "model_request".to_string(),
+        payload: json!({
+            "phase": "planner",
+            "model_id": &model_id,
+            "request_json": to_model_payload(planner_system_prompt, &planner_user_prompt, 600)
+        }),
+    });
 
     on_tool_use(ToolUseEvent {
         tool_name: "bedrock_planner".to_string(),
@@ -430,6 +460,13 @@ Rules:
 
     let planner: PlannerResponse = parse_json_body(&planner_completion.content)
         .context("invalid planner json response")?;
+    on_trace(TraceEvent {
+        event_type: "model_response".to_string(),
+        payload: json!({
+            "phase": "planner",
+            "response_json_text": &planner_completion.content
+        }),
+    });
     on_tool_use(ToolUseEvent {
         tool_name: "bedrock_planner".to_string(),
         stage: "completed".to_string(),
@@ -489,7 +526,7 @@ Rules:
         timezone: state.timezone,
         search_mode,
     };
-    let mut candidates = collect_candidates_with_progress(
+    let collected = collect_candidates_with_progress(
         state,
         &search_queries,
         &search_params,
@@ -501,6 +538,12 @@ Rules:
             });
         },
     )?;
+    on_trace(TraceEvent {
+        event_type: "search_results_raw".to_string(),
+        payload: serde_json::to_value(&collected.raw_query_hits)
+            .unwrap_or_else(|_| json!([])),
+    });
+    let mut candidates = collected.deduped;
     on_tool_use(ToolUseEvent {
         tool_name: "transcript_search".to_string(),
         stage: "completed".to_string(),
@@ -508,6 +551,24 @@ Rules:
             "Collected {} unique candidate moments",
             candidates.len()
         ),
+    });
+    on_trace(TraceEvent {
+        event_type: "search_results_pruned".to_string(),
+        payload: json!(candidates
+            .iter()
+            .map(|candidate| json!({
+                "event_id": candidate.evidence.event_id,
+                "camera_id": candidate.evidence.camera_id,
+                "snippet": candidate.evidence.snippet,
+                "event_start_utc": candidate.evidence.event_start_utc,
+                "event_end_utc": candidate.evidence.event_end_utc,
+                "event_start_local": candidate.evidence.event_start_local,
+                "event_end_local": candidate.evidence.event_end_local,
+                "start_offset_sec": candidate.evidence.start_offset_sec,
+                "end_offset_sec": candidate.evidence.end_offset_sec,
+                "rank_score": candidate.rank_score
+            }))
+            .collect::<Vec<Value>>()),
     });
 
     if candidates.is_empty() {
@@ -540,6 +601,26 @@ Rules:
                 .unwrap_or("disabled")
         ),
     });
+    on_trace(TraceEvent {
+        event_type: "rerank_input".to_string(),
+        payload: json!({
+            "model_id": state.investigation_reranker_model,
+            "request_json": {
+                "query": &request.question,
+                "documents": candidates.iter().map(|candidate| {
+                    format!(
+                        "camera_id={} event_start_local={} event_end_local={} snippet={}",
+                        candidate.evidence.camera_id,
+                        candidate.evidence.event_start_local,
+                        candidate.evidence.event_end_local,
+                        candidate.evidence.snippet
+                    )
+                }).collect::<Vec<String>>(),
+                "top_n": candidates.len(),
+                "return_documents": false
+            }
+        }),
+    });
     let rerank_outcome = rerank_candidates(
         state,
         client.clone(),
@@ -561,6 +642,37 @@ Rules:
             },
             |_| format_rerank_debug_message(&rerank_outcome),
         ),
+    });
+    on_trace(TraceEvent {
+        event_type: "rerank_output".to_string(),
+        payload: json!({
+            "applied": rerank_outcome.applied,
+            "response_json": rerank_outcome.response.as_ref().map(|resp| json!({
+                "results": resp.results.iter().map(|item| json!({
+                    "index": item.index,
+                    "relevance_score": item.relevance_score
+                })).collect::<Vec<Value>>(),
+                "usage": {
+                    "input_tokens": resp.usage.input_tokens,
+                    "output_tokens": resp.usage.output_tokens
+                },
+                "request_id": resp.request_id
+            })),
+            "debug": rerank_outcome.debug.as_ref().map(|debug| json!({
+                "model_id": debug.model_id,
+                "candidate_count": debug.candidate_count,
+                "reranked_count": debug.reranked_count,
+                "top_results": debug.top_results.iter().map(|result| json!({
+                    "event_id": result.event_id,
+                    "relevance_score": result.relevance_score
+                })).collect::<Vec<Value>>()
+            })),
+            "final_candidates": candidates.iter().enumerate().map(|(index, candidate)| json!({
+                "index": index,
+                "event_id": candidate.evidence.event_id,
+                "final_rank_score": candidate.rank_score
+            })).collect::<Vec<Value>>()
+        }),
     });
 
     candidates.sort_by(|left, right| {
@@ -613,6 +725,14 @@ Rules:
         planner.tool_calls,
         serde_json::to_string(&candidate_json)?
     );
+    on_trace(TraceEvent {
+        event_type: "model_request".to_string(),
+        payload: json!({
+            "phase": "synthesis",
+            "model_id": &model_id,
+            "request_json": to_model_payload(synthesis_system_prompt, &synthesis_user_prompt, 800)
+        }),
+    });
 
     on_tool_use(ToolUseEvent {
         tool_name: "bedrock_synthesis".to_string(),
@@ -640,6 +760,13 @@ Rules:
     let answer_response: AnswerResponse =
         parse_json_body(&synthesis_completion.content)
             .context("invalid synthesis json response")?;
+    on_trace(TraceEvent {
+        event_type: "model_response".to_string(),
+        payload: json!({
+            "phase": "synthesis",
+            "response_json_text": &synthesis_completion.content
+        }),
+    });
 
     let candidates_by_event_id: HashMap<String, CandidateMoment> = candidates
         .into_iter()
@@ -765,17 +892,29 @@ struct CandidateSearchParams {
     search_mode: hybrid_search::SearchMode,
 }
 
+struct CandidateCollection {
+    deduped: Vec<CandidateMoment>,
+    raw_query_hits: Vec<RawQueryHits>,
+}
+
+#[derive(Debug, Serialize)]
+struct RawQueryHits {
+    query: String,
+    hits: Vec<hybrid_search::HybridSearchHit>,
+}
+
 fn collect_candidates(
     state: &Arc<AppState>,
     search_queries: &[String],
     params: &CandidateSearchParams,
 ) -> Result<Vec<CandidateMoment>> {
-    collect_candidates_with_progress(
+    let collected = collect_candidates_with_progress(
         state,
         search_queries,
         params,
         |_query_term, _hit_count| {},
-    )
+    )?;
+    Ok(collected.deduped)
 }
 
 fn collect_candidates_with_progress<F>(
@@ -783,12 +922,13 @@ fn collect_candidates_with_progress<F>(
     search_queries: &[String],
     params: &CandidateSearchParams,
     mut on_query_results: F,
-) -> Result<Vec<CandidateMoment>>
+) -> Result<CandidateCollection>
 where
     F: FnMut(&str, usize),
 {
     let conn = state.zumblezay_db.get()?;
     let mut candidates = Vec::new();
+    let mut raw_query_hits = Vec::new();
     let per_query_limit =
         usize::max(10, params.limit / usize::max(1, search_queries.len()));
 
@@ -809,6 +949,10 @@ where
             params.search_mode,
             state.bedrock_client.clone(),
         )?;
+        raw_query_hits.push(RawQueryHits {
+            query: query_term.clone(),
+            hits: hits.clone(),
+        });
 
         let mut query_hits = 0;
         for hit in hits {
@@ -897,15 +1041,21 @@ where
     }
 
     let mut deduped: HashMap<String, CandidateMoment> = HashMap::new();
-    for candidate in candidates {
+    for candidate in &candidates {
         match deduped.get(&candidate.evidence.event_id) {
             Some(existing) if existing.rank_score >= candidate.rank_score => {}
             _ => {
-                deduped.insert(candidate.evidence.event_id.clone(), candidate);
+                deduped.insert(
+                    candidate.evidence.event_id.clone(),
+                    candidate.clone(),
+                );
             }
         }
     }
-    Ok(deduped.into_values().collect())
+    Ok(CandidateCollection {
+        deduped: deduped.into_values().collect(),
+        raw_query_hits,
+    })
 }
 
 fn normalize_scores(values: &[f64]) -> Vec<f64> {
@@ -981,6 +1131,7 @@ async fn rerank_candidates(
     };
 
     let usage = rerank_response.usage.clone();
+    let response_for_trace = rerank_response.clone();
     let mut debug = RerankDebugInfo {
         model_id: reranker_model_id.to_string(),
         candidate_count: candidates.len(),
@@ -1013,6 +1164,7 @@ async fn rerank_candidates(
             usage: Some(usage),
             estimated_cost_usd,
             debug: Some(debug),
+            response: Some(response_for_trace.clone()),
         };
     }
 
@@ -1040,6 +1192,7 @@ async fn rerank_candidates(
         usage: Some(usage),
         estimated_cost_usd,
         debug: Some(debug),
+        response: Some(response_for_trace),
     }
 }
 
@@ -1164,6 +1317,7 @@ struct RerankOutcome {
     usage: Option<BedrockUsage>,
     estimated_cost_usd: f64,
     debug: Option<RerankDebugInfo>,
+    response: Option<crate::bedrock::BedrockRerankResponse>,
 }
 
 struct BedrockCompletionRequest<'a> {
