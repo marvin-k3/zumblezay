@@ -1960,6 +1960,14 @@ struct Args {
     )]
     investigation_model: String,
 
+    /// Optional Bedrock reranker model used to re-order investigation candidates
+    #[arg(
+        long,
+        env = "BEDROCK_INVESTIGATION_RERANKER_MODEL",
+        default_value = "cohere.rerank-v3-5:0"
+    )]
+    investigation_reranker_model: String,
+
     /// Original path prefix to replace in video paths
     #[arg(long, default_value = "/data")]
     video_path_original_prefix: String,
@@ -4117,6 +4125,10 @@ pub async fn serve() -> Result<()> {
         enable_embedding_updates: args.enable_embedding_updates,
         default_summary_model: args.default_summary_model,
         investigation_model: args.investigation_model,
+        investigation_reranker_model: Some(
+            args.investigation_reranker_model.trim().to_string(),
+        )
+        .filter(|value| !value.is_empty()),
         video_path_original_prefix: args.video_path_original_prefix,
         video_path_replacement_prefix: args.video_path_replacement_prefix,
         timezone_str: args.timezone,

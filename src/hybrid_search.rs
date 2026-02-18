@@ -2002,7 +2002,10 @@ fn hash_hex(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bedrock::{BedrockCompletionResponse, BedrockEmbeddingResponse};
+    use crate::bedrock::{
+        BedrockCompletionResponse, BedrockEmbeddingResponse,
+        BedrockRerankResponse,
+    };
     use crate::init_zumblezay_db;
     use anyhow::anyhow;
     use async_trait::async_trait;
@@ -2109,6 +2112,16 @@ mod tests {
                 },
                 request_id: Some("tracking-bedrock-client".to_string()),
             })
+        }
+
+        async fn rerank_documents(
+            &self,
+            _model_id: &str,
+            _query: &str,
+            _documents: &[String],
+            _top_n: usize,
+        ) -> Result<BedrockRerankResponse> {
+            Err(anyhow!("rerank_documents not used by this test"))
         }
     }
 

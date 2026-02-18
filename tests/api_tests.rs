@@ -1746,7 +1746,6 @@ async fn test_investigate_endpoint_returns_answer_and_evidence() {
         params!["lunch-1", "The child had lunch with noodles and fruit."],
     )
     .unwrap();
-
     let response = app_router
         .oneshot(
             Request::builder()
@@ -1791,6 +1790,139 @@ async fn test_investigate_endpoint_returns_answer_and_evidence() {
         )
         .unwrap();
     assert_eq!(spend_rows, 2, "expected planner + answer ledger rows");
+}
+
+#[tokio::test]
+async fn test_investigate_endpoint_logs_reranker_spend_when_enabled() {
+    init_test_logging();
+    let bedrock_client = Arc::new(
+        FakeBedrockClient::new()
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "search_queries": ["noodles fruit", "asked for juice"],
+                    "time_window_start_utc": "2020-01-01T00:00:00Z",
+                    "time_window_end_utc": "2030-01-01T00:00:00Z",
+                    "tool_calls": ["get_current_time"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 120,
+                    output_tokens: 45,
+                },
+                request_id: Some("req-plan".to_string()),
+            })
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "answer": "The child appears to have lunch in event lunch-1.",
+                    "evidence_event_ids": ["lunch-1"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 160,
+                    output_tokens: 70,
+                },
+                request_id: Some("req-answer".to_string()),
+            }),
+    );
+    let (app_state, app_router) = app_with_custom_state(|state| {
+        state.bedrock_client = Some(bedrock_client);
+        state.investigation_model =
+            "unpriced.model-for-fail-closed-test".to_string();
+        state.investigation_reranker_model =
+            Some("cohere.rerank-v3-5:0".to_string());
+    });
+
+    let model_id = app_state.investigation_model.clone();
+    let reranker_model = app_state
+        .investigation_reranker_model
+        .clone()
+        .expect("reranker model configured");
+    let conn = app_state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![model_id, 0.003, 0.015, Utc::now().timestamp()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![reranker_model, 0.001, 0.0, Utc::now().timestamp()],
+    )
+    .unwrap();
+
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-1",
+        "2024-03-15",
+        "12:15:00",
+        "kitchen-cam",
+        "The child had lunch with noodles and fruit.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params!["lunch-1", "The child had lunch with noodles and fruit."],
+    )
+    .unwrap();
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-2",
+        "2024-03-15",
+        "11:55:00",
+        "kitchen-cam",
+        "The child started lunch and asked for juice.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params!["lunch-2", "The child started lunch and asked for juice."],
+    )
+    .unwrap();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"question": "when did the child have lunch yesterday"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let rerank_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM bedrock_spend_ledger
+             WHERE category = ? AND operation = 'investigation_rerank'",
+            params![INVESTIGATION_SPEND_CATEGORY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rerank_rows, 1, "expected one reranker ledger row");
+
+    let spend_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM bedrock_spend_ledger WHERE category = ?",
+            params![INVESTIGATION_SPEND_CATEGORY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        spend_rows, 3,
+        "expected planner + reranker + answer ledger rows"
+    );
 }
 
 #[tokio::test]
@@ -1972,6 +2104,138 @@ async fn test_investigate_stream_endpoint_emits_stream_events() {
         text
     );
     assert!(text.contains("event: done"), "missing done event: {}", text);
+}
+
+#[tokio::test]
+async fn test_investigate_stream_endpoint_emits_reranker_debug_info() {
+    init_test_logging();
+    let bedrock_client = Arc::new(
+        FakeBedrockClient::new()
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "search_queries": ["noodles fruit", "asked for juice"],
+                    "time_window_start_utc": "2020-01-01T00:00:00Z",
+                    "time_window_end_utc": "2030-01-01T00:00:00Z",
+                    "tool_calls": ["get_current_time"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 40,
+                    output_tokens: 20,
+                },
+                request_id: Some("req-plan".to_string()),
+            })
+            .with_response(BedrockCompletionResponse {
+                content: r#"{
+                    "answer": "Evidence indicates lunch happened in the kitchen.",
+                    "evidence_event_ids": ["lunch-stream-1"]
+                }"#
+                .to_string(),
+                usage: BedrockUsage {
+                    input_tokens: 50,
+                    output_tokens: 25,
+                },
+                request_id: Some("req-answer".to_string()),
+            }),
+    );
+    let (app_state, app_router) = app_with_custom_state(|state| {
+        state.bedrock_client = Some(bedrock_client);
+        state.investigation_reranker_model =
+            Some("cohere.rerank-v3-5:0".to_string());
+    });
+    let model_id = app_state.investigation_model.clone();
+    let reranker_model = app_state
+        .investigation_reranker_model
+        .clone()
+        .expect("reranker model configured");
+    let conn = app_state.zumblezay_db.get().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![model_id, 0.003, 0.015, Utc::now().timestamp()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO bedrock_pricing (
+            model_id,
+            input_cost_per_1k_usd,
+            output_cost_per_1k_usd,
+            updated_at
+        ) VALUES (?, ?, ?, ?)",
+        params![reranker_model, 0.001, 0.0, Utc::now().timestamp()],
+    )
+    .unwrap();
+
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-stream-1",
+        "2024-03-15",
+        "12:15:00",
+        "kitchen-cam",
+        "The child had lunch with noodles and fruit.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params![
+            "lunch-stream-1",
+            "The child had lunch with noodles and fruit."
+        ],
+    )
+    .unwrap();
+    insert_event_with_transcript(
+        &app_state,
+        "lunch-stream-2",
+        "2024-03-15",
+        "11:55:00",
+        "kitchen-cam",
+        "The child started lunch and asked for juice.",
+    );
+    conn.execute(
+        "INSERT INTO transcript_search (event_id, content) VALUES (?, ?)",
+        params![
+            "lunch-stream-2",
+            "The child started lunch and asked for juice."
+        ],
+    )
+    .unwrap();
+
+    let response = app_router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/investigate/stream")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"question":"when did the child have lunch"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("\"tool_name\":\"bedrock_reranker\""),
+        "missing reranker tool event: {}",
+        text
+    );
+    assert!(
+        text.contains("model=cohere.rerank-v3-5:0"),
+        "missing reranker model debug info: {}",
+        text
+    );
+    assert!(
+        text.contains("top=["),
+        "missing reranker top results debug info: {}",
+        text
+    );
 }
 
 #[tokio::test]

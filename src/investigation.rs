@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tracing::warn;
 
 pub const INVESTIGATION_SPEND_CATEGORY: &str = "video_investigation_search";
 const RETRIEVAL_POOL_LIMIT: usize = 30;
@@ -105,6 +106,20 @@ pub struct ToolUseEvent {
     pub tool_name: String,
     pub stage: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct RerankDebugResult {
+    event_id: String,
+    relevance_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RerankDebugInfo {
+    model_id: String,
+    candidate_count: usize,
+    reranked_count: usize,
+    top_results: Vec<RerankDebugResult>,
 }
 
 pub async fn investigate_question(
@@ -218,6 +233,13 @@ Rules:
         });
     }
 
+    let rerank_outcome = rerank_candidates(
+        state,
+        client.clone(),
+        &request.question,
+        &mut candidates,
+    )
+    .await;
     candidates.sort_by(|left, right| {
         right
             .rank_score
@@ -317,11 +339,17 @@ Rules:
         }
     }
 
+    let mut usage_values =
+        vec![planner_completion.usage, synthesis_completion.usage];
+    if let Some(rerank_usage) = rerank_outcome.usage {
+        usage_values.push(rerank_usage);
+    }
     let usage = aggregate_usage(
         &model_id,
-        &[planner_completion.usage, synthesis_completion.usage],
+        &usage_values,
         planner_completion.estimated_cost_usd
-            + synthesis_completion.estimated_cost_usd,
+            + synthesis_completion.estimated_cost_usd
+            + rerank_outcome.estimated_cost_usd,
     );
 
     Ok(InvestigationResponse {
@@ -500,6 +528,41 @@ Rules:
         });
     }
 
+    on_tool_use(ToolUseEvent {
+        tool_name: "bedrock_reranker".to_string(),
+        stage: "started".to_string(),
+        message: format!(
+            "Reranking {} candidates using {}",
+            candidates.len(),
+            state
+                .investigation_reranker_model
+                .as_deref()
+                .unwrap_or("disabled")
+        ),
+    });
+    let rerank_outcome = rerank_candidates(
+        state,
+        client.clone(),
+        &request.question,
+        &mut candidates,
+    )
+    .await;
+    on_tool_use(ToolUseEvent {
+        tool_name: "bedrock_reranker".to_string(),
+        stage: if rerank_outcome.applied {
+            "completed".to_string()
+        } else {
+            "skipped".to_string()
+        },
+        message: rerank_outcome.debug.as_ref().map_or_else(
+            || {
+                "Candidate reranking unavailable; using retrieval order"
+                    .to_string()
+            },
+            |_| format_rerank_debug_message(&rerank_outcome),
+        ),
+    });
+
     candidates.sort_by(|left, right| {
         right
             .rank_score
@@ -612,11 +675,17 @@ Rules:
         }
     }
 
+    let mut usage_values =
+        vec![planner_completion.usage, synthesis_completion.usage];
+    if let Some(rerank_usage) = rerank_outcome.usage {
+        usage_values.push(rerank_usage);
+    }
     let usage = aggregate_usage(
         &model_id,
-        &[planner_completion.usage, synthesis_completion.usage],
+        &usage_values,
         planner_completion.estimated_cost_usd
-            + synthesis_completion.estimated_cost_usd,
+            + synthesis_completion.estimated_cost_usd
+            + rerank_outcome.estimated_cost_usd,
     );
 
     Ok(InvestigationResponse {
@@ -839,6 +908,177 @@ where
     Ok(deduped.into_values().collect())
 }
 
+fn normalize_scores(values: &[f64]) -> Vec<f64> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !min.is_finite() || !max.is_finite() || (max - min).abs() < f64::EPSILON
+    {
+        return vec![1.0; values.len()];
+    }
+    values
+        .iter()
+        .map(|value| (value - min) / (max - min))
+        .collect()
+}
+
+async fn rerank_candidates(
+    state: &Arc<AppState>,
+    client: Arc<dyn BedrockClientTrait>,
+    question: &str,
+    candidates: &mut [CandidateMoment],
+) -> RerankOutcome {
+    if candidates.len() < 2 {
+        return RerankOutcome::default();
+    }
+    let Some(reranker_model_id) = state
+        .investigation_reranker_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return RerankOutcome::default();
+    };
+
+    let documents: Vec<String> = candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "camera_id={} event_start_local={} event_end_local={} snippet={}",
+                candidate.evidence.camera_id,
+                candidate.evidence.event_start_local,
+                candidate.evidence.event_end_local,
+                candidate.evidence.snippet
+            )
+        })
+        .collect();
+    let retrieval_scores: Vec<f64> = candidates
+        .iter()
+        .map(|candidate| candidate.rank_score)
+        .collect();
+    let normalized_retrieval = normalize_scores(&retrieval_scores);
+
+    let rerank_response = match client
+        .rerank_documents(
+            reranker_model_id,
+            question,
+            &documents,
+            documents.len(),
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                model_id = reranker_model_id,
+                error = %error,
+                "Bedrock rerank failed; continuing with retrieval ranking"
+            );
+            return RerankOutcome::default();
+        }
+    };
+
+    let usage = rerank_response.usage.clone();
+    let mut debug = RerankDebugInfo {
+        model_id: reranker_model_id.to_string(),
+        candidate_count: candidates.len(),
+        reranked_count: rerank_response.results.len(),
+        top_results: Vec::new(),
+    };
+    let estimated_cost_usd = match log_bedrock_spend(
+        state,
+        "investigation_rerank",
+        reranker_model_id,
+        rerank_response.request_id.as_deref(),
+        usage.clone(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                model_id = reranker_model_id,
+                error = %error,
+                "failed to log rerank spend; continuing with zero rerank cost"
+            );
+            0.0
+        }
+    };
+
+    if rerank_response.results.is_empty() {
+        return RerankOutcome {
+            applied: false,
+            usage: Some(usage),
+            estimated_cost_usd,
+            debug: Some(debug),
+        };
+    }
+
+    let mut rerank_by_index: HashMap<usize, f64> = HashMap::new();
+    for result in rerank_response.results {
+        if debug.top_results.len() < 5 {
+            if let Some(candidate) = candidates.get(result.index) {
+                debug.top_results.push(RerankDebugResult {
+                    event_id: candidate.evidence.event_id.clone(),
+                    relevance_score: result.relevance_score,
+                });
+            }
+        }
+        rerank_by_index.insert(result.index, result.relevance_score);
+    }
+    for (idx, candidate) in candidates.iter_mut().enumerate() {
+        let rerank = rerank_by_index.get(&idx).copied().unwrap_or(-1.0);
+        let retrieval = normalized_retrieval.get(idx).copied().unwrap_or(0.0);
+        // Use rerank score as primary ordering and retrieval score as tie-breaker.
+        candidate.rank_score = rerank + (retrieval * 0.001);
+    }
+
+    RerankOutcome {
+        applied: true,
+        usage: Some(usage),
+        estimated_cost_usd,
+        debug: Some(debug),
+    }
+}
+
+fn format_rerank_debug_message(outcome: &RerankOutcome) -> String {
+    let Some(debug) = outcome.debug.as_ref() else {
+        return "Candidate reranking applied".to_string();
+    };
+    let top_results = if debug.top_results.is_empty() {
+        "none".to_string()
+    } else {
+        debug
+            .top_results
+            .iter()
+            .map(|item| {
+                format!("{}:{:.3}", item.event_id, item.relevance_score)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let usage_text = outcome.usage.as_ref().map_or_else(
+        || "usage_in=0 usage_out=0".to_string(),
+        |usage| {
+            format!(
+                "usage_in={} usage_out={}",
+                usage.input_tokens, usage.output_tokens
+            )
+        },
+    );
+    format!(
+        "model={} candidates={} results={} top=[{}] {} cost_usd={:.6}",
+        debug.model_id,
+        debug.candidate_count,
+        debug.reranked_count,
+        top_results,
+        usage_text,
+        outcome.estimated_cost_usd
+    )
+}
+
 fn timestamp_to_rfc3339(value: f64) -> String {
     chrono::DateTime::<Utc>::from_timestamp(value as i64, 0)
         .map(|value| value.to_rfc3339())
@@ -918,6 +1158,14 @@ struct LoggedCompletion {
     estimated_cost_usd: f64,
 }
 
+#[derive(Default)]
+struct RerankOutcome {
+    applied: bool,
+    usage: Option<BedrockUsage>,
+    estimated_cost_usd: f64,
+    debug: Option<RerankDebugInfo>,
+}
+
 struct BedrockCompletionRequest<'a> {
     operation: &'a str,
     system_prompt: &'a str,
@@ -938,32 +1186,14 @@ async fn invoke_and_log_bedrock(
         .complete_text(model_id, system_prompt, user_prompt, max_tokens)
         .await?;
 
-    let conn = state.zumblezay_db.get()?;
-    let spend_request = SpendLogRequest {
-        category: INVESTIGATION_SPEND_CATEGORY,
+    let estimated_cost_usd = log_bedrock_spend(
+        state,
         operation,
         model_id,
-        request_id: completion.request_id.as_deref(),
-        usage: completion.usage.clone(),
-    };
-    let estimated_cost_usd =
-        match record_bedrock_spend(&conn, spend_request.clone()) {
-            Ok(value) => value,
-            Err(error) if is_missing_pricing_error(&error) => {
-                if let Some(rate) = fetch_bedrock_pricing_from_aws(
-                    model_id,
-                    state.bedrock_region.as_deref(),
-                )
-                .await?
-                {
-                    upsert_bedrock_pricing(&conn, model_id, rate)?;
-                    record_bedrock_spend(&conn, spend_request)?
-                } else {
-                    return Err(error);
-                }
-            }
-            Err(error) => return Err(error),
-        };
+        completion.request_id.as_deref(),
+        completion.usage.clone(),
+    )
+    .await?;
 
     Ok(LoggedCompletion {
         usage: completion.usage,
@@ -989,36 +1219,52 @@ async fn invoke_and_log_bedrock_streaming(
         )
         .await?;
 
-    let conn = state.zumblezay_db.get()?;
-    let spend_request = SpendLogRequest {
-        category: INVESTIGATION_SPEND_CATEGORY,
-        operation: request.operation,
+    let estimated_cost_usd = log_bedrock_spend(
+        state,
+        request.operation,
         model_id,
-        request_id: completion.request_id.as_deref(),
-        usage: completion.usage.clone(),
-    };
-    let estimated_cost_usd =
-        match record_bedrock_spend(&conn, spend_request.clone()) {
-            Ok(value) => value,
-            Err(error) if is_missing_pricing_error(&error) => {
-                if let Some(rate) = fetch_bedrock_pricing_from_aws(
-                    model_id,
-                    state.bedrock_region.as_deref(),
-                )
-                .await?
-                {
-                    upsert_bedrock_pricing(&conn, model_id, rate)?;
-                    record_bedrock_spend(&conn, spend_request)?
-                } else {
-                    return Err(error);
-                }
-            }
-            Err(error) => return Err(error),
-        };
+        completion.request_id.as_deref(),
+        completion.usage.clone(),
+    )
+    .await?;
 
     Ok(LoggedCompletion {
         usage: completion.usage,
         content: completion.content,
         estimated_cost_usd,
     })
+}
+
+async fn log_bedrock_spend(
+    state: &Arc<AppState>,
+    operation: &str,
+    model_id: &str,
+    request_id: Option<&str>,
+    usage: BedrockUsage,
+) -> Result<f64> {
+    let conn = state.zumblezay_db.get()?;
+    let spend_request = SpendLogRequest {
+        category: INVESTIGATION_SPEND_CATEGORY,
+        operation,
+        model_id,
+        request_id,
+        usage,
+    };
+    match record_bedrock_spend(&conn, spend_request.clone()) {
+        Ok(value) => Ok(value),
+        Err(error) if is_missing_pricing_error(&error) => {
+            if let Some(rate) = fetch_bedrock_pricing_from_aws(
+                model_id,
+                state.bedrock_region.as_deref(),
+            )
+            .await?
+            {
+                upsert_bedrock_pricing(&conn, model_id, rate)?;
+                Ok(record_bedrock_spend(&conn, spend_request)?)
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
 }

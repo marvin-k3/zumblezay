@@ -37,6 +37,19 @@ pub struct BedrockEmbeddingResponse {
     pub request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BedrockRerankResult {
+    pub index: usize,
+    pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BedrockRerankResponse {
+    pub results: Vec<BedrockRerankResult>,
+    pub usage: BedrockUsage,
+    pub request_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingPurpose {
     GenericIndex,
@@ -78,6 +91,14 @@ pub trait BedrockClientTrait: Send + Sync {
         dimensions: i32,
         purpose: EmbeddingPurpose,
     ) -> Result<BedrockEmbeddingResponse>;
+
+    async fn rerank_documents(
+        &self,
+        model_id: &str,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<BedrockRerankResponse>;
 }
 
 pub struct RealBedrockClient {
@@ -617,6 +638,117 @@ impl BedrockClientTrait for RealBedrockClient {
             request_id,
         })
     }
+
+    async fn rerank_documents(
+        &self,
+        model_id: &str,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<BedrockRerankResponse> {
+        if documents.is_empty() {
+            return Ok(BedrockRerankResponse {
+                results: Vec::new(),
+                usage: BedrockUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+                request_id: None,
+            });
+        }
+
+        let body = serde_json::json!({
+            "query": query,
+            "documents": documents,
+            "top_n": top_n.min(documents.len()),
+            "return_documents": false
+        });
+        let body_bytes = serde_json::to_vec(&body)
+            .context("serialize bedrock rerank body")?;
+        let response = tokio::time::timeout(
+            MODEL_INVOKE_TIMEOUT,
+            self.client()
+                .await?
+                .invoke_model()
+                .model_id(model_id)
+                .content_type("application/json")
+                .accept("application/json")
+                .body(Blob::new(body_bytes))
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Bedrock rerank invoke timed out for model '{model_id}' after {}s",
+                MODEL_INVOKE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|error| {
+            anyhow!(
+                "Bedrock rerank invoke failed for model '{model_id}': {error:?}"
+            )
+        })?;
+
+        let request_id = response.request_id().map(str::to_string);
+        let payload: Value = serde_json::from_slice(response.body().as_ref())
+            .context("parse bedrock rerank response body")?;
+
+        let mut results = Vec::new();
+        if let Some(values) = payload.get("results").and_then(Value::as_array) {
+            for value in values {
+                let Some(index_u64) =
+                    value.get("index").and_then(Value::as_u64)
+                else {
+                    continue;
+                };
+                let Some(index) = usize::try_from(index_u64).ok() else {
+                    continue;
+                };
+                let relevance_score = value
+                    .get("relevance_score")
+                    .and_then(Value::as_f64)
+                    .or_else(|| {
+                        value.get("relevanceScore").and_then(Value::as_f64)
+                    })
+                    .unwrap_or(0.0);
+                results.push(BedrockRerankResult {
+                    index,
+                    relevance_score,
+                });
+            }
+        }
+
+        let usage = BedrockUsage {
+            input_tokens: payload
+                .get("usage")
+                .and_then(|value| value.get("input_tokens"))
+                .and_then(Value::as_i64)
+                .or_else(|| {
+                    payload
+                        .get("usage")
+                        .and_then(|value| value.get("inputTokens"))
+                        .and_then(Value::as_i64)
+                })
+                .unwrap_or(0),
+            output_tokens: payload
+                .get("usage")
+                .and_then(|value| value.get("output_tokens"))
+                .and_then(Value::as_i64)
+                .or_else(|| {
+                    payload
+                        .get("usage")
+                        .and_then(|value| value.get("outputTokens"))
+                        .and_then(Value::as_i64)
+                })
+                .unwrap_or(0),
+        };
+
+        Ok(BedrockRerankResponse {
+            results,
+            usage,
+            request_id,
+        })
+    }
 }
 
 fn estimate_embedding_input_tokens(text: &str) -> i64 {
@@ -710,6 +842,53 @@ impl BedrockClientTrait for FakeBedrockClient {
             embedding,
             usage,
             request_id: Some("fake-bedrock-embed".to_string()),
+        })
+    }
+
+    async fn rerank_documents(
+        &self,
+        _model_id: &str,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> Result<BedrockRerankResponse> {
+        let query_tokens: Vec<String> = query
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        let mut scored: Vec<BedrockRerankResult> = documents
+            .iter()
+            .enumerate()
+            .map(|(index, doc)| {
+                let lower = doc.to_ascii_lowercase();
+                let overlap = query_tokens
+                    .iter()
+                    .filter(|token| lower.contains(token.as_str()))
+                    .count() as f64;
+                let denom = query_tokens.len().max(1) as f64;
+                BedrockRerankResult {
+                    index,
+                    relevance_score: overlap / denom,
+                }
+            })
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .relevance_score
+                .partial_cmp(&left.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(top_n.min(scored.len()));
+
+        Ok(BedrockRerankResponse {
+            results: scored,
+            usage: BedrockUsage {
+                input_tokens: estimate_token_count(query),
+                output_tokens: 0,
+            },
+            request_id: Some("fake-bedrock-rerank".to_string()),
         })
     }
 }

@@ -17,7 +17,7 @@ use tokio::time::{sleep, Duration as TokioDuration};
 use zumblezay::app;
 use zumblezay::bedrock::{
     BedrockClientTrait, BedrockCompletionResponse, BedrockEmbeddingResponse,
-    BedrockUsage, EmbeddingPurpose,
+    BedrockRerankResponse, BedrockUsage, EmbeddingPurpose,
 };
 use zumblezay::transcripts;
 use zumblezay::AppState;
@@ -211,6 +211,23 @@ impl BedrockClientTrait for PlaywrightBedrockClient {
                 output_tokens: 0,
             },
             request_id: Some("playwright-embed".to_string()),
+        })
+    }
+
+    async fn rerank_documents(
+        &self,
+        _model_id: &str,
+        _query: &str,
+        _documents: &[String],
+        _top_n: usize,
+    ) -> Result<BedrockRerankResponse> {
+        Ok(BedrockRerankResponse {
+            results: Vec::new(),
+            usage: BedrockUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            request_id: Some("playwright-rerank".to_string()),
         })
     }
 }
