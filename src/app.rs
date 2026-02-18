@@ -172,6 +172,9 @@ struct BedrockSpendResponse {
     recent_entries: Vec<BedrockSpendLedgerRow>,
 }
 
+const STALE_RUNNING_EMBEDDING_JOB_TTL_SECS: i64 = 15 * 60;
+const STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS: u64 = 60;
+
 #[derive(Debug, Deserialize)]
 struct CreateChatMessageRequest {
     question: String,
@@ -1942,7 +1945,7 @@ struct Args {
     embedding_backfill_worker_batch_size: usize,
 
     /// Max concurrent embedding model invocations per backfill worker drain cycle
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 2)]
     embedding_backfill_worker_concurrency: usize,
 
     /// Default model to use for summary generation
@@ -2406,6 +2409,10 @@ async fn drain_embedding_jobs_loop(
     concurrency: usize,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
+    let mut last_stale_recovery = tokio::time::Instant::now()
+        - Duration::from_secs(
+            STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
+        );
     info!(
         "Starting embedding queue drain loop with {}s interval, batch_size={}, concurrency={}",
         interval.as_secs_f64(),
@@ -2420,12 +2427,24 @@ async fn drain_embedding_jobs_loop(
                 break;
             }
             _ = async {
+                let run_stale_recovery = last_stale_recovery.elapsed()
+                    >= Duration::from_secs(
+                        STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
+                    );
                 let state_for_work = state.clone();
-                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool)> {
+                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool, usize)> {
                     let conn = state_for_work.zumblezay_db.get()?;
+                    let recovered = if run_stale_recovery {
+                        crate::hybrid_search::requeue_stale_running_embedding_jobs(
+                            &conn,
+                            STALE_RUNNING_EMBEDDING_JOB_TTL_SECS,
+                        )?
+                    } else {
+                        0
+                    };
                     let paused_for_backfill = has_running_backfill(&conn)?;
                     if paused_for_backfill {
-                        return Ok((0, true));
+                        return Ok((0, true, recovered));
                     }
                     let processed = crate::hybrid_search::process_pending_embedding_jobs_embeddings_only_with_client_and_concurrency(
                         &conn,
@@ -2433,11 +2452,20 @@ async fn drain_embedding_jobs_loop(
                         concurrency,
                         state_for_work.bedrock_client.clone(),
                     )?;
-                    Ok((processed, false))
+                    Ok((processed, false, recovered))
                 }).await;
 
                 match result {
-                    Ok(Ok((processed, paused_for_backfill))) => {
+                    Ok(Ok((processed, paused_for_backfill, recovered))) => {
+                        if run_stale_recovery {
+                            last_stale_recovery = tokio::time::Instant::now();
+                        }
+                        if recovered > 0 {
+                            info!(
+                                "Recovered {} stale running embedding jobs during drain loop",
+                                recovered
+                            );
+                        }
                         if paused_for_backfill {
                             debug!("Embedding queue drain paused while backfill is running");
                         }
@@ -2475,6 +2503,10 @@ async fn drain_embedding_backfill_jobs_loop(
     concurrency: usize,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
+    let mut last_stale_recovery = tokio::time::Instant::now()
+        - Duration::from_secs(
+            STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
+        );
     info!(
         "Starting embedding backfill queue drain loop with {}s interval, batch_size={}, concurrency={}",
         interval.as_secs_f64(),
@@ -2489,23 +2521,44 @@ async fn drain_embedding_backfill_jobs_loop(
                 break;
             }
             _ = async {
+                let run_stale_recovery = last_stale_recovery.elapsed()
+                    >= Duration::from_secs(
+                        STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
+                    );
                 let state_for_work = state.clone();
-                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool)> {
+                let result = tokio::task::spawn_blocking(move || -> Result<(usize, bool, usize)> {
                     let conn = state_for_work.zumblezay_db.get()?;
+                    let recovered = if run_stale_recovery {
+                        crate::hybrid_search::requeue_stale_running_embedding_jobs(
+                            &conn,
+                            STALE_RUNNING_EMBEDDING_JOB_TTL_SECS,
+                        )?
+                    } else {
+                        0
+                    };
                     let paused_for_backfill = has_running_backfill(&conn)?;
                     if paused_for_backfill {
-                        return Ok((0, true));
+                        return Ok((0, true, recovered));
                     }
                     let processed = crate::hybrid_search::process_pending_embedding_jobs_backfill_only_with_client(
                         &conn,
                         batch_size,
                         state_for_work.bedrock_client.clone(),
                     )?;
-                    Ok((processed, false))
+                    Ok((processed, false, recovered))
                 }).await;
 
                 match result {
-                    Ok(Ok((processed, paused_for_backfill))) => {
+                    Ok(Ok((processed, paused_for_backfill, recovered))) => {
+                        if run_stale_recovery {
+                            last_stale_recovery = tokio::time::Instant::now();
+                        }
+                        if recovered > 0 {
+                            info!(
+                                "Recovered {} stale running embedding jobs during backfill drain loop",
+                                recovered
+                            );
+                        }
                         if paused_for_backfill {
                             debug!("Embedding backfill queue drain paused while backfill is running");
                         }
@@ -3944,6 +3997,17 @@ pub async fn serve() -> Result<()> {
     {
         let mut conn = zumblezay_pool.get()?;
         crate::init_zumblezay_db(&mut conn)?;
+        let recovered =
+            crate::hybrid_search::requeue_stale_running_embedding_jobs(
+                &conn,
+                STALE_RUNNING_EMBEDDING_JOB_TTL_SECS,
+            )?;
+        if recovered > 0 {
+            info!(
+                "Recovered {} stale running embedding jobs at startup",
+                recovered
+            );
+        }
     }
 
     // Check if cache_db file exists and is writable

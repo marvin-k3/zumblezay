@@ -11,8 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -524,6 +523,25 @@ pub fn process_pending_embedding_jobs_backfill_only_with_client(
     process_backfill_jobs_sequential(conn, max_jobs, bedrock_client.as_ref())
 }
 
+pub fn requeue_stale_running_embedding_jobs(
+    conn: &Connection,
+    stale_after_secs: i64,
+) -> Result<usize> {
+    let stale_after_secs = stale_after_secs.max(1);
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - stale_after_secs;
+    let updated = conn.execute(
+        "UPDATE embedding_jobs
+         SET status = 'pending',
+             next_attempt_at = NULL,
+             updated_at = ?
+         WHERE status = 'running'
+           AND updated_at < ?",
+        params![now, cutoff],
+    )?;
+    Ok(updated)
+}
+
 #[derive(Debug, Clone)]
 struct ClaimedEmbeddingJob {
     job_id: i64,
@@ -625,19 +643,42 @@ fn process_embedding_jobs_parallel(
 
     let mut processed = 0usize;
     for batch in claimed_jobs.chunks(embedding_concurrency) {
-        let mut handles = Vec::with_capacity(batch.len());
-        for job in batch {
-            let job_for_thread = job.clone();
-            let client = bedrock_client.cloned();
-            handles.push(thread::spawn(move || {
-                compute_embedding_for_job(job_for_thread, client)
-            }));
-        }
+        let batch_jobs = batch.to_vec();
+        let client_for_batch = bedrock_client.cloned();
+        let run_batch = move || -> Result<
+            Vec<(ClaimedEmbeddingJob, Result<Option<EmbeddingJobComputationWithMeta>>)>,
+        > {
+            let mut handles = Vec::with_capacity(batch_jobs.len());
+            for job in batch_jobs {
+                let client = client_for_batch.clone();
+                handles.push(bedrock_embedding_runtime().spawn(async move {
+                    compute_embedding_for_job_async(job, client).await
+                }));
+            }
 
-        for handle in handles {
-            let computation = handle.join().map_err(|_| {
-                anyhow::anyhow!("embedding computation thread panicked")
-            })?;
+            bedrock_embedding_runtime().block_on(async {
+                let mut rows = Vec::with_capacity(handles.len());
+                for handle in handles {
+                    let computation = handle.await.map_err(|join_error| {
+                        anyhow::anyhow!(
+                            "embedding computation task failed: {}",
+                            join_error
+                        )
+                    })?;
+                    rows.push(computation);
+                }
+                Ok::<_, anyhow::Error>(rows)
+            })
+        };
+        let computations = if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::spawn(run_batch).join().map_err(|_| {
+                anyhow::anyhow!("embedding computation batch thread panicked")
+            })??
+        } else {
+            run_batch()?
+        };
+
+        for computation in computations {
             if finalize_embedding_job(conn, computation, now)?.is_ok() {
                 processed += 1;
             }
@@ -680,7 +721,7 @@ fn process_backfill_jobs_sequential(
     Ok(processed)
 }
 
-fn compute_embedding_for_job(
+async fn compute_embedding_for_job_async(
     job: ClaimedEmbeddingJob,
     bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
 ) -> (
@@ -701,12 +742,13 @@ fn compute_embedding_for_job(
 
     let dim =
         usize::try_from(job.embedding_dim).unwrap_or(DEFAULT_EMBEDDING_DIM);
-    let result = embed_text(
+    let result = embed_text_async(
         &content_text,
         dim,
         EmbeddingPurpose::GenericIndex,
-        bedrock_client.as_ref(),
+        bedrock_client,
     )
+    .await
     .map(|embedding_result| {
         let embedding_id = deterministic_embedding_id(
             &unit_id,
@@ -1599,11 +1641,7 @@ fn embed_text(
         i32::try_from(dim).context("embedding dimension too large")?;
 
     let run_call = move || -> Result<EmbeddingCallResult> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("create tokio runtime for bedrock embedding call")?;
-        let response = runtime.block_on(client.embed_text(
+        let response = bedrock_embedding_runtime().block_on(client.embed_text(
             &model_id,
             &text_owned,
             dim_i32,
@@ -1631,6 +1669,63 @@ fn embed_text(
     }
 
     run_call()
+}
+
+async fn embed_text_async(
+    text: &str,
+    dim: usize,
+    purpose: EmbeddingPurpose,
+    bedrock_client: Option<Arc<dyn BedrockClientTrait>>,
+) -> Result<EmbeddingCallResult> {
+    let Some(client) = bedrock_client else {
+        return Ok(EmbeddingCallResult {
+            embedding: embed_text_deterministic(text, dim),
+            usage: None,
+            request_id: None,
+        });
+    };
+
+    if dim == 0 {
+        return Ok(EmbeddingCallResult {
+            embedding: Vec::new(),
+            usage: None,
+            request_id: None,
+        });
+    }
+
+    let model_id = ACTIVE_PROVIDER_MODEL_ID.to_string();
+    let dim_i32 =
+        i32::try_from(dim).context("embedding dimension too large")?;
+    let response = client
+        .embed_text(&model_id, text, dim_i32, purpose)
+        .await?;
+    if response.embedding.len() != dim {
+        return Err(anyhow::anyhow!(
+            "bedrock embedding dimension mismatch: expected {}, got {}",
+            dim,
+            response.embedding.len()
+        ));
+    }
+    Ok(EmbeddingCallResult {
+        embedding: response.embedding,
+        usage: Some(response.usage),
+        request_id: response.request_id,
+    })
+}
+
+fn bedrock_embedding_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        let worker_threads = std::thread::available_parallelism()
+            .map(|cpus| cpus.get().clamp(2, 16))
+            .unwrap_or(4);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .thread_name("bedrock-embed")
+            .enable_all()
+            .build()
+            .expect("create shared bedrock embedding runtime")
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1912,7 +2007,14 @@ fn hash_hex(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bedrock::{
+        BedrockCompletionResponse, BedrockEmbeddingResponse,
+    };
     use crate::init_zumblezay_db;
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     fn sample_transcript_json() -> Value {
         serde_json::json!({
@@ -1923,6 +2025,101 @@ mod tests {
                 {"start": 25.0, "end": 41.0, "text": "epsilon zeta"}
             ]
         })
+    }
+
+    struct TrackingBedrockClient {
+        in_flight: Arc<AtomicUsize>,
+        peak_in_flight: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl TrackingBedrockClient {
+        fn new(
+            in_flight: Arc<AtomicUsize>,
+            peak_in_flight: Arc<AtomicUsize>,
+            delay: Duration,
+        ) -> Self {
+            Self {
+                in_flight,
+                peak_in_flight,
+                delay,
+            }
+        }
+
+        fn record_peak(&self, now_in_flight: usize) {
+            loop {
+                let prior =
+                    self.peak_in_flight.load(Ordering::Relaxed);
+                if now_in_flight <= prior {
+                    break;
+                }
+                if self
+                    .peak_in_flight
+                    .compare_exchange(
+                        prior,
+                        now_in_flight,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BedrockClientTrait for TrackingBedrockClient {
+        async fn complete_text(
+            &self,
+            _model_id: &str,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: i32,
+        ) -> Result<BedrockCompletionResponse> {
+            Err(anyhow!("complete_text not used by this test"))
+        }
+
+        async fn complete_text_streaming(
+            &self,
+            _model_id: &str,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: i32,
+            _on_delta: &mut (dyn FnMut(String) + Send),
+        ) -> Result<BedrockCompletionResponse> {
+            Err(anyhow!(
+                "complete_text_streaming not used by this test"
+            ))
+        }
+
+        async fn embed_text(
+            &self,
+            _model_id: &str,
+            text: &str,
+            dimensions: i32,
+            _purpose: EmbeddingPurpose,
+        ) -> Result<BedrockEmbeddingResponse> {
+            let in_flight_now =
+                self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.record_peak(in_flight_now);
+            tokio::time::sleep(self.delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            let dim = usize::try_from(dimensions)
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_EMBEDDING_DIM);
+            Ok(BedrockEmbeddingResponse {
+                embedding: embed_text_deterministic(text, dim),
+                usage: BedrockUsage {
+                    input_tokens: 1,
+                    output_tokens: 0,
+                },
+                request_id: Some("tracking-bedrock-client".to_string()),
+            })
+        }
     }
 
     #[test]
@@ -2106,6 +2303,70 @@ mod tests {
     }
 
     #[test]
+    fn requeue_stale_running_jobs_requeues_only_old_rows() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        init_zumblezay_db(&mut conn)?;
+
+        let now = chrono::Utc::now().timestamp();
+        let stale_updated = now - 1800;
+        let fresh_updated = now - 30;
+
+        conn.execute(
+            "INSERT INTO embedding_jobs (
+                event_id, unit_id, job_type, priority, status,
+                attempt_count, next_attempt_at, last_error, created_at, updated_at
+             ) VALUES ('evt-stale', NULL, 'segment', 10, 'running', 2, 123, 'x', ?, ?)",
+            params![now, stale_updated],
+        )?;
+        conn.execute(
+            "INSERT INTO embedding_jobs (
+                event_id, unit_id, job_type, priority, status,
+                attempt_count, next_attempt_at, last_error, created_at, updated_at
+             ) VALUES ('evt-fresh', NULL, 'segment', 10, 'running', 2, 456, 'y', ?, ?)",
+            params![now, fresh_updated],
+        )?;
+        conn.execute(
+            "INSERT INTO embedding_jobs (
+                event_id, unit_id, job_type, priority, status,
+                attempt_count, next_attempt_at, last_error, created_at, updated_at
+             ) VALUES ('evt-pending', NULL, 'segment', 10, 'pending', 1, 789, 'z', ?, ?)",
+            params![now, stale_updated],
+        )?;
+
+        let requeued = requeue_stale_running_embedding_jobs(&conn, 900)?;
+        assert_eq!(requeued, 1);
+
+        let stale_status: String = conn.query_row(
+            "SELECT status FROM embedding_jobs WHERE event_id = 'evt-stale'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stale_status, "pending");
+        let stale_next_attempt: Option<i64> = conn.query_row(
+            "SELECT next_attempt_at FROM embedding_jobs WHERE event_id = 'evt-stale'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(stale_next_attempt.is_none());
+
+        let fresh_status: String = conn.query_row(
+            "SELECT status FROM embedding_jobs WHERE event_id = 'evt-fresh'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(fresh_status, "running");
+
+        let pending_status: String = conn.query_row(
+            "SELECT status FROM embedding_jobs WHERE event_id = 'evt-pending'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pending_status, "pending");
+
+        Ok(())
+    }
+
+    #[test]
     fn freshness_path_indexes_new_transcript() -> Result<()> {
         let mut conn = Connection::open_in_memory()?;
         init_zumblezay_db(&mut conn)?;
@@ -2149,6 +2410,92 @@ mod tests {
         let hits = search_events_hybrid(&conn, "child lunch", &filters, 10)?;
         assert!(!hits.is_empty());
         assert_eq!(hits[0].event_id, "evt-fresh");
+
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_jobs_async_fanout_has_bounded_parallelism() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        init_zumblezay_db(&mut conn)?;
+
+        let total_jobs = 9usize;
+        let concurrency = 3usize;
+        let now = chrono::Utc::now().timestamp();
+
+        for idx in 0..total_jobs {
+            let unit_id = format!("evt-par:segment:{idx}");
+            let content = format!("segment text {idx}");
+            conn.execute(
+                "INSERT INTO transcript_units (
+                    unit_id, event_id, unit_type, segment_strategy,
+                    start_ms, end_ms, content_text, content_hash, content_version,
+                    created_at, updated_at
+                 ) VALUES (?, 'evt-par', 'segment', ?, ?, ?, ?, ?, 1, ?, ?)",
+                params![
+                    unit_id,
+                    ACTIVE_SEGMENT_STRATEGY,
+                    (idx as i64) * 1000,
+                    (idx as i64) * 1000 + 900,
+                    content,
+                    format!("hash-{idx}"),
+                    now,
+                    now
+                ],
+            )?;
+            conn.execute(
+                "INSERT INTO embedding_jobs (
+                    event_id, unit_id, job_type, priority, status,
+                    attempt_count, next_attempt_at, created_at, updated_at
+                 ) VALUES ('evt-par', ?, 'segment', 100, 'pending', 0, NULL, ?, ?)",
+                params![unit_id, now, now],
+            )?;
+        }
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak_in_flight = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn BedrockClientTrait> =
+            Arc::new(TrackingBedrockClient::new(
+                in_flight.clone(),
+                peak_in_flight.clone(),
+                Duration::from_millis(40),
+            ));
+
+        let processed =
+            process_pending_embedding_jobs_embeddings_only_with_client_and_concurrency(
+                &conn,
+                total_jobs,
+                concurrency,
+                Some(client),
+            )?;
+        assert_eq!(processed, total_jobs);
+
+        let done_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM embedding_jobs
+             WHERE event_id = 'evt-par' AND status = 'done'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(done_count, total_jobs as i64);
+
+        let unfinished_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM embedding_jobs
+             WHERE event_id = 'evt-par' AND status != 'done'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(unfinished_count, 0);
+
+        let peak = peak_in_flight.load(Ordering::SeqCst);
+        assert!(
+            peak >= 2,
+            "expected fan-out concurrency of at least 2, got {peak}"
+        );
+        assert!(
+            peak <= concurrency,
+            "expected bounded fan-out <= {concurrency}, got {peak}"
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
 
         Ok(())
     }
