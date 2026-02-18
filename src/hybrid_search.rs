@@ -1641,12 +1641,9 @@ fn embed_text(
         i32::try_from(dim).context("embedding dimension too large")?;
 
     let run_call = move || -> Result<EmbeddingCallResult> {
-        let response = bedrock_embedding_runtime().block_on(client.embed_text(
-            &model_id,
-            &text_owned,
-            dim_i32,
-            purpose,
-        ))?;
+        let response = bedrock_embedding_runtime().block_on(
+            client.embed_text(&model_id, &text_owned, dim_i32, purpose),
+        )?;
         if response.embedding.len() != dim {
             return Err(anyhow::anyhow!(
                 "bedrock embedding dimension mismatch: expected {}, got {}",
@@ -1696,9 +1693,7 @@ async fn embed_text_async(
     let model_id = ACTIVE_PROVIDER_MODEL_ID.to_string();
     let dim_i32 =
         i32::try_from(dim).context("embedding dimension too large")?;
-    let response = client
-        .embed_text(&model_id, text, dim_i32, purpose)
-        .await?;
+    let response = client.embed_text(&model_id, text, dim_i32, purpose).await?;
     if response.embedding.len() != dim {
         return Err(anyhow::anyhow!(
             "bedrock embedding dimension mismatch: expected {}, got {}",
@@ -2007,9 +2002,7 @@ fn hash_hex(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bedrock::{
-        BedrockCompletionResponse, BedrockEmbeddingResponse,
-    };
+    use crate::bedrock::{BedrockCompletionResponse, BedrockEmbeddingResponse};
     use crate::init_zumblezay_db;
     use anyhow::anyhow;
     use async_trait::async_trait;
@@ -2048,8 +2041,7 @@ mod tests {
 
         fn record_peak(&self, now_in_flight: usize) {
             loop {
-                let prior =
-                    self.peak_in_flight.load(Ordering::Relaxed);
+                let prior = self.peak_in_flight.load(Ordering::Relaxed);
                 if now_in_flight <= prior {
                     break;
                 }
@@ -2089,9 +2081,7 @@ mod tests {
             _max_tokens: i32,
             _on_delta: &mut (dyn FnMut(String) + Send),
         ) -> Result<BedrockCompletionResponse> {
-            Err(anyhow!(
-                "complete_text_streaming not used by this test"
-            ))
+            Err(anyhow!("complete_text_streaming not used by this test"))
         }
 
         async fn embed_text(

@@ -2410,9 +2410,7 @@ async fn drain_embedding_jobs_loop(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
     let mut last_stale_recovery = tokio::time::Instant::now()
-        - Duration::from_secs(
-            STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
-        );
+        - Duration::from_secs(STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS);
     info!(
         "Starting embedding queue drain loop with {}s interval, batch_size={}, concurrency={}",
         interval.as_secs_f64(),
@@ -2504,9 +2502,7 @@ async fn drain_embedding_backfill_jobs_loop(
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
     let mut last_stale_recovery = tokio::time::Instant::now()
-        - Duration::from_secs(
-            STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS,
-        );
+        - Duration::from_secs(STALE_RUNNING_EMBEDDING_RECOVERY_INTERVAL_SECS);
     info!(
         "Starting embedding backfill queue drain loop with {}s interval, batch_size={}, concurrency={}",
         interval.as_secs_f64(),
@@ -3441,7 +3437,9 @@ async fn create_chat_message(
                     |_| Ok(1_i64),
                 )
                 .optional()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?
                 .is_some();
             if !exists {
                 AttemptOutcome::Fatal((
@@ -3662,8 +3660,7 @@ async fn stream_chat_run(
                 };
                 let mut replay_has_terminal_event = false;
                 for event in replay_events {
-                    if event.event_type == "done"
-                        || event.event_type == "error"
+                    if event.event_type == "done" || event.event_type == "error"
                     {
                         replay_has_terminal_event = true;
                     }
@@ -3737,9 +3734,12 @@ async fn stream_chat_run(
                     Some((status, error, _final_response_json))
                         if status == "error" =>
                     {
-                        let _ = tx.send(Ok(SseEvent::default()
-                            .event("error")
-                            .data(error.unwrap_or_else(|| "run failed".to_string()))));
+                        let _ =
+                            tx.send(Ok(SseEvent::default()
+                                .event("error")
+                                .data(error.unwrap_or_else(|| {
+                                    "run failed".to_string()
+                                }))));
                     }
                     Some((_status, _error, _final_response_json)) => {
                         let _ = tx.send(Ok(SseEvent::default()

@@ -2009,10 +2009,7 @@ async fn test_chat_run_stream_returns_error_for_orphaned_active_run() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/api/chats/{}/runs/{}/stream",
-                    chat_id, run_id
-                ))
+                .uri(format!("/api/chats/{}/runs/{}/stream", chat_id, run_id))
                 .body(Body::empty())
                 .unwrap(),
         )
