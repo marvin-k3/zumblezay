@@ -180,6 +180,69 @@
         padding: 0.8rem;
         text-align: center;
     }
+    .trace-kv {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-bottom: 0.55rem;
+    }
+    .trace-kv .badge {
+        font-weight: 500;
+    }
+    .trace-clip-list {
+        display: grid;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+    }
+    .trace-clip-card {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        background: var(--bs-secondary-bg);
+        padding: 0.55rem 0.6rem;
+    }
+    .trace-clip-title {
+        font-size: 0.85rem;
+        font-weight: 700;
+        line-height: 1.25;
+    }
+    .trace-clip-meta {
+        margin-top: 0.2rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+    }
+    .trace-clip-snippet {
+        margin-top: 0.45rem;
+        white-space: pre-wrap;
+        font-size: 0.82rem;
+        line-height: 1.35;
+        color: var(--bs-body-color);
+    }
+    .trace-tool-list {
+        display: grid;
+        gap: 0.45rem;
+        margin-bottom: 0.75rem;
+    }
+    .trace-tool-item {
+        border: 1px solid var(--bs-border-color);
+        border-radius: 8px;
+        background: var(--bs-secondary-bg);
+        padding: 0.45rem 0.55rem;
+    }
+    .trace-tool-title {
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+    .trace-tool-meta {
+        font-size: 0.76rem;
+        color: var(--bs-secondary-color);
+        margin-top: 0.15rem;
+    }
+    .trace-tool-message {
+        font-size: 0.82rem;
+        margin-top: 0.25rem;
+        white-space: pre-wrap;
+    }
     .chat-messages {
         flex: 1;
         overflow-y: auto;
@@ -1029,6 +1092,229 @@
         return details;
     }
 
+    function formatScore(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+        return value.toFixed(4);
+    }
+
+    function makeTraceBadge(label, value, variant = "light") {
+        const badge = document.createElement("span");
+        badge.className = `badge text-bg-${variant} border`;
+        badge.textContent = `${label}: ${value}`;
+        return badge;
+    }
+
+    function latestRunEvent(runId, eventType) {
+        if (!runId) return null;
+        for (let i = traceEvents.length - 1; i >= 0; i -= 1) {
+            const candidate = traceEvents[i];
+            if (candidate.run_id === runId && candidate.event_type === eventType) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    function getRunToolEvents(runId) {
+        if (!runId) return [];
+        return traceEvents.filter((event) => (
+            event.run_id === runId
+            && ["search_plan", "tool_call", "tool_result"].includes(event.event_type)
+        ));
+    }
+
+    function renderRunToolHistory(container, runId) {
+        const toolEvents = getRunToolEvents(runId);
+        if (toolEvents.length === 0) return;
+
+        const title = document.createElement("div");
+        title.className = "fw-semibold mb-2";
+        title.textContent = "Tool activity";
+        container.appendChild(title);
+
+        const list = document.createElement("div");
+        list.className = "trace-tool-list";
+
+        for (const eventItem of toolEvents) {
+            const item = document.createElement("div");
+            item.className = "trace-tool-item";
+
+            const payload = eventItem.payload || {};
+            const titleNode = document.createElement("div");
+            titleNode.className = "trace-tool-title";
+            if (eventItem.event_type === "search_plan") {
+                titleNode.textContent = "search_plan";
+            } else {
+                const toolName = payload.tool_name || "tool";
+                const stage = payload.stage || (eventItem.event_type === "tool_call" ? "started" : "result");
+                titleNode.textContent = `${toolName} (${stage})`;
+            }
+            item.appendChild(titleNode);
+
+            const meta = document.createElement("div");
+            meta.className = "trace-tool-meta";
+            meta.textContent = formatRelative(eventItem.created_at);
+            item.appendChild(meta);
+
+            if (eventItem.event_type === "search_plan") {
+                const queries = Array.isArray(payload.search_queries) ? payload.search_queries : [];
+                const line = document.createElement("div");
+                line.className = "trace-tool-message";
+                line.textContent = `queries: ${queries.length ? queries.join(", ") : "(none)"}`;
+                item.appendChild(line);
+
+                const windowLine = document.createElement("div");
+                windowLine.className = "trace-tool-message";
+                windowLine.textContent = `window: ${payload.time_window_start_utc || "?"} -> ${payload.time_window_end_utc || "?"}`;
+                item.appendChild(windowLine);
+            } else if (payload.message) {
+                const msg = document.createElement("div");
+                msg.className = "trace-tool-message";
+                msg.textContent = payload.message;
+                item.appendChild(msg);
+            }
+
+            list.appendChild(item);
+        }
+
+        container.appendChild(list);
+    }
+
+    function buildClipMedia(item, card) {
+        if (!item.event_id) return;
+        const eventDurationSeconds = getEventDurationSeconds(item);
+
+        const body = document.createElement("div");
+        body.className = "evidence-body mt-2";
+
+        const preview = document.createElement("div");
+        preview.className = "evidence-preview";
+        preview.dataset.eventId = item.event_id;
+        preview.dataset.previewTime = Number.isFinite(Number(item.start_offset_sec))
+            ? String(Math.max(0, Number(item.start_offset_sec)))
+            : "0";
+        preview.innerHTML = `<img src="/api/storyboard/image/${encodeURIComponent(item.event_id)}" alt="Video preview">`;
+        body.appendChild(preview);
+        setPreviewFrameForOffset(item.event_id, preview, Number(preview.dataset.previewTime || "0"));
+
+        const textCol = document.createElement("div");
+        textCol.className = "evidence-text";
+        body.appendChild(textCol);
+
+        const actions = document.createElement("div");
+        actions.className = "evidence-actions";
+
+        const playButton = document.createElement("button");
+        playButton.type = "button";
+        playButton.className = "btn btn-sm btn-primary";
+        playButton.textContent = "Play here";
+        actions.appendChild(playButton);
+
+        const link = document.createElement("a");
+        link.href = `/events/latest?video=${encodeURIComponent(item.event_id)}`;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "evidence-link btn btn-sm btn-outline-primary";
+        link.textContent = "Open video";
+        actions.appendChild(link);
+        textCol.appendChild(actions);
+
+        const inlinePlayer = document.createElement("div");
+        inlinePlayer.className = "evidence-inline-player";
+        const video = document.createElement("video");
+        video.controls = true;
+        video.preload = "metadata";
+        inlinePlayer.appendChild(video);
+        textCol.appendChild(inlinePlayer);
+
+        playButton.addEventListener("click", () => {
+            const isOpen = inlinePlayer.classList.contains("open");
+            if (isOpen) {
+                video.pause();
+                inlinePlayer.classList.remove("open");
+                playButton.textContent = "Play here";
+                return;
+            }
+
+            const startAt = Number.isFinite(Number(item.start_offset_sec))
+                ? Math.max(0, Number(item.start_offset_sec))
+                : 0;
+            inlinePlayer.classList.add("open");
+            playButton.textContent = "Hide player";
+
+            if (!video.src) {
+                video.src = `/video/${encodeURIComponent(item.event_id)}`;
+            }
+            const seekAndPlay = () => {
+                video.currentTime = startAt;
+                video.play().catch(() => {});
+            };
+            if (video.readyState >= 1) {
+                seekAndPlay();
+            } else {
+                video.addEventListener("loadedmetadata", seekAndPlay, { once: true });
+            }
+        });
+
+        preview.addEventListener("mouseenter", () => {
+            startPreview(item.event_id, card, eventDurationSeconds);
+        });
+        preview.addEventListener("mouseleave", () => {
+            stopPreview(card);
+        });
+
+        card.appendChild(body);
+    }
+
+    function renderClipList(container, clips, options = {}) {
+        const title = document.createElement("div");
+        title.className = "fw-semibold mb-2";
+        title.textContent = options.title || `Clips (${clips.length})`;
+        container.appendChild(title);
+
+        const list = document.createElement("div");
+        list.className = "trace-clip-list";
+
+        for (const clip of clips) {
+            const card = document.createElement("article");
+            card.className = "trace-clip-card";
+
+            const startLocal = clip.event_start_local || clip.start_local || "";
+            const endLocal = clip.event_end_local || clip.end_local || "";
+            const cameraId = clip.camera_id || "unknown";
+            const titleNode = document.createElement("div");
+            titleNode.className = "trace-clip-title";
+            titleNode.textContent = `${prettifyCameraLabel(cameraId)} | ${startLocal || "time unknown"}${endLocal ? ` -> ${endLocal}` : ""}`;
+            card.appendChild(titleNode);
+
+            const meta = document.createElement("div");
+            meta.className = "trace-clip-meta";
+            if (clip.event_id) meta.appendChild(makeTraceBadge("event", clip.event_id, "light"));
+            if (typeof clip.rank_score === "number") {
+                meta.appendChild(makeTraceBadge("retrieval", formatScore(clip.rank_score), "info"));
+            }
+            if (typeof clip.relevance_score === "number") {
+                meta.appendChild(makeTraceBadge("rerank", formatScore(clip.relevance_score), "primary"));
+            }
+            if (typeof clip.final_rank_score === "number") {
+                meta.appendChild(makeTraceBadge("final", formatScore(clip.final_rank_score), "success"));
+            }
+            card.appendChild(meta);
+
+            const snippet = clip.snippet || clip.transcript || clip.text || "";
+            const snippetNode = document.createElement("div");
+            snippetNode.className = "trace-clip-snippet";
+            snippetNode.textContent = snippet || "(no transcript snippet in trace payload)";
+            card.appendChild(snippetNode);
+
+            buildClipMedia(clip, card);
+
+            list.appendChild(card);
+        }
+
+        container.appendChild(list);
+    }
+
     function renderTraceDetail(eventItem) {
         traceDetail.innerHTML = "";
         if (!eventItem) {
@@ -1040,6 +1326,66 @@
         title.className = "fw-semibold mb-2";
         title.textContent = `${eventItem.event_type} • ${formatRelative(eventItem.created_at)}`;
         traceDetail.appendChild(title);
+
+        if (["search_results_raw", "search_results_pruned", "rerank_output"].includes(eventItem.event_type)) {
+            renderRunToolHistory(traceDetail, eventItem.run_id);
+        }
+
+        if (eventItem.event_type === "search_results_pruned" && Array.isArray(eventItem.payload)) {
+            renderClipList(traceDetail, eventItem.payload, {
+                title: `Candidate clips (${eventItem.payload.length})`,
+            });
+        } else if (eventItem.event_type === "rerank_output") {
+            const finalCandidates = Array.isArray(eventItem.payload?.final_candidates)
+                ? eventItem.payload.final_candidates
+                : [];
+            const topResults = Array.isArray(eventItem.payload?.debug?.top_results)
+                ? eventItem.payload.debug.top_results
+                : [];
+            const rerankByEventId = new Map(topResults.map((item) => [item.event_id, item.relevance_score]));
+            const prunedEvent = latestRunEvent(eventItem.run_id, "search_results_pruned");
+            const clipByEventId = new Map(
+                (Array.isArray(prunedEvent?.payload) ? prunedEvent.payload : [])
+                    .map((clip) => [clip.event_id, clip]),
+            );
+            const merged = finalCandidates.map((item) => {
+                const clip = clipByEventId.get(item.event_id) || {};
+                return {
+                    ...clip,
+                    event_id: item.event_id,
+                    final_rank_score: item.final_rank_score,
+                    relevance_score: rerankByEventId.get(item.event_id),
+                };
+            });
+            renderClipList(traceDetail, merged, {
+                title: `Final ranked clips (${merged.length})`,
+            });
+        } else if (eventItem.event_type === "search_results_raw" && eventItem.payload && typeof eventItem.payload === "object") {
+            const entries = Object.entries(eventItem.payload);
+            const summary = document.createElement("div");
+            summary.className = "trace-kv";
+            summary.appendChild(makeTraceBadge("queries", entries.length, "light"));
+            const totalHits = entries.reduce((sum, [, hits]) => (
+                sum + (Array.isArray(hits) ? hits.length : 0)
+            ), 0);
+            summary.appendChild(makeTraceBadge("raw hits", totalHits, "light"));
+            traceDetail.appendChild(summary);
+        } else if (eventItem.event_type === "search_plan") {
+            renderRunToolHistory(traceDetail, eventItem.run_id);
+        } else if (eventItem.event_type === "tool_call" || eventItem.event_type === "tool_result") {
+            const payload = eventItem.payload || {};
+            const summary = document.createElement("div");
+            summary.className = "trace-kv";
+            summary.appendChild(makeTraceBadge("tool", payload.tool_name || "unknown", "light"));
+            summary.appendChild(makeTraceBadge("stage", payload.stage || (eventItem.event_type === "tool_call" ? "started" : "result"), "light"));
+            traceDetail.appendChild(summary);
+            if (payload.message) {
+                const msg = document.createElement("div");
+                msg.className = "trace-tool-message mb-2";
+                msg.textContent = payload.message;
+                traceDetail.appendChild(msg);
+            }
+        }
 
         const details = document.createElement("details");
         details.open = false;
@@ -1068,27 +1414,6 @@
             traceSummary.textContent = `${traceEvents.length} events`;
         }
 
-        const latestRaw = [...traceEvents].reverse().find((event) => event.event_type === "search_results_raw");
-        const latestPruned = [...traceEvents].reverse().find((event) => event.event_type === "search_results_pruned");
-        const latestRerankInput = [...traceEvents].reverse().find((event) => event.event_type === "rerank_input");
-        const latestRerankOutput = [...traceEvents].reverse().find((event) => event.event_type === "rerank_output");
-        if (latestRaw && latestPruned) {
-            traceDetail.appendChild(buildTraceDiffSection(
-                "search_results_raw",
-                latestRaw.payload,
-                "search_results_pruned",
-                latestPruned.payload,
-            ));
-        }
-        if (latestRerankInput && latestRerankOutput) {
-            traceDetail.appendChild(buildTraceDiffSection(
-                "rerank_input",
-                latestRerankInput.payload,
-                "rerank_output",
-                latestRerankOutput.payload,
-            ));
-        }
-
         for (const eventItem of traceEvents) {
             const row = document.createElement("button");
             row.type = "button";
@@ -1096,8 +1421,18 @@
             if (selectedTraceEventId === eventItem.id) {
                 row.classList.add("active");
             }
+            const payload = eventItem.payload || {};
+            let typeLabel = eventItem.event_type;
+            if (eventItem.event_type === "tool_call" || eventItem.event_type === "tool_result") {
+                const toolName = payload.tool_name || "tool";
+                const stage = payload.stage || (eventItem.event_type === "tool_call" ? "started" : "result");
+                typeLabel = `${eventItem.event_type}: ${toolName} (${stage})`;
+            } else if (eventItem.event_type === "search_plan") {
+                const queryCount = Array.isArray(payload.search_queries) ? payload.search_queries.length : 0;
+                typeLabel = `search_plan: ${queryCount} queries`;
+            }
             row.innerHTML = `
-                <div class="trace-item-type">${escapeHtml(eventItem.event_type)}</div>
+                <div class="trace-item-type">${escapeHtml(typeLabel)}</div>
                 <div class="trace-item-meta">${escapeHtml(formatRelative(eventItem.created_at))} • ${escapeHtml(eventItem.run_id)}</div>
             `;
             row.addEventListener("click", () => {
